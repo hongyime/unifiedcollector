@@ -111,7 +111,7 @@ depth never exceeds 24 h of production data.
 ## 4. Explicit rejections
 
 The following options don't fit unifiedcollector's operator model — solo
-operator (bryan), docker-compose only, no ops team, one Postgres, no JVM in
+operator (the maintainer), docker-compose only, no ops team, one Postgres, no JVM in
 the stack. They are documented here so future iterations don't rediscover the
 same reasons.
 
@@ -214,3 +214,5 @@ Every option in the accepted set (1, 5, 2) is rollback-safe:
 - Option 1: revert batching commit, revert consumer concurrency, re-enable inline archive. Ceiling returns to today's 0.26/s but no data lost.
 - Option 5: stop the merger, disable the staging producer, drain staging via a one-off merge run, drop staging table. Data path returns to option 1.
 - Option 2: re-enable the RabbitMQ contacts path, disable the bridge's direct-write codepath. Bridge crash-loss window closes on rollback.
+
+Machine-specific values in this document use privacy placeholders.

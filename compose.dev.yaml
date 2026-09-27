@@ -1,0 +1,870 @@
+# Standalone development; worker and account integrations require explicit profiles.
+name: unifiedcollector-dev
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    init: true
+    environment:
+      POSTGRES_DB: unifiedcollector
+      POSTGRES_USER: collector
+      POSTGRES_PASSWORD: development
+    volumes:
+    - dev-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U collector -d unifiedcollector"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+  db-init:
+    image: unifiedcollector-app-dev:local
+    pull_policy: never
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: dev
+    init: true
+    restart: 'no'
+    environment:
+      DATABASE_URL: postgresql://collector:development@postgres:5432/unifiedcollector
+      POSTGRES_SSL_MODE: disable
+      PYTHONDONTWRITEBYTECODE: '1'
+    volumes:
+    - ./src:/app/src:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command:
+    - python
+    - -c
+    - |
+      import asyncio
+      from src.db.connection import get_pool, close_pool
+      from src.db.migrate import apply_all
+      async def initialize():
+          pool = await get_pool()
+          try:
+              result = await apply_all(pool)
+              if result.get('deferred') or not result.get('schemas'):
+                  raise RuntimeError('Development schema initialization did not complete')
+          finally:
+              await close_pool()
+      asyncio.run(initialize())
+  redis:
+    image: redis:7-alpine
+    volumes:
+    - dev-redis:/data
+  rabbitmq:
+    image: rabbitmq:3.13-alpine
+    volumes:
+    - dev-rabbitmq:/var/lib/rabbitmq
+  collector:
+    image: unifiedcollector-app-dev:local
+    pull_policy: never
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: dev
+    init: true
+    env_file:
+    - path: .env.dev
+      required: false
+    environment:
+      DATABASE_URL: postgresql://collector:development@postgres:5432/unifiedcollector
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      WATCHFILES_FORCE_POLLING: 'true'
+      WATCHFILES_POLL_DELAY_MS: '500'
+      PYTHONDONTWRITEBYTECODE: '1'
+    volumes:
+    - ./src:/app/src:ro
+    - ./config:/app/config:ro
+    - dev-data:/app/data
+    - dev-sessions:/app/sessions
+    depends_on:
+    - postgres
+    - redis
+    - rabbitmq
+    command:
+    - watchfiles
+    - --target-type
+    - command
+    - python -m src.main worker --all
+    - /app/src
+    - /app/config
+    profiles:
+    - workers
+  collector_spiderfoot:
+    image: unifiedcollector-spiderfoot-dev:local
+    pull_policy: never
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.spiderfoot
+      target: dev
+    init: true
+    env_file:
+    - path: .env.dev
+      required: false
+    environment:
+      DATABASE_URL: postgresql://collector:development@postgres:5432/unifiedcollector
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      WATCHFILES_FORCE_POLLING: 'true'
+      WATCHFILES_POLL_DELAY_MS: '500'
+      PYTHONDONTWRITEBYTECODE: '1'
+    volumes:
+    - ./src:/app/src:ro
+    - ./config:/app/config:ro
+    - dev-data:/app/data
+    - dev-sessions:/app/sessions
+    depends_on:
+    - postgres
+    - redis
+    - rabbitmq
+    command:
+    - watchfiles
+    - --target-type
+    - command
+    - python -m src.recon_spiderfoot_service --poll-interval ${RECON_SPIDERFOOT_POLL_INTERVAL:-10}
+      --workers ${RECON_SPIDERFOOT_WORKERS:-2}
+    - /app/src
+    - /app/config
+    profiles:
+    - recon
+  collector_youtube:
+    image: unifiedcollector-app-dev:local
+    pull_policy: never
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: dev
+    init: true
+    env_file:
+    - path: .env.dev
+      required: false
+    environment:
+      DATABASE_URL: postgresql://collector:development@postgres:5432/unifiedcollector
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      WATCHFILES_FORCE_POLLING: 'true'
+      WATCHFILES_POLL_DELAY_MS: '500'
+      PYTHONDONTWRITEBYTECODE: '1'
+    volumes:
+    - ./src:/app/src:ro
+    - ./config:/app/config:ro
+    - dev-data:/app/data
+    - dev-sessions:/app/sessions
+    depends_on:
+    - postgres
+    - redis
+    - rabbitmq
+    command:
+    - watchfiles
+    - --target-type
+    - command
+    - python -m src.main worker --source youtube
+    - /app/src
+    - /app/config
+    profiles:
+    - workers
+  collector_tiktok:
+    image: unifiedcollector-app-dev:local
+    pull_policy: never
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: dev
+    init: true
+    env_file:
+    - path: .env.dev
+      required: false
+    environment:
+      DATABASE_URL: postgresql://collector:development@postgres:5432/unifiedcollector
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      WATCHFILES_FORCE_POLLING: 'true'
+      WATCHFILES_POLL_DELAY_MS: '500'
+      PYTHONDONTWRITEBYTECODE: '1'
+    volumes:
+    - ./src:/app/src:ro
+    - ./config:/app/config:ro
+    - dev-data:/app/data
+    - dev-sessions:/app/sessions
+    depends_on:
+    - postgres
+    - redis
+    - rabbitmq
+    command:
+    - watchfiles
+    - --target-type
+    - command
+    - python -m src.main worker --source tiktok
+    - /app/src
+    - /app/config
+    profiles:
+    - workers
+  collector_lowrisk:
+    image: unifiedcollector-app-dev:local
+    pull_policy: never
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: dev
+    init: true
+    env_file:
+    - path: .env.dev
+      required: false
+    environment:
+      DATABASE_URL: postgresql://collector:development@postgres:5432/unifiedcollector
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      WATCHFILES_FORCE_POLLING: 'true'
+      WATCHFILES_POLL_DELAY_MS: '500'
+      PYTHONDONTWRITEBYTECODE: '1'
+    volumes:
+    - ./src:/app/src:ro
+    - ./config:/app/config:ro
+    - dev-data:/app/data
+    - dev-sessions:/app/sessions
+    depends_on:
+    - postgres
+    - redis
+    - rabbitmq
+    command:
+    - watchfiles
+    - --target-type
+    - command
+    - python -m src.main worker --source github,strava,search
+    - /app/src
+    - /app/config
+    profiles:
+    - workers
+  watchdog:
+    image: unifiedcollector-app-dev:local
+    pull_policy: never
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: dev
+    init: true
+    env_file:
+    - path: .env.dev
+      required: false
+    environment:
+      DATABASE_URL: postgresql://collector:development@postgres:5432/unifiedcollector
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      WATCHFILES_FORCE_POLLING: 'true'
+      WATCHFILES_POLL_DELAY_MS: '500'
+      PYTHONDONTWRITEBYTECODE: '1'
+    volumes:
+    - ./src:/app/src:ro
+    - ./config:/app/config:ro
+    - dev-data:/app/data
+    - dev-sessions:/app/sessions
+    depends_on:
+    - postgres
+    - redis
+    - rabbitmq
+    command:
+    - watchfiles
+    - --target-type
+    - command
+    - python -m src.watchdog.freshness
+    - /app/src
+    - /app/config
+    profiles:
+    - workers
+  collector_website:
+    image: unifiedcollector-app-dev:local
+    pull_policy: never
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: dev
+    init: true
+    env_file:
+    - path: .env.dev
+      required: false
+    environment:
+      DATABASE_URL: postgresql://collector:development@postgres:5432/unifiedcollector
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      WATCHFILES_FORCE_POLLING: 'true'
+      WATCHFILES_POLL_DELAY_MS: '500'
+      PYTHONDONTWRITEBYTECODE: '1'
+    volumes:
+    - ./src:/app/src:ro
+    - ./config:/app/config:ro
+    - dev-data:/app/data
+    - dev-sessions:/app/sessions
+    depends_on:
+    - postgres
+    - redis
+    - rabbitmq
+    command:
+    - watchfiles
+    - --target-type
+    - command
+    - python -m src.main worker --source website
+    - /app/src
+    - /app/config
+    profiles:
+    - workers
+  collector_exposure:
+    image: unifiedcollector-app-dev:local
+    pull_policy: never
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: dev
+    init: true
+    env_file:
+    - path: .env.dev
+      required: false
+    environment:
+      DATABASE_URL: postgresql://collector:development@postgres:5432/unifiedcollector
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      WATCHFILES_FORCE_POLLING: 'true'
+      WATCHFILES_POLL_DELAY_MS: '500'
+      PYTHONDONTWRITEBYTECODE: '1'
+    volumes:
+    - ./src:/app/src:ro
+    - ./config:/app/config:ro
+    - dev-data:/app/data
+    - dev-sessions:/app/sessions
+    depends_on:
+    - postgres
+    - redis
+    - rabbitmq
+    command:
+    - watchfiles
+    - --target-type
+    - command
+    - python -m src.main worker --source exposure
+    - /app/src
+    - /app/config
+    profiles:
+    - workers
+  collector_lemon8:
+    image: unifiedcollector-app-dev:local
+    pull_policy: never
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: dev
+    init: true
+    env_file:
+    - path: .env.dev
+      required: false
+    environment:
+      DATABASE_URL: postgresql://collector:development@postgres:5432/unifiedcollector
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      WATCHFILES_FORCE_POLLING: 'true'
+      WATCHFILES_POLL_DELAY_MS: '500'
+      PYTHONDONTWRITEBYTECODE: '1'
+    volumes:
+    - ./src:/app/src:ro
+    - ./config:/app/config:ro
+    - dev-data:/app/data
+    - dev-sessions:/app/sessions
+    depends_on:
+    - postgres
+    - redis
+    - rabbitmq
+    command:
+    - watchfiles
+    - --target-type
+    - command
+    - python -m src.main worker --source lemon8
+    - /app/src
+    - /app/config
+    profiles:
+    - workers
+  collector_telegram:
+    image: unifiedcollector-app-dev:local
+    pull_policy: never
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: dev
+    init: true
+    env_file:
+    - path: .env.dev
+      required: false
+    environment:
+      DATABASE_URL: postgresql://collector:development@postgres:5432/unifiedcollector
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      WATCHFILES_FORCE_POLLING: 'true'
+      WATCHFILES_POLL_DELAY_MS: '500'
+      PYTHONDONTWRITEBYTECODE: '1'
+    volumes:
+    - ./src:/app/src:ro
+    - ./config:/app/config:ro
+    - dev-data:/app/data
+    - dev-sessions:/app/sessions
+    depends_on:
+    - postgres
+    - redis
+    - rabbitmq
+    command:
+    - watchfiles
+    - --target-type
+    - command
+    - python -m src.main worker --source telegram
+    - /app/src
+    - /app/config
+    profiles:
+    - workers
+  collector_beeper:
+    image: unifiedcollector-app-dev:local
+    pull_policy: never
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: dev
+    init: true
+    env_file:
+    - path: .env.dev
+      required: false
+    environment:
+      DATABASE_URL: postgresql://collector:development@postgres:5432/unifiedcollector
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      WATCHFILES_FORCE_POLLING: 'true'
+      WATCHFILES_POLL_DELAY_MS: '500'
+      PYTHONDONTWRITEBYTECODE: '1'
+    volumes:
+    - ./src:/app/src:ro
+    - ./config:/app/config:ro
+    - dev-data:/app/data
+    - dev-sessions:/app/sessions
+    depends_on:
+    - postgres
+    - redis
+    - rabbitmq
+    command:
+    - watchfiles
+    - --target-type
+    - command
+    - python -m src.main worker --source beeper
+    - /app/src
+    - /app/config
+    profiles:
+    - workers
+  collector_whatsapp:
+    image: unifiedcollector-app-dev:local
+    pull_policy: never
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: dev
+    init: true
+    env_file:
+    - path: .env.dev
+      required: false
+    environment:
+      DATABASE_URL: postgresql://collector:development@postgres:5432/unifiedcollector
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      WATCHFILES_FORCE_POLLING: 'true'
+      WATCHFILES_POLL_DELAY_MS: '500'
+      PYTHONDONTWRITEBYTECODE: '1'
+    volumes:
+    - ./src:/app/src:ro
+    - ./config:/app/config:ro
+    - dev-data:/app/data
+    - dev-sessions:/app/sessions
+    depends_on:
+    - postgres
+    - redis
+    - rabbitmq
+    command:
+    - watchfiles
+    - --target-type
+    - command
+    - python -m src.main worker --source whatsapp
+    - /app/src
+    - /app/config
+    profiles:
+    - workers
+  collector_instagram:
+    image: unifiedcollector-app-dev:local
+    pull_policy: never
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: dev
+    init: true
+    env_file:
+    - path: .env.dev
+      required: false
+    environment:
+      DATABASE_URL: postgresql://collector:development@postgres:5432/unifiedcollector
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      WATCHFILES_FORCE_POLLING: 'true'
+      WATCHFILES_POLL_DELAY_MS: '500'
+      PYTHONDONTWRITEBYTECODE: '1'
+    volumes:
+    - ./src:/app/src:ro
+    - ./config:/app/config:ro
+    - dev-data:/app/data
+    - dev-sessions:/app/sessions
+    depends_on:
+    - postgres
+    - redis
+    - rabbitmq
+    command:
+    - watchfiles
+    - --target-type
+    - command
+    - python -m src.main worker --source instagram
+    - /app/src
+    - /app/config
+    profiles:
+    - workers
+  collector_instagram_dm:
+    image: unifiedcollector-app-dev:local
+    pull_policy: never
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: dev
+    init: true
+    env_file:
+    - path: .env.dev
+      required: false
+    environment:
+      DATABASE_URL: postgresql://collector:development@postgres:5432/unifiedcollector
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      WATCHFILES_FORCE_POLLING: 'true'
+      WATCHFILES_POLL_DELAY_MS: '500'
+      PYTHONDONTWRITEBYTECODE: '1'
+    volumes:
+    - ./src:/app/src:ro
+    - ./config:/app/config:ro
+    - dev-data:/app/data
+    - dev-sessions:/app/sessions
+    depends_on:
+    - postgres
+    - redis
+    - rabbitmq
+    command:
+    - watchfiles
+    - --target-type
+    - command
+    - python -m src.main worker --source instagram_dm
+    - /app/src
+    - /app/config
+    profiles:
+    - workers
+  ig_ingest:
+    image: unifiedcollector-app-dev:local
+    pull_policy: never
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: dev
+    init: true
+    env_file:
+    - path: .env.dev
+      required: false
+    environment:
+      DATABASE_URL: postgresql://collector:development@postgres:5432/unifiedcollector
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      WATCHFILES_FORCE_POLLING: 'true'
+      WATCHFILES_POLL_DELAY_MS: '500'
+      PYTHONDONTWRITEBYTECODE: '1'
+    volumes:
+    - ./src:/app/src:ro
+    - ./config:/app/config:ro
+    - dev-data:/app/data
+    - dev-sessions:/app/sessions
+    depends_on:
+    - postgres
+    - redis
+    - rabbitmq
+    command:
+    - watchfiles
+    - --target-type
+    - command
+    - python -m src.bridges.ig_ingest
+    - /app/src
+    - /app/config
+    profiles:
+    - workers
+  scheduler:
+    image: unifiedcollector-app-dev:local
+    pull_policy: never
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: dev
+    init: true
+    env_file:
+    - path: .env.dev
+      required: false
+    environment:
+      DATABASE_URL: postgresql://collector:development@postgres:5432/unifiedcollector
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      WATCHFILES_FORCE_POLLING: 'true'
+      WATCHFILES_POLL_DELAY_MS: '500'
+      PYTHONDONTWRITEBYTECODE: '1'
+    volumes:
+    - ./src:/app/src:ro
+    - ./config:/app/config:ro
+    - dev-data:/app/data
+    - dev-sessions:/app/sessions
+    depends_on:
+    - postgres
+    - redis
+    - rabbitmq
+    command:
+    - watchfiles
+    - --target-type
+    - command
+    - python -m src.main scheduler
+    - /app/src
+    - /app/config
+    profiles:
+    - workers
+  onboard_bot:
+    image: unifiedcollector-app-dev:local
+    pull_policy: never
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: dev
+    init: true
+    env_file:
+    - path: .env.dev
+      required: false
+    environment:
+      DATABASE_URL: postgresql://collector:development@postgres:5432/unifiedcollector
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      WATCHFILES_FORCE_POLLING: 'true'
+      WATCHFILES_POLL_DELAY_MS: '500'
+      PYTHONDONTWRITEBYTECODE: '1'
+    volumes:
+    - ./src:/app/src:ro
+    - ./config:/app/config:ro
+    - dev-data:/app/data
+    - dev-sessions:/app/sessions
+    depends_on:
+    - postgres
+    - redis
+    - rabbitmq
+    command:
+    - watchfiles
+    - --target-type
+    - command
+    - python -m src.bots.onboard_bot
+    - /app/src
+    - /app/config
+    profiles:
+    - workers
+  realtime_feed:
+    image: unifiedcollector-app-dev:local
+    pull_policy: never
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: dev
+    init: true
+    env_file:
+    - path: .env.dev
+      required: false
+    environment:
+      DATABASE_URL: postgresql://collector:development@postgres:5432/unifiedcollector
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      WATCHFILES_FORCE_POLLING: 'true'
+      WATCHFILES_POLL_DELAY_MS: '500'
+      PYTHONDONTWRITEBYTECODE: '1'
+    volumes:
+    - ./src:/app/src:ro
+    - ./config:/app/config:ro
+    - dev-data:/app/data
+    - dev-sessions:/app/sessions
+    depends_on:
+    - postgres
+    - redis
+    - rabbitmq
+    command:
+    - watchfiles
+    - --target-type
+    - command
+    - python -m src.notifications.realtime_feed
+    - /app/src
+    - /app/config
+    profiles:
+    - workers
+  dashboard:
+    image: unifiedcollector-app-dev:local
+    pull_policy: never
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: dev
+    init: true
+    env_file:
+    - path: .env.dev
+      required: false
+    environment:
+      DATABASE_URL: postgresql://collector:development@postgres:5432/unifiedcollector
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      WATCHFILES_FORCE_POLLING: 'true'
+      WATCHFILES_POLL_DELAY_MS: '500'
+      PYTHONDONTWRITEBYTECODE: '1'
+    volumes:
+    - ./src:/app/src:ro
+    - ./config:/app/config:ro
+    - dev-data:/app/data
+    - dev-sessions:/app/sessions
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      rabbitmq:
+        condition: service_started
+      db-init:
+        condition: service_completed_successfully
+    command:
+    - uvicorn
+    - src.dashboard.api:app
+    - --host
+    - 0.0.0.0
+    - --port
+    - '8700'
+    - --reload
+    - --reload-dir
+    - /app/src
+    ports:
+    - 127.0.0.1:8700:8700
+  browser_cookie_vault:
+    image: unifiedcollector-app-dev:local
+    pull_policy: never
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: dev
+    init: true
+    env_file:
+    - path: .env.dev
+      required: false
+    environment:
+      DATABASE_URL: postgresql://collector:development@postgres:5432/unifiedcollector
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      WATCHFILES_FORCE_POLLING: 'true'
+      WATCHFILES_POLL_DELAY_MS: '500'
+      PYTHONDONTWRITEBYTECODE: '1'
+    volumes:
+    - ./src:/app/src:ro
+    - ./config:/app/config:ro
+    - dev-data:/app/data
+    - dev-sessions:/app/sessions
+    depends_on:
+    - postgres
+    - redis
+    - rabbitmq
+    command:
+    - watchfiles
+    - --target-type
+    - command
+    - python -m src.tools.browser_cookie_vault
+    - /app/src
+    - /app/config
+    profiles:
+    - workers
+  frontend:
+    image: unifiedcollector-frontend-dev:local
+    pull_policy: never
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: frontend-dev
+    init: true
+    environment:
+      DEV_API_URL: http://dashboard:8700
+      CHOKIDAR_USEPOLLING: 'true'
+    volumes:
+    - ./src/dashboard/frontend:/app/frontend
+    - /app/frontend/node_modules
+    ports:
+    - 127.0.0.1:5173:5173
+  wa-bridge-1:
+    image: unifiedcollector-wa-dev:local
+    pull_policy: never
+    build:
+      context: ./src/bridges/whatsapp
+      target: dev
+    init: true
+    profiles:
+    - whatsapp
+    env_file:
+    - path: .env.dev
+      required: false
+    environment:
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      TSC_WATCHFILE: PriorityPollingInterval
+      TSC_WATCHDIRECTORY: RecursiveDirectoryUsingFsWatchFile
+      SESSION_NAME: dev-bridge-1
+      AUTH_STORAGE_PATH: /app/auth_info
+      SYNC_FULL_HISTORY: 'false'
+      WHATSAPP_DEEP_BACKFILL: 'false'
+    volumes:
+    - ./src/bridges/whatsapp/src:/app/src:ro
+    - ./src/bridges/whatsapp/tsconfig.json:/app/tsconfig.json:ro
+    - /app/build
+    - dev-wa-1:/app/auth_info
+    - dev-media:/data/media
+    depends_on:
+    - rabbitmq
+  wa-bridge-2:
+    image: unifiedcollector-wa-dev:local
+    pull_policy: never
+    build:
+      context: ./src/bridges/whatsapp
+      target: dev
+    init: true
+    profiles:
+    - whatsapp
+    env_file:
+    - path: .env.dev
+      required: false
+    environment:
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      TSC_WATCHFILE: PriorityPollingInterval
+      TSC_WATCHDIRECTORY: RecursiveDirectoryUsingFsWatchFile
+      SESSION_NAME: dev-bridge-2
+      AUTH_STORAGE_PATH: /app/auth_info
+      SYNC_FULL_HISTORY: 'false'
+      WHATSAPP_DEEP_BACKFILL: 'false'
+    volumes:
+    - ./src/bridges/whatsapp/src:/app/src:ro
+    - ./src/bridges/whatsapp/tsconfig.json:/app/tsconfig.json:ro
+    - /app/build
+    - dev-wa-2:/app/auth_info
+    - dev-media:/data/media
+    depends_on:
+    - rabbitmq
+volumes:
+  dev-postgres: {}
+  dev-redis: {}
+  dev-rabbitmq: {}
+  dev-data: {}
+  dev-sessions: {}
+  dev-wa-1: {}
+  dev-wa-2: {}
+  dev-media: {}

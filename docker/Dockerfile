@@ -1,48 +1,62 @@
-# Keep this aligned with the proven live collector runtime. Python 3.14 forces
-# slow source builds for Matrix E2EE deps on this stack.
-FROM python:3.12-slim
+FROM node:22-slim AS frontend-dependencies
+WORKDIR /app/frontend
+COPY src/dashboard/frontend/package*.json ./
+RUN npm ci
+FROM frontend-dependencies AS frontend-dev
+RUN chown -R node:node /app/frontend
+USER node
+CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0"]
+FROM frontend-dependencies AS frontend-builder
+COPY src/dashboard/frontend/ ./
+RUN npm run build
 
+FROM python:3.12-slim-bookworm AS dependencies
+ENV VIRTUAL_ENV=/opt/collector-venv \
+    PATH="/opt/collector-venv/bin:$PATH" \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 WORKDIR /app
-
-# OS deps for headless Chromium (Playwright Mode β fallback in Instagram collector).
-# Kept tight: only chromium is installed, no firefox/webkit.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libnss3 libatk-bridge2.0-0 libdrm2 libxkbcommon0 libxcomposite1 \
-    libxdamage1 libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 \
-    libasound2 libatk1.0-0 libcups2 libxshmfence1 fonts-liberation \
-    ca-certificates wget curl build-essential cmake libolm-dev \
- && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
- && apt-get install -y --no-install-recommends nodejs \
- && rm -rf /var/lib/apt/lists/*
-
+    build-essential cmake libolm-dev git \
+    && rm -rf /var/lib/apt/lists/* \
+    && python -m venv /opt/collector-venv
 COPY requirements.txt requirements.lock ./
-# P1-3: install from the lockfile for reproducible builds. requirements.txt is
-# kept for human-readable ranges; requirements.lock has exact proven pins.
-RUN pip install --no-cache-dir -r requirements.lock
+RUN sed '/^[Pp][Yy][Tt][Ee][Ss][Tt]/d' requirements.lock > /tmp/runtime-requirements.txt \
+    && pip install --no-cache-dir -r /tmp/runtime-requirements.txt \
+    && pip install --no-cache-dir phonenumbers==9.0.38 \
+    && python -m playwright install chromium
 
-# Install Playwright Chromium only (no firefox/webkit — saves ~400MB).
-# install-deps is still useful as a belt-and-braces top-up of any missing libs.
-RUN python -m playwright install chromium \
- && python -m playwright install-deps chromium
+FROM python:3.12-slim-bookworm AS runtime-dependencies
+ENV VIRTUAL_ENV=/opt/collector-venv \
+    PATH="/opt/collector-venv/bin:$PATH" \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates wget curl libolm3 sqlite3 ffmpeg \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=dependencies /opt/collector-venv /opt/collector-venv
+COPY --from=dependencies /ms-playwright /ms-playwright
+RUN python -m playwright install-deps chromium \
+    && rm -rf /var/lib/apt/lists/*
 
-# sqlite3 CLI for self-healing corrupt SQLite session files (session_repair.py).
-# Placed AFTER the heavy pip/playwright layers so those stay cached on rebuild
-# (keeps the image/vhdx growth minimal).
-RUN apt-get update && apt-get install -y --no-install-recommends sqlite3 ffmpeg \
- && rm -rf /var/lib/apt/lists/*
+RUN useradd -u 1001 -m collector \
+    && mkdir -p /app/data /app/sessions /app/logs /home/collector/.cache \
+    && chown -R collector:collector /app /home/collector
 
+FROM runtime-dependencies AS dev
+RUN pip install --no-cache-dir watchfiles==1.3.0
+USER collector
+CMD ["uvicorn", "src.dashboard.api:app", "--host", "0.0.0.0", "--port", "8700", "--reload", "--reload-dir", "/app/src"]
+
+FROM runtime-dependencies AS dashboard
 COPY src/ src/
-
-# Bake a baseline copy of the per-source config files. At runtime the compose
-# bind-mount (../config/sources:/app/config/sources:ro) overlays these so an
-# operator can edit the host files + `docker restart` without a rebuild; the
-# baked copy is just a fallback if the mount is ever absent.
 COPY config/ config/
+COPY --from=frontend-builder /app/frontend/dist/ src/dashboard/frontend/dist/
+USER collector
+CMD ["uvicorn", "src.dashboard.api:app", "--host", "0.0.0.0", "--port", "8700"]
 
-# phonenumbers: consumed by the offline phone-OSINT enrichment tick
-# (src/core/wa_phone_intel.py). Omitted from requirements.lock, so the lock
-# install above never baked it. Placed LAST (after the heavy cached layers) so
-# it bakes on a fast incremental rebuild. Pure-python, no deps.
-RUN pip install --no-cache-dir "phonenumbers==9.0.38"
-
+FROM dashboard AS production
 CMD ["python", "-m", "src.main"]
