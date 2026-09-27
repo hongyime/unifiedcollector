@@ -157,10 +157,10 @@ services:
       PYTHONUNBUFFERED: "1"
     volumes:
       - ../src:/app/src
-      # GHunt creds: host-side burner Google session at C:\Users\bryan\.malfrats\ghunt\creds.m.
+      # GHunt credentials: set GHUNT_CREDS_HOST to an existing private session file.
       # Read-only bind so a bug in ghunt cannot rewrite the operator's file. Path
       # inside the container is GHUNT_CREDS (default /app/.ghunt/creds.m).
-      - ${GHUNT_CREDS_HOST:-C:/Users/bryan/.malfrats/ghunt/creds.m}:/app/.ghunt/creds.m:ro
+      - ${GHUNT_CREDS_HOST:-${USERPROFILE:-${HOME}}/.malfrats/ghunt/creds.m}:/app/.ghunt/creds.m:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -1157,7 +1157,8 @@ services:
   dashboard:
     build:
       context: ..
-      dockerfile: docker/Dockerfile.dashboard
+      dockerfile: docker/Dockerfile
+      target: dashboard
     container_name: unifiedcollector_dashboard
     ports:
       # Keep the original local dashboard URL alive while 8700 remains the

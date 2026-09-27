@@ -22,7 +22,7 @@ as authenticated MQTT with encoded Thrift bodies. Two paths can decode them:
     Fully decodable output. Real ban risk. Runs isolated so a ban here can
     only kill *this* container's account.
 
-Bryan chose to build both. Option A is scaffolded but disabled until real
+the maintainer chose to build both. Option A is scaffolded but disabled until real
 mobile-API implementation lands + a dedicated throwaway account is provisioned.
 
 ## Isolation the code enforces today
@@ -60,7 +60,7 @@ Each step can be reverted by unset / stop respectively.
 ## Pre-flight checklist (before step 3)
 
 - [ ] Dedicated throwaway IG account exists, provisioned via mobile app,
-      NOT tied to Bryan's real number/email. Two-factor set up (Meta bans
+      NOT tied to the maintainer's real number/email. Two-factor set up (Meta bans
       no-2FA accounts more aggressively).
 - [ ] Credentials file at `credentials/instagram_dm/<username>.txt` with
       the schema in that dir's README.
@@ -110,3 +110,5 @@ To fully remove:
 
 The scaffolding module can stay in the repo; it costs nothing at import time
 with the flag off.
+
+Machine-specific values in this document use privacy placeholders.

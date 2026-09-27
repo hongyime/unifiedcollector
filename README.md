@@ -425,3 +425,109 @@ the templates.
 ## License
 
 Apache-2.0. See `LICENSE` and `NOTICE`.
+
+## Container development on Windows and Linux
+
+Use Docker Compose 2.24+. Create .env.dev with development settings. The standalone
+dev stack uses a separate project and fresh named data/account-session volumes.
+It starts the dashboard, Vite frontend, and local database/brokers. Background
+collectors require --profile workers; optional recon and WhatsApp integrations
+require --profile recon or --profile whatsapp and your own authorized test accounts.
+
+~~~sh
+# Initial dev build, then only for dependency manifests/system-package changes:
+docker compose --env-file .env.dev -f compose.dev.yaml build
+# Daily development: source is mounted; no automatic build or pull:
+docker compose --env-file .env.dev -f compose.dev.yaml up --no-build
+# After dependency rebuilds, refresh anonymous frontend dependency/build volumes:
+docker compose --env-file .env.dev -f compose.dev.yaml up --no-build --renew-anon-volumes
+~~~
+
+Dashboard: http://localhost:8700. Frontend: http://localhost:5173.
+Python reloaders poll mounted source/config paths; virtual environments and system
+packages remain outside the mounts. The WhatsApp development target polls TypeScript
+source, compiles into a container-local build volume, and restarts Node on emitted
+JavaScript changes. That is source compilation, not an image rebuild. Development
+does not inherit production drive/account-session mounts. Runtime app credentials
+belong in your private .env.dev; no real account or production data is needed for
+the offline maintenance tests.
+
+The dashboard now builds from the dashboard target of docker/Dockerfile, removing
+its implicit dependency on a separately prebuilt local collector image. The older
+Dockerfile.dashboard wrapper is retained for legacy explicit local-image workflows.
+GHUNT_CREDS_HOST can override the production recon credential path; its default
+now follows USERPROFILE on Windows or HOME on Linux without embedding a person.
+
+Production images are built remotely by GitHub Actions using Buildx/GHA caching.
+Local dev tags use pull_policy: never. To explicitly download a production image:
+
+~~~sh
+docker pull ghcr.io/hongyime/unifiedcollector/dashboard:latest
+~~~
+
+CI publishes collector, dashboard, spiderfoot, and whatsapp images with latest and
+short SHA tags. Builds are linux/amd64 with provenance/SBOM attestations disabled.
+Cleanup inspects every tagged manifest first and stops on indexes, attestations,
+unknown formats, or registry errors. It retains three tagged versions plus latest,
+and three untagged versions. Package Actions admin access is required for deletion.
+
+Image sizes are unknown until CI builds them. Browser/native packages may exceed
+the approximate 200 MB target; compiler/header packages stay in build stages.
+Check public package visibility and current
+[GitHub billing documentation](https://docs.github.com/en/billing/concepts/product-billing/github-packages).
+Treat 500 MB storage and 1 GB/month transfer for private packages as planning
+assumptions. GITHUB_TOKEN-authenticated downloads inside GitHub Actions do not
+consume package transfer quota.
+
+
+### Windows and Linux development shortcuts
+
+The explicit development Compose commands above also have native launchers:
+
+| Step | Windows PowerShell | Linux |
+| --- | --- | --- |
+| First build, or after dependency manifest changes | `pwsh -File ./dev.ps1 build` | `sh dev.sh build` |
+| Daily development | `pwsh -File ./dev.ps1` | `sh dev.sh` |
+| Stop the development stack | `pwsh -File ./dev.ps1 down` | `sh dev.sh down` |
+| View development logs | `pwsh -File ./dev.ps1 logs` | `sh dev.sh logs` |
+
+Create the documented local `.env.dev` first. Daily startup always passes
+`--no-build`; source edits use the development mounts and reloaders. Dependency
+changes require the explicit build command, then the documented dependency-volume
+refresh where applicable. Pulling a production image remains a separate explicit
+Compose command. Optional profiles are selected explicitly with `COMPOSE_PROFILES`
+or the full Compose command; they are not enabled by these launchers.
+
+The scripts resolve the checkout directory and preserve Docker's exit code.
+Invoke Linux scripts with `sh` on SMB mounts where executable bits are unavailable.
+Mount paths must exist on the Docker daemon's host; a Windows drive letter is not
+a Linux mount path. Existing production and Windows administration launchers remain
+separate from these development commands.
+
+### Fresh development database initialization
+
+The development `db-init` service waits for PostgreSQL readiness and applies the
+existing schema/migration runner to the isolated development database. The
+dashboard starts only after initialization succeeds. The initializer calls only
+the database pool and migration functions; it does not start collectors, accounts,
+notification bots, or maintenance jobs. A deferred or incomplete migration blocks
+dashboard startup so that an empty schema is not reported as ready.
+
+After adding a migration while the dev stack is already running, run it explicitly:
+
+~~~sh
+docker compose --env-file .env.dev -f compose.dev.yaml run --rm --no-deps --no-build db-init
+~~~
+
+This uses the development database and existing image; source migration files are
+mounted into the initializer. Do not point this development service at production.
+
+### SMB and remote Docker hosts
+
+Run Compose from a checkout path that the selected Docker daemon can access.
+A mapped Windows drive is not automatically available inside WSL or on a remote
+Linux Docker host; use that host's mounted share path or a local checkout when
+necessary. Polling handles missing file-change events after the bind mount works;
+it cannot make an inaccessible path visible. The maintenance checks validated
+Compose configuration and Windows/Linux reload fixtures, but did not launch this
+full stack or verify its actual SMB bind mount.

@@ -57,3 +57,21 @@ archive/
 **/node_modules/
 extension/
 research/
+
+# Build context privacy and development caches.
+**/.git
+**/.agents
+**/.env*
+**/node_modules
+**/.venv
+**/__pycache__
+**/tests
+**/test_*.py
+**/logs
+**/backups
+**/sessions
+**/auth_info*
+**/credentials.json
+**/cookies*.txt
+**/*.pem
+**/*.key

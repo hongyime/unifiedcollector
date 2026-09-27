@@ -1,6 +1,6 @@
 # Reuse the proven collector runtime instead of reinstalling the full shared
 # dependency lockfile for the API-only dashboard image.
-FROM unifiedcollector-collector:latest
+FROM unifiedcollector-collector:latest AS production
 
 WORKDIR /app
 

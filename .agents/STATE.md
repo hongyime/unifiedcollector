@@ -108,7 +108,7 @@ Updated: 2026-08-21 19:42 UTC / 2026-08-22 03:42 SGT
 
 Current live update:
 - User reported Chrome/social tabs looked logged out. Root cause split into two issues: the old managed Chrome-for-Testing profile on CDP `9336` had a wedged MV3 extension runtime (no UnifiedCollector service worker), while the normal desktop Chrome profile is separate and not the Collector profile.
-- Stopped browser maintenance loop, killed the stuck Collector CDP Chrome root, launched a fresh managed profile at `C:\Users\bryan\AppData\Local\UnifiedCollector\ChromeCdpAutomationProfile_fresh_20260822_0325`, and restored 88 cookies from the cookie vault into CDP `9336`. Cookie markers are physically present in the fresh profile for Facebook (`c_user`, `xs`), Instagram (`sessionid`), Strava (`_strava4_session`), X (`auth_token`, `ct0`), and TikTok (`sessionid`, `ttwid`).
+- Stopped browser maintenance loop, killed the stuck Collector CDP Chrome root, launched a fresh managed profile at `<user-home>\AppData\Local\UnifiedCollector\ChromeCdpAutomationProfile_fresh_20260822_0325`, and restored 88 cookies from the cookie vault into CDP `9336`. Cookie markers are physically present in the fresh profile for Facebook (`c_user`, `xs`), Instagram (`sessionid`), Strava (`_strava4_session`), X (`auth_token`, `ct0`), and TikTok (`sessionid`, `ttwid`).
 - Fresh profile fixed the extension runtime: CDP now shows `chrome-extension://pkmdmcklnjdeocoeigmlakhomhhcpafb/background.js`, content scripts attach again, and `unifiedcollector_ig_ingest` logged fresh `/social/browser-heartbeat`, `/social/posts`, `/social/ingest`, and `/social/users` calls around `2026-08-21T19:34Z` to `19:36Z`.
 - Important caveat: restored cookies alone did not fully re-auth Meta/Strava in the fresh profile. Latest audit showed Facebook and the extra Instagram root tab rendering login walls, Strava at `/login`, X landing on `https://x.com/`/stale capture, while TikTok/Lemon8/Threads have extension activity. Manual login may be needed for Facebook/Instagram/Strava/X in the fresh managed Chrome window, after which cookie vault should capture the new trusted session.
 - Patched `src/dashboard/api.py` so `/collectors/action-queue/sync` skips non-evidentiary source-matrix fallback from `db_acquire`/skeleton rows and does not create durable operator actions during DB/source-matrix pressure. Added `test_action_queue_sync_skips_db_acquire_skeleton_payload`; focused tests for timeout, db-acquire skeleton, and refreshing partial matrix passed.
@@ -405,7 +405,7 @@ Latest update:
 - Maintenance script still needs code-level follow-up: multiple live runs hung after healthy audits under load, so runtime maintenance status was manually aligned to the fresh audit result. Keep the final-success early-exit patch and add/verify hard subprocess timeouts before trusting unattended maintenance again.
 
 Latest update:
-- Investigated reported "not signed in to any Chrome tabs" again. Live process list shows the active browser is Playwright Chromium on CDP `9336` with `--user-data-dir=C:\Users\bryan\AppData\Local\UnifiedCollector\ChromeCdpAutomationProfile_recover_x`; this is separate from ordinary Chrome windows/profiles.
+- Investigated reported "not signed in to any Chrome tabs" again. Live process list shows the active browser is Playwright Chromium on CDP `9336` with `--user-data-dir=<user-home>\AppData\Local\UnifiedCollector\ChromeCdpAutomationProfile_recover_x`; this is separate from ordinary Chrome windows/profiles.
 - Live cookie-vault `/health` still reports `ok=true`, `count=60`, `quality_score=5130`, and auth-cookie names for Facebook, Instagram, Strava, TikTok, and X without logging values.
 - Live CDP tabs initially had Instagram and Threads on non-canonical/error URLs. Ran `tools/browser_tab_reload.py --platforms instagram,facebook,x,threads,tiktok,strava --hard-reopen --json`, which reopened Instagram, Threads, and Strava to canonical URLs with zero failures.
 - Final `tools/browser_tab_audit.py --json` shows exactly one page each for Instagram, Threads, TikTok, X, Facebook, and Strava plus one extension control tab; all platform tabs are responsive and content script `1.23.72` is running. Collector `/health?include_sources=true` returned `status=ok` and zero source issues.
@@ -502,7 +502,7 @@ Current live update:
 ## Auto State
 
 - Updated: 2026-09-22 21:29:53 +08:00
-- Machine: PRAWN-L390
+- Machine: dev-host-3.example
 - Harness: claude
 - Event: stop
 - Branch: main
@@ -510,3 +510,9 @@ Current live update:
 - Dirty files: 25
 - Resume hint: Read .agents/STATE.md, then the latest file in .agents/handoffs/ if present.
 <!-- MOLT_AUTO_END -->
+
+Machine-specific values in this document use privacy placeholders.
+
+2026-09-27: Applied reviewed development Compose, Docker and GHCR publishing changes across 13 files, with explicit local startup and dependency rebuild guidance. Personal host-path defaults were removed. Configuration/static checks were performed; image builds, full runtime, and live CI publication remain unverified. Existing unrelated changes were preserved; no commit or push.
+
+2026-09-27: Current upstream changes are preserved in the publication branch. Initial CI, bounded runtime validation and resource teardown are in progress under the user-approved maintenance release.

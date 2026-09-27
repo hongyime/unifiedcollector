@@ -25,7 +25,7 @@
   },
   "dependencies": {
     "@tanstack/react-query": "^5.101.4",
-    "@tanstack/react-table": "9.0.1",
+    "@tanstack/react-table": "8.21.3",
     "clsx": "^2.1.1",
     "date-fns": "^4.4.0",
     "lucide-react": "^1.30.0",
