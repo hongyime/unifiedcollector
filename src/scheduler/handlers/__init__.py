@@ -28,6 +28,7 @@ from .reconcile_identities import ReconcileIdentitiesHandler
 from .status_delta import StatusDeltaHandler
 from .wa_staging_merge import WhatsappStagingMergeHandler
 from .watchdog_stale_alert import WatchdogStaleAlertHandler
+from .host_memory_alert import HostMemoryAlertHandler
 
 HANDLERS: list[PeriodicHandler] = [
     HeartbeatHandler(),
@@ -43,6 +44,7 @@ HANDLERS: list[PeriodicHandler] = [
     WatchdogStaleAlertHandler(),
     PostgresIdleTxnAlertHandler(),
     WhatsappStagingMergeHandler(),
+    HostMemoryAlertHandler(),
 ]
 
 __all__ = [
@@ -62,4 +64,5 @@ __all__ = [
     "WatchdogStaleAlertHandler",
     "PostgresIdleTxnAlertHandler",
     "WhatsappStagingMergeHandler",
+    "HostMemoryAlertHandler",
 ]
