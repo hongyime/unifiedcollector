@@ -75,3 +75,15 @@ research/
 **/cookies*.txt
 **/*.pem
 **/*.key
+
+# Exclude private files regardless of capitalization.
+**/.[eE][nN][vV]*
+**/*[sS][eE][cC][rR][eE][tT]*
+**/*[cC][rR][eE][dD][eE][nN][tT][iI][aA][lL]*
+**/*.[pP][eE][mM]
+**/*.[kK][eE][yY]
+**/*.[pP]12
+**/*.[pP][fF][xX]
+
+# Functional tracked source; private credential data remains excluded.
+!src/collectors/instagram_dm/credentials.py

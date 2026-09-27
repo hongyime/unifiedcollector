@@ -146,3 +146,5 @@ Machine-specific values in this document use privacy placeholders.
 2026-09-27: Current upstream changes are preserved in the publication branch. Initial CI, bounded runtime validation and resource teardown are in progress under the user-approved maintenance release.
 
 - 2026-09-27: Replace remaining private host and home identifiers in newer upstream handoffs while preserving recovery instructions.
+
+- 2026-09-27: Add explicit sync-only SMB development with one initial source-seeded image build; preserve private input isolation, worker opt-in and production configuration.

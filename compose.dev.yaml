@@ -36,20 +36,8 @@ services:
         condition: service_healthy
     command:
     - python
-    - -c
-    - |
-      import asyncio
-      from src.db.connection import get_pool, close_pool
-      from src.db.migrate import apply_all
-      async def initialize():
-          pool = await get_pool()
-          try:
-              result = await apply_all(pool)
-              if result.get('deferred') or not result.get('schemas'):
-                  raise RuntimeError('Development schema initialization did not complete')
-          finally:
-              await close_pool()
-      asyncio.run(initialize())
+    - -m
+    - src.db.dev_init
   redis:
     image: redis:7-alpine
     volumes:

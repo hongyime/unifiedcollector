@@ -438,9 +438,9 @@ require --profile recon or --profile whatsapp and your own authorized test accou
 # Initial dev build, then only for dependency manifests/system-package changes:
 docker compose --env-file .env.dev -f compose.dev.yaml build
 # Daily development: source is mounted; no automatic build or pull:
-docker compose --env-file .env.dev -f compose.dev.yaml up --no-build
+docker compose --env-file .env.dev -f compose.dev.yaml up --no-build --pull never
 # After dependency rebuilds, refresh anonymous frontend dependency/build volumes:
-docker compose --env-file .env.dev -f compose.dev.yaml up --no-build --renew-anon-volumes
+docker compose --env-file .env.dev -f compose.dev.yaml up --no-build --pull never --renew-anon-volumes
 ~~~
 
 Dashboard: http://localhost:8700. Frontend: http://localhost:5173.
@@ -524,10 +524,47 @@ mounted into the initializer. Do not point this development service at productio
 
 ### SMB and remote Docker hosts
 
-Run Compose from a checkout path that the selected Docker daemon can access.
-A mapped Windows drive is not automatically available inside WSL or on a remote
-Linux Docker host; use that host's mounted share path or a local checkout when
-necessary. Polling handles missing file-change events after the bind mount works;
-it cannot make an inaccessible path visible. The maintenance checks validated
-Compose configuration and Windows/Linux reload fixtures, but did not launch this
-full stack or verify its actual SMB bind mount.
+Use Docker Compose 2.32.2+ and the explicit `compose.watch.yaml` overlay when the
+Docker host cannot bind-mount this checkout. These commands work in PowerShell
+and Linux shells after preparing the private `.env.dev` described above:
+
+~~~sh
+# Explicit initial third-party image acquisition:
+docker compose --env-file .env.dev -f compose.dev.yaml pull postgres redis rabbitmq
+# One initial development build; repeat only for dependency/system-package changes:
+docker compose --env-file .env.dev -f compose.dev.yaml -f compose.watch.yaml build
+# Source edits synchronize into the same running containers:
+docker compose --env-file .env.dev -f compose.dev.yaml -f compose.watch.yaml up --no-build --pull never --watch
+~~~
+
+The initial dev image includes ordinary source after dependency installation.
+Later edits use `sync` only, with no rebuild actions. Source binds and anonymous
+dependency/build volumes are removed in this overlay; dependencies remain in
+the image. Named development data is retained, and worker/account profiles stay
+opt-in. Private filenames and dependency manifests are excluded from Watch.
+Verify an edit on the actual SMB client because share event delivery varies.
+
+After stopping Watch, remove only the development containers/networks:
+
+~~~sh
+docker compose --env-file .env.dev -f compose.dev.yaml -f compose.watch.yaml down --remove-orphans
+~~~
+
+For disposable tests, use `-p unifiedcollector-smoke-dev` consistently and add `--volumes`
+to that test project's final `down`. Keep the reusable dev images so daily startup
+needs no build or pull. Do not delete named volumes containing development data
+you want to retain.
+
+
+While Watch is running, apply new development SQL migrations using the dashboard's
+current synchronized source, instead of the one-shot initializer's image copy:
+
+~~~sh
+docker compose --env-file .env.dev -f compose.dev.yaml -f compose.watch.yaml exec dashboard python -m src.db.dev_init
+~~~
+
+The same strict initializer is used on first startup: deferred/empty schema
+initialization fails visibly, and its database pool closes even after an error.
+It starts no collectors, schedulers or notification jobs. The existing functional
+`src/collectors/instagram_dm/credentials.py` module remains source through an exact
+filename exception; its contents were not inspected in the privacy audit.

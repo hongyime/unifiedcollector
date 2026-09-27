@@ -1,0 +1,322 @@
+# Explicit source-sync overlay for SMB/remote Docker hosts. No rebuild actions.
+x-watch-ignore: &watch-ignore ["**/.[eE][nN][vV]*", "**/*[sS][eE][cC][rR][eE][tT]*", "**/*[cC][rR][eE][dD][eE][nN][tT][iI][aA][lL]*", "**/*.[pP][eE][mM]", "**/*.[kK][eE][yY]", "**/*.[pP]12", "**/*.[pP][fF][xX]", "**/__pycache__/**", "**/*.pyc", "**/node_modules/**", "**/.venv/**", "**/dist/**", "**/build/**", "**/requirements*.txt", "**/requirements.lock", "**/package.json", "**/package-lock.json", "**/pyproject.toml", "**/uv.lock", "!collectors/instagram_dm/credentials.py"]
+services:
+  db-init:
+    volumes: !override []
+  collector:
+    volumes: !override ["dev-data:/app/data", "dev-sessions:/app/sessions"]
+    develop:
+      watch:
+      - action: sync
+        path: ./src
+        target: /app/src
+        initial_sync: true
+        ignore: *watch-ignore
+      - action: sync
+        path: ./config
+        target: /app/config
+        initial_sync: true
+        ignore: *watch-ignore
+  collector_spiderfoot:
+    volumes: !override ["dev-data:/app/data", "dev-sessions:/app/sessions"]
+    develop:
+      watch:
+      - action: sync
+        path: ./src
+        target: /app/src
+        initial_sync: true
+        ignore: *watch-ignore
+      - action: sync
+        path: ./config
+        target: /app/config
+        initial_sync: true
+        ignore: *watch-ignore
+  collector_youtube:
+    volumes: !override ["dev-data:/app/data", "dev-sessions:/app/sessions"]
+    develop:
+      watch:
+      - action: sync
+        path: ./src
+        target: /app/src
+        initial_sync: true
+        ignore: *watch-ignore
+      - action: sync
+        path: ./config
+        target: /app/config
+        initial_sync: true
+        ignore: *watch-ignore
+  collector_tiktok:
+    volumes: !override ["dev-data:/app/data", "dev-sessions:/app/sessions"]
+    develop:
+      watch:
+      - action: sync
+        path: ./src
+        target: /app/src
+        initial_sync: true
+        ignore: *watch-ignore
+      - action: sync
+        path: ./config
+        target: /app/config
+        initial_sync: true
+        ignore: *watch-ignore
+  collector_lowrisk:
+    volumes: !override ["dev-data:/app/data", "dev-sessions:/app/sessions"]
+    develop:
+      watch:
+      - action: sync
+        path: ./src
+        target: /app/src
+        initial_sync: true
+        ignore: *watch-ignore
+      - action: sync
+        path: ./config
+        target: /app/config
+        initial_sync: true
+        ignore: *watch-ignore
+  watchdog:
+    volumes: !override ["dev-data:/app/data", "dev-sessions:/app/sessions"]
+    develop:
+      watch:
+      - action: sync
+        path: ./src
+        target: /app/src
+        initial_sync: true
+        ignore: *watch-ignore
+      - action: sync
+        path: ./config
+        target: /app/config
+        initial_sync: true
+        ignore: *watch-ignore
+  collector_website:
+    volumes: !override ["dev-data:/app/data", "dev-sessions:/app/sessions"]
+    develop:
+      watch:
+      - action: sync
+        path: ./src
+        target: /app/src
+        initial_sync: true
+        ignore: *watch-ignore
+      - action: sync
+        path: ./config
+        target: /app/config
+        initial_sync: true
+        ignore: *watch-ignore
+  collector_exposure:
+    volumes: !override ["dev-data:/app/data", "dev-sessions:/app/sessions"]
+    develop:
+      watch:
+      - action: sync
+        path: ./src
+        target: /app/src
+        initial_sync: true
+        ignore: *watch-ignore
+      - action: sync
+        path: ./config
+        target: /app/config
+        initial_sync: true
+        ignore: *watch-ignore
+  collector_lemon8:
+    volumes: !override ["dev-data:/app/data", "dev-sessions:/app/sessions"]
+    develop:
+      watch:
+      - action: sync
+        path: ./src
+        target: /app/src
+        initial_sync: true
+        ignore: *watch-ignore
+      - action: sync
+        path: ./config
+        target: /app/config
+        initial_sync: true
+        ignore: *watch-ignore
+  collector_telegram:
+    volumes: !override ["dev-data:/app/data", "dev-sessions:/app/sessions"]
+    develop:
+      watch:
+      - action: sync
+        path: ./src
+        target: /app/src
+        initial_sync: true
+        ignore: *watch-ignore
+      - action: sync
+        path: ./config
+        target: /app/config
+        initial_sync: true
+        ignore: *watch-ignore
+  collector_beeper:
+    volumes: !override ["dev-data:/app/data", "dev-sessions:/app/sessions"]
+    develop:
+      watch:
+      - action: sync
+        path: ./src
+        target: /app/src
+        initial_sync: true
+        ignore: *watch-ignore
+      - action: sync
+        path: ./config
+        target: /app/config
+        initial_sync: true
+        ignore: *watch-ignore
+  collector_whatsapp:
+    volumes: !override ["dev-data:/app/data", "dev-sessions:/app/sessions"]
+    develop:
+      watch:
+      - action: sync
+        path: ./src
+        target: /app/src
+        initial_sync: true
+        ignore: *watch-ignore
+      - action: sync
+        path: ./config
+        target: /app/config
+        initial_sync: true
+        ignore: *watch-ignore
+  collector_instagram:
+    volumes: !override ["dev-data:/app/data", "dev-sessions:/app/sessions"]
+    develop:
+      watch:
+      - action: sync
+        path: ./src
+        target: /app/src
+        initial_sync: true
+        ignore: *watch-ignore
+      - action: sync
+        path: ./config
+        target: /app/config
+        initial_sync: true
+        ignore: *watch-ignore
+  collector_instagram_dm:
+    volumes: !override ["dev-data:/app/data", "dev-sessions:/app/sessions"]
+    develop:
+      watch:
+      - action: sync
+        path: ./src
+        target: /app/src
+        initial_sync: true
+        ignore: *watch-ignore
+      - action: sync
+        path: ./config
+        target: /app/config
+        initial_sync: true
+        ignore: *watch-ignore
+  ig_ingest:
+    volumes: !override ["dev-data:/app/data", "dev-sessions:/app/sessions"]
+    develop:
+      watch:
+      - action: sync
+        path: ./src
+        target: /app/src
+        initial_sync: true
+        ignore: *watch-ignore
+      - action: sync
+        path: ./config
+        target: /app/config
+        initial_sync: true
+        ignore: *watch-ignore
+  scheduler:
+    volumes: !override ["dev-data:/app/data", "dev-sessions:/app/sessions"]
+    develop:
+      watch:
+      - action: sync
+        path: ./src
+        target: /app/src
+        initial_sync: true
+        ignore: *watch-ignore
+      - action: sync
+        path: ./config
+        target: /app/config
+        initial_sync: true
+        ignore: *watch-ignore
+  onboard_bot:
+    volumes: !override ["dev-data:/app/data", "dev-sessions:/app/sessions"]
+    develop:
+      watch:
+      - action: sync
+        path: ./src
+        target: /app/src
+        initial_sync: true
+        ignore: *watch-ignore
+      - action: sync
+        path: ./config
+        target: /app/config
+        initial_sync: true
+        ignore: *watch-ignore
+  realtime_feed:
+    volumes: !override ["dev-data:/app/data", "dev-sessions:/app/sessions"]
+    develop:
+      watch:
+      - action: sync
+        path: ./src
+        target: /app/src
+        initial_sync: true
+        ignore: *watch-ignore
+      - action: sync
+        path: ./config
+        target: /app/config
+        initial_sync: true
+        ignore: *watch-ignore
+  dashboard:
+    volumes: !override ["dev-data:/app/data", "dev-sessions:/app/sessions"]
+    develop:
+      watch:
+      - action: sync
+        path: ./src
+        target: /app/src
+        initial_sync: true
+        ignore: *watch-ignore
+      - action: sync
+        path: ./config
+        target: /app/config
+        initial_sync: true
+        ignore: *watch-ignore
+  browser_cookie_vault:
+    volumes: !override ["dev-data:/app/data", "dev-sessions:/app/sessions"]
+    develop:
+      watch:
+      - action: sync
+        path: ./src
+        target: /app/src
+        initial_sync: true
+        ignore: *watch-ignore
+      - action: sync
+        path: ./config
+        target: /app/config
+        initial_sync: true
+        ignore: *watch-ignore
+  frontend:
+    volumes: !override []
+    develop:
+      watch:
+      - action: sync
+        path: ./src/dashboard/frontend
+        target: /app/frontend
+        initial_sync: true
+        ignore: *watch-ignore
+  wa-bridge-1:
+    volumes: !override ["dev-wa-1:/app/auth_info", "dev-media:/data/media"]
+    develop:
+      watch:
+      - action: sync
+        path: ./src/bridges/whatsapp/src
+        target: /app/src
+        initial_sync: true
+        ignore: *watch-ignore
+      - action: sync
+        path: ./src/bridges/whatsapp/tsconfig.json
+        target: /app/tsconfig.json
+        initial_sync: true
+        ignore: *watch-ignore
+  wa-bridge-2:
+    volumes: !override ["dev-wa-2:/app/auth_info", "dev-media:/data/media"]
+    develop:
+      watch:
+      - action: sync
+        path: ./src/bridges/whatsapp/src
+        target: /app/src
+        initial_sync: true
+        ignore: *watch-ignore
+      - action: sync
+        path: ./src/bridges/whatsapp/tsconfig.json
+        target: /app/tsconfig.json
+        initial_sync: true
+        ignore: *watch-ignore
