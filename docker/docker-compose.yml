@@ -63,6 +63,7 @@ services:
     mem_limit: 512m
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      COLLECTOR_STARTUP_DELAY_SECONDS: "5"
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
       # freeze fix: youtube AND tiktok run blocking subprocess downloaders
@@ -115,7 +116,7 @@ services:
     container_name: unifiedcollector_spiderfoot
     profiles: ["recon"]
     init: true
-    command: python -m src.recon_spiderfoot_service --poll-interval ${RECON_SPIDERFOOT_POLL_INTERVAL:-10} --workers ${RECON_SPIDERFOOT_WORKERS:-2}
+    command: python -m src.recon_spiderfoot_service --poll-interval ${RECON_SPIDERFOOT_POLL_INTERVAL:-10} --workers ${RECON_SPIDERFOOT_WORKERS:-1}
     mem_limit: ${RECON_SPIDERFOOT_MEM:-2g}
     cpus: "${RECON_SPIDERFOOT_CPUS:-2.0}"
     pids_limit: 256
@@ -146,7 +147,7 @@ services:
       RECON_USERNAME_ENGINE: "${RECON_USERNAME_ENGINE:-maigret}"
       MAIGRET_CLI: "${MAIGRET_CLI:-maigret}"
       MAIGRET_TOP_SITES: "${MAIGRET_TOP_SITES:-300}"
-      MAIGRET_NUM_REQUESTS: "${MAIGRET_NUM_REQUESTS:-20}"
+      MAIGRET_NUM_REQUESTS: "${MAIGRET_NUM_REQUESTS:-10}"
       MAIGRET_HTTP_TIMEOUT_SECONDS: "${MAIGRET_HTTP_TIMEOUT_SECONDS:-10}"
       MAIGRET_TARGET_TIMEOUT_SECONDS: "${MAIGRET_TARGET_TIMEOUT_SECONDS:-420}"
       MAIGRET_REPORT_KEEPDIR: "${MAIGRET_REPORT_KEEPDIR:-}"
@@ -198,6 +199,7 @@ services:
     mem_limit: 384m
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      COLLECTOR_STARTUP_DELAY_SECONDS: "35"
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
       COLLECTOR_HANG_TIMEOUT_SECONDS: "7200"
@@ -266,6 +268,7 @@ services:
     mem_limit: 384m
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      COLLECTOR_STARTUP_DELAY_SECONDS: "25"
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
       COLLECTOR_HANG_TIMEOUT_SECONDS: "7200"
@@ -340,6 +343,7 @@ services:
     mem_limit: 2560m
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      COLLECTOR_STARTUP_DELAY_SECONDS: "90"
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
       COLLECTOR_HANG_TIMEOUT_SECONDS: "7200"
@@ -384,10 +388,10 @@ services:
       GITHUB_SPIDER_CONCURRENCY: "3"
       GITHUB_SPIDER_BATCH_SIZE: "100"
       GITHUB_API_QUOTA_TARGET_RATIO: "0.80"
-      GITHUB_MAX_COMMITS_PER_REPO: "0"
+      GITHUB_MAX_COMMITS_PER_REPO: "1000"
       GITHUB_MAX_ISSUES_PER_REPO: "0"
       GITHUB_MAX_CONTRIBUTORS_PER_REPO: "0"
-      GITHUB_MAX_BRANCHES_PER_REPO: "0"
+      GITHUB_MAX_BRANCHES_PER_REPO: "50"
       GITHUB_MAX_WEAK_FANOUT_PER_REPO: "500"
       GITHUB_COLLECT_BRANCH_COMMITS: "true"
       # CPU hygiene (A#4): low-volume / API-ceiling sources idle longer between
@@ -397,7 +401,7 @@ services:
       GITHUB_QUOTA_PUSHER_ENABLED: "true"
       GITHUB_QUOTA_PUSHER_TARGET_RATIO: "0.80"
       GITHUB_QUOTA_PUSHER_MAX_CONCURRENT: "12"
-      GITHUB_QUOTA_PUSHER_BATCH_SIZE: "250"
+      GITHUB_QUOTA_PUSHER_BATCH_SIZE: "100"
       COLLECTOR_CYCLE_SLEEP_GITHUB: "300"
       COLLECTOR_CYCLE_SLEEP_STRAVA: "600"
       COLLECTOR_CYCLE_SLEEP_SEARCH: "240"
@@ -491,6 +495,7 @@ services:
     mem_limit: 384m
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      COLLECTOR_STARTUP_DELAY_SECONDS: "45"
       COLLECTOR_HANG_TIMEOUT_SECONDS: "7200"
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
@@ -542,18 +547,27 @@ services:
       start_period: 30s
     restart: unless-stopped
 
-  collector_exposure:
+  collector_light:
     image: unifiedcollector-collector:latest
-    container_name: unifiedcollector_collector_exposure
+    container_name: unifiedcollector_collector_light
     init: true
-    command: python -m src.main worker --source exposure
-    mem_limit: 768m
+    # 2026-09-28: merged exposure + lemon8 (consolidation audit) — both are
+    # non-realtime, cycle-based, no subprocess/spider-burst history in their
+    # own compose blocks; combining them saves ~640m of pure headroom overcommit
+    # (was 384m+768m limits for 61MB+142MB actual use) and one Python-interpreter
+    # baseline. See .agents/STATE.md for the full consolidation analysis.
+    command: python -m src.main worker --source exposure,lemon8
+    mem_limit: 512m
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
-      X_SOURCE_MANUAL_MODE: "${X_SOURCE_MANUAL_MODE:-0}"
       COLLECTOR_VAULT_ROOT: /vault
       COLLECTOR_HANG_TIMEOUT_SECONDS: "7200"
+      COLLECTOR_STARTUP_DELAY_SECONDS: "20"
+      # Merged process shares one asyncpg pool across both sources; raised from
+      # exposure's standalone default of 3.
+      DB_POOL_MAX_SIZE: "6"
+      X_SOURCE_MANUAL_MODE: "${X_SOURCE_MANUAL_MODE:-0}"
       EXPOSURE_ENABLED: "${EXPOSURE_ENABLED:-1}"
       EXPOSURE_ALLOWED_DOMAINS: "${EXPOSURE_ALLOWED_DOMAINS:-*.edu.sg,*.sg,*.com,*.me,*.kr,*.*}"
       EXPOSURE_ALLOWED_REGEX: "${EXPOSURE_ALLOWED_REGEX:-.*}"
@@ -573,42 +587,6 @@ services:
       WEB_REQUEST_SEND_ORIGIN: "${WEB_REQUEST_SEND_ORIGIN:-1}"
       WEB_REQUEST_ORIGIN_POOL: "${WEB_REQUEST_ORIGIN_POOL:-https://www.google.com/,https://www.bing.com/,https://duckduckgo.com/}"
       COLLECTOR_CYCLE_SLEEP_EXPOSURE: "${COLLECTOR_CYCLE_SLEEP_EXPOSURE:-21600}"
-      DB_POOL_MAX_SIZE: "3"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    cap_add:
-      - SYS_PTRACE
-    volumes:
-      - z:/unifiedcollector/media:/media
-      - z:/unifiedcollector:/vault
-      - ../credentials:/app/credentials
-      - sessions_data:/app/sessions
-      - ../config/sources:/app/config/sources:ro
-      - ../src:/app/src
-    depends_on:
-      postgres:
-        condition: service_healthy
-    env_file:
-      - ./env/common.env
-      - ./env/exposure.env
-    healthcheck:
-      test: ["CMD", "python", "-m", "src.core.health"]
-      interval: 60s
-      timeout: 45s
-      retries: 3
-      start_period: 30s
-    restart: unless-stopped
-
-  collector_lemon8:
-    image: unifiedcollector-collector:latest
-    container_name: unifiedcollector_collector_lemon8
-    init: true  # reap subprocess zombies so recreate can't wedge
-    command: python -m src.main worker --source lemon8
-    mem_limit: 384m
-    environment:
-      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
-      COLLECTOR_DRIVE_PATH: /media
-      COLLECTOR_VAULT_ROOT: /vault
       LEMON8_FYP_DETAIL_FETCH: "true"
       LEMON8_TARGETS_PER_CYCLE: "6"
       LEMON8_SPIDER_QUEUE_PER_CYCLE: "8"
@@ -631,6 +609,7 @@ services:
         condition: service_healthy
     env_file:
       - ./env/common.env
+      - ./env/exposure.env
       - ./env/lemon8.env
     healthcheck:
       test: ["CMD", "python", "-m", "src.core.health"]
@@ -858,6 +837,7 @@ services:
     mem_limit: 1g
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      COLLECTOR_STARTUP_DELAY_SECONDS: "75"
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
       COLLECTOR_HANG_TIMEOUT_SECONDS: "7200"
@@ -930,6 +910,7 @@ services:
     mem_limit: 512m
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      COLLECTOR_STARTUP_DELAY_SECONDS: "10"
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
       # Feature flag — MUST be set to a truthy value ("1", "true", "yes", "on")
@@ -1194,7 +1175,7 @@ services:
       GITHUB_QUOTA_PUSHER_ENABLED: "true"
       GITHUB_QUOTA_PUSHER_TARGET_RATIO: "0.80"
       GITHUB_QUOTA_PUSHER_MAX_CONCURRENT: "12"
-      GITHUB_QUOTA_PUSHER_BATCH_SIZE: "250"
+      GITHUB_QUOTA_PUSHER_BATCH_SIZE: "100"
     volumes:
       - z:/unifiedcollector/media:/media
       - z:/unifiedcollector:/vault
