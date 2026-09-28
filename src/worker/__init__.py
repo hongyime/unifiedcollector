@@ -409,7 +409,7 @@ class WorkerService:
         )
 
         for i, source in enumerate(sources):
-            self._launch(source, startup_delay=i * 3.0)
+            self._launch(source, startup_delay=self._source_startup_delay(i))
 
         watchdog = asyncio.create_task(self._watchdog_loop())
         reporter = asyncio.create_task(self._health_reporter())
@@ -763,6 +763,27 @@ class WorkerService:
         self._tasks[source] = task
         self._ever_launched = True
         logger.info("Launched worker for %s", source)
+
+
+    def _source_startup_delay(self, index: int) -> float:
+        """Per-source cold-start stagger to spread first-cycle memory peaks.
+
+        Combines an operator-configurable base delay (``COLLECTOR_STARTUP_DELAY_SECONDS``,
+        default 0, set per-container in docker-compose.yml) with the pre-existing
+        3s-per-index intra-container spread. See .agents/STATE.md (2026-09-28 entry)
+        for why this exists: a mass-OOM incident traced to ~20 collector containers
+        all hitting peak import + first-cycle memory at the same instant on cold
+        boot, with zero stagger between them (Postgres health-check dependency only
+        gates *when* they're allowed to start, not *when* they actually do — they
+        all unblock within the same Docker daemon tick).
+        """
+        # Malformed input falls back to 0 (no extra delay) rather than crashing
+        # the whole worker at startup — same defensive convention as _cycle_sleep().
+        try:
+            base = float(os.getenv("COLLECTOR_STARTUP_DELAY_SECONDS", "0"))
+        except ValueError:
+            base = 0.0
+        return base + index * 3.0
 
     def _cycle_sleep(self, source: str) -> float:
         """Inter-cycle sleep in seconds (default 300).
