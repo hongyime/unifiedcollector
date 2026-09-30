@@ -619,6 +619,37 @@ services:
       start_period: 30s
     restart: unless-stopped
 
+  # Do Next #3: 5 lightweight profile-only collectors (snapchat / paypal /
+  # airbnb / bluesky / pinterest) share one container. Queue-driven via
+  # profile_probe_queue, not firehose. Total budget 256m; each source has
+  # its own <SOURCE>_PROBE_ENABLED / _BATCH / _QPS env vars. paypal is
+  # DISABLED by default (POLICY.md ethics gate).
+  collector_profile_only:
+    image: unifiedcollector-collector:latest
+    container_name: unifiedcollector_collector_profile_only
+    init: true
+    command: python -m src.collectors.profile_only_runner
+    mem_limit: 256m
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      COLLECTOR_STARTUP_DELAY_SECONDS: "30"
+      # Individual platform enable flags. paypal defaults 0 - operator opts in.
+      SNAPCHAT_PROBE_ENABLED: "${SNAPCHAT_PROBE_ENABLED:-1}"
+      PAYPAL_PROBE_ENABLED: "${PAYPAL_PROBE_ENABLED:-0}"
+      AIRBNB_PROBE_ENABLED: "${AIRBNB_PROBE_ENABLED:-1}"
+      BLUESKY_PROBE_ENABLED: "${BLUESKY_PROBE_ENABLED:-1}"
+      PINTEREST_PROBE_ENABLED: "${PINTEREST_PROBE_ENABLED:-1}"
+      PROFILE_ROUND_ROBIN_INTERVAL_SECONDS: "${PROFILE_ROUND_ROBIN_INTERVAL_SECONDS:-60}"
+    volumes:
+      - ../src:/app/src
+      - ../credentials:/app/credentials:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - ./env/common.env
+    restart: unless-stopped
+
   collector_telegram:
     image: unifiedcollector-collector:latest
     container_name: unifiedcollector_collector_telegram
