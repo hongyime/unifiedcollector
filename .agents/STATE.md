@@ -1,3 +1,33 @@
+## Cleanup + smoke-test pass — 2026-09-30
+
+Follow-up to today's Do Now / Do Next / Explore batch. Operator asked to (a) enable all opt-in flags, (b) remove Whoxy and SauceNAO entirely (no keys available), (c) use HuggingFace for the GAN model, (d) fix the noisy-OR-with-negatives limitation, (e) backfill the schema_migrations ledger for the 10 migrations landed today, (f) smoke-test each new pipeline against live corpus with cleanup tags.
+
+**Done this pass:**
+1. Noisy-OR now handles negative signals correctly. `identity_scorer.py:_score_signals` splits pos/neg signals, applies noisy-OR to each bucket, then `score = max(0.0, pos * (1 - neg))`. `likely_synthetic_avatar_pair` weight flipped `0.30 -> -0.35`. Verified with 5-case standalone assertion script (all pass, all in [0,1]).
+2. `whois_enrich.py` and `20260930_add_whois_cache.sql` deleted; 3 hooks + 2 signal weights removed from incremental_runner + identity_scorer. Grep confirms zero remaining refs. AST-OK.
+3. `reverse_image_providers/saucenao.py` deleted; import + DEFAULT_ENABLED entry + provider stanza removed from reverse_image_bridge.py. Grep confirms zero refs. AST-OK.
+4. `scripts/download_gan_model.py` now defaults to HuggingFace `prithivMLmods/Deepfake-Detection-Exp-02-22-ONNX` (Apache-2.0, ~90 MB quantized ViT). Sidecar `.sha256` written on first successful download; verified for subsequent runs. Live download confirmed at 88.7 MB, sha256 `5a28be5f56b576f524a8ae3a67e4909b237bdb82b60a71a03d30279e9d283888`.
+5. `gan_detector.py` fixed for real model output shape: model exposes `[batch, 2]` logits (`[real, fake]`), we softmax and return `probs[1]`. Old code assumed a single sigmoid scalar and threw `only 0-dimensional arrays can be converted to Python scalars`.
+6. **TikTok decoder bug** found via smoke-test 4c: on 100 real rows, 0 decoded. Investigation showed the high 32 bits of the post-ID are already a UNIX timestamp directly — the `TIKTOK_EPOCH_UNIX + seconds_since_epoch` math in the decoder was adding 46 years to the correct answer, pushing every result past the future-slack guard. Fixed the decoder + updated tests (added a real-ID regression test using ID `7018513720435395842` -> 2021-10-13 11:37:47 UTC). Post-fix smoke: 200/200 decoded, median |decoded - create_time| = 6s, p95 = 27s.
+7. `schema_migrations` ledger backfilled with the 10 migrations landed today (SHA-256 checksums matched between PowerShell and the runner's own `hashlib.sha256(text.encode("utf-8")).hexdigest()`).
+8. Smoke suite executed against live shared Postgres (postgres started in isolation, no collectors/analyzer/scheduler running):
+   - 4a identity_history: 252 _user_changes scanned across 8 tables, 1 real cross-platform username hit found.
+   - 4b threads_from_ig: 2/2 known IG usernames reachable on threads.net (200 OK).
+   - 4c tiktok_backfill: 100/100 decoded (median 5s vs create_time). Bug fix confirmed.
+   - 4d bio_clustering: tokenizer works; bio_ngram_index empty (0 rows) — refresh worker is a separate operator step.
+   - 4e well_known_scanner: github.com robots.txt + security.txt both fetched + parsed cleanly.
+   - 4f archive_fallback: code path completed; Wayback returned 429 rate-limited. Adapter behavior correct.
+   - 4g reverse_image_bridge: adapter plumbing works; providers correctly rejected an invalid 126-byte image (Wikimedia 403). Real image test deferred.
+   - 4i GAN detector: model loads, real NASA photo scored 0.44 (leans real, correct). Synthetic image URL returned HTML instead of JPEG so score=None — not a bug.
+   - 4h epieos_probe: skipped, needs operator-owned email input to smoke safely.
+9. Cleanup query verified: `DELETE FROM identity_signals WHERE metadata @> '{"smoke_test": true}'::jsonb` -> 0 rows (smoke run was read-only). Query pattern captured for future writable smoke runs.
+
+**Not yet done (next session):**
+- Turn on env flags: `EPIEOS_ENABLED=1`, `PAYPAL_PROBE_ENABLED=1`, `GAN_DETECTOR_ENABLED=1`, `REVERSE_IMAGE_ENABLED=1`, `ARCHIVE_FALLBACK_ENABLED=1`, `WELL_KNOWN_SCAN_ENABLED=1`. Need operator input on env-file location (docker/env/*.env vs .env root).
+- Actually run `python scripts/download_gan_model.py` on the analyzer host so `${FACE_MODEL_ROOT}/gan/deepfake_detector.onnx` exists before GAN_DETECTOR_ENABLED=1.
+- Run bio_ngram_index refresh worker against corpus (populates 4d).
+- Push postgres stop when this cleanup lands.
+
 ## Host memory exhaustion + shared Postgres outage — 2026-09-27 (multi-day, cross-repo)
 
 Surfaced mid-conversation while discussing collector data types/speed with the operator, then confirmed as a live P0 via 5 parallel diagnostic subagents (WhatsApp/Instagram/Beeper all showed zero throughput) plus an inbound report from the unifiedanalyzer-side agent (`unifiedcollector_postgres` unhealthy 38h+, cascading into their readiness checks and 7-11h scheduler runs).
@@ -522,12 +552,12 @@ Current live update:
 <!-- MOLT_AUTO_START -->
 ## Auto State
 
-- Updated: 2026-09-30 17:44:20 +08:00
-- Machine: dev-host-3.example
+- Updated: 2026-09-30 20:42:46 +08:00
+- Machine: PRAWN-L390
 - Harness: claude
 - Event: stop
 - Branch: main
-- HEAD: e2b48e8d
+- HEAD: 01f44499
 - Dirty files: 0
 - Resume hint: Read .agents/STATE.md, then the latest file in .agents/handoffs/ if present.
 <!-- MOLT_AUTO_END -->
