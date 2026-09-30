@@ -66,6 +66,7 @@ from typing import AsyncIterator, Optional
 import httpx
 
 from src.core.base_collector import BaseCollector
+from src.collectors.tiktok.decoder import tiktok_id_to_utc
 from src.collectors.tiktok.parse import safe_int as _parse_safe_int, to_dt as _parse_to_dt
 from src.core.file_naming import sanitize_name
 from src.core.proximity import refresh_account_proximity_cache
@@ -1748,9 +1749,9 @@ class TiktokCollector(BaseCollector):
                         music_id, music_title, music_author, music_duration,
                         duet_enabled, stitch_enabled,
                         view_count, like_count, comment_count, share_count,
-                        duration, create_time, metadata
+                        duration, create_time, metadata, id_decoded_utc
                     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-                              $14, $15, $16, $17, $18, $19, $20, $21, $22)
+                              $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
                     ON CONFLICT (platform_post_id) DO UPDATE SET
                         profile_id = COALESCE(EXCLUDED.profile_id, tiktok_posts.profile_id),
                         video_url = COALESCE(EXCLUDED.video_url, tiktok_posts.video_url),
@@ -1772,7 +1773,8 @@ class TiktokCollector(BaseCollector):
                         share_count = EXCLUDED.share_count,
                         duration = COALESCE(EXCLUDED.duration, tiktok_posts.duration),
                         create_time = COALESCE(EXCLUDED.create_time, tiktok_posts.create_time),
-                        metadata = EXCLUDED.metadata
+                        metadata = EXCLUDED.metadata,
+                        id_decoded_utc = COALESCE(EXCLUDED.id_decoded_utc, tiktok_posts.id_decoded_utc)
                 """,
                 str(post_id),
                 profile_uuid,
@@ -1796,6 +1798,7 @@ class TiktokCollector(BaseCollector):
                 self._safe_int(video.get("duration")),
                 self._to_dt(data.get("createTime")),
                 json.dumps(data, default=str, ensure_ascii=False),
+                tiktok_id_to_utc(post_id),
                 )
         except Exception as e:
             logger.warning("tiktok _upsert_post failed for %s: %s", post_id, e)
