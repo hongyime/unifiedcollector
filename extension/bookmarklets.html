@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<!--
+  UnifiedCollector Bookmarklet Bundle (Explore #2).
+  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  Standalone HTML page. Open it once, then drag any of the blue-bordered
+  buttons into your browser's bookmark bar. Clicking a bookmark on the
+  target page runs the bookmarklet.
+
+  This is the "vertical slice" v1 port from tools.myosint.training. Five
+  bookmarklets, one from each pattern group in the spec:
+    A. Passive extractor          -> Threads-from-IG
+    B. Active extractor (API)     -> GitHub User
+    C. Multi-site fanout          -> US Name Search + US Phone Search
+    D. Utility (DOM-only)         -> Table Exporter
+
+  Griffin originally ships equivalents at https://tools.myosint.training
+  under different licences per bookmarklet; the ports here are
+  reimplementations, kept minimal on purpose. Attribution is preserved
+  in the bookmarklet titles.
+
+  Load this file at file:///.../extension/bookmarklets.html in any browser.
+  Bookmark bar edits happen in the browser UI, not through the extension.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>UnifiedCollector Bookmarklets</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+           background: #0d1117; color: #c9d1d9; padding: 24px; max-width: 900px; margin: 0 auto; }
+    h1 { color: #58a6ff; border-bottom: 1px solid #30363d; padding-bottom: 8px; }
+    h2 { color: #79c0ff; margin-top: 32px; }
+    .bm { display: inline-block; padding: 8px 14px; margin: 8px 0;
+          background: #1f6feb; color: #fff; text-decoration: none; border-radius: 6px;
+          font-weight: 600; border: 2px solid #58a6ff; }
+    .bm:hover { background: #388bfd; }
+    .desc { color: #8b949e; font-size: 14px; margin: 4px 0 12px; }
+    .attr { color: #6e7681; font-size: 12px; font-style: italic; }
+    .note { background: #21262d; border-left: 3px solid #d29922; padding: 12px 16px;
+            border-radius: 4px; margin: 16px 0; }
+    code { background: #161b22; padding: 2px 6px; border-radius: 3px; font-size: 90%; }
+  </style>
+</head>
+<body>
+
+<h1>UnifiedCollector Bookmarklets</h1>
+<p class="desc">Drag any blue button into your browser's bookmark bar. Then click the bookmark while viewing the relevant page.</p>
+
+<div class="note">
+  <strong>Ethics reminder.</strong> These bookmarklets are read-only browser tools.
+  They obey the same POLICY.md rules as the rest of this system: no active engagement,
+  no sock-puppet writes, no password-reset knocking, no doxxing. Griffin's
+  <a href="https://hatless1der.com/ethically-controversial-practices-in-osint/"
+     style="color:#58a6ff">Ethically Controversial Practices</a> framing (Legal / Ethical / Moral)
+  applies.
+</div>
+
+<h2>A. Threads-from-IG</h2>
+<p class="desc">On any Instagram profile page, open the same-username Threads profile in a new tab.
+  Even when the linked Threads account isn't shown on the IG page, Meta uses matching usernames
+  so this reliably resolves.</p>
+<a class="bm" href="javascript:(function(){var u=window.location.href;var m=u.match(/instagram\.com\/([^/?#]+)/);if(m&&m[1]&&m[1]!=='p'&&m[1]!=='reel'){window.open('https://www.threads.net/@'+m[1],'_blank');}else{alert('Not an Instagram profile page.');}})();">Threads-from-IG</a>
+<p class="attr">Pattern discovered by Griffin (@hatless1der), Oct 2024. Read-only URL construction.</p>
+
+<h2>B. GitHub User Snapshot</h2>
+<p class="desc">On a GitHub profile page, call the public REST API (rate limited to 60/hour unauthenticated)
+  and copy the structured profile to clipboard as JSON. Useful for cross-referencing bio / email /
+  blog / company against other platforms.</p>
+<a class="bm" href="javascript:(function(){var m=window.location.pathname.match(/^\/([^/]+)\/?$/);if(!m){alert('Open a GitHub user profile first.');return;}fetch('https://api.github.com/users/'+m[1]).then(function(r){return r.json();}).then(function(d){var s=JSON.stringify({login:d.login,name:d.name,company:d.company,blog:d.blog,email:d.email,bio:d.bio,twitter:d.twitter_username,followers:d.followers,following:d.following,public_repos:d.public_repos,created_at:d.created_at,updated_at:d.updated_at,avatar_url:d.avatar_url},null,2);navigator.clipboard.writeText(s).then(function(){alert('GitHub profile copied to clipboard:\n\n'+s);});}).catch(function(e){alert('GitHub API error: '+e.message);});})();">GitHub User Snapshot</a>
+<p class="attr">Active extractor. Uses one public REST call. No auth, no cookies.</p>
+
+<h2>C. Multi-site fanouts</h2>
+<p class="desc">Fanout searches that open N sites simultaneously in new tabs. Griffin's
+  <a href="https://hatless1der.com/4-simple-useful-osint-search-bookmarklets/" style="color:#58a6ff">
+  2021-04-19 post</a> is the canonical source.
+  <strong>Enable popups for this file's origin</strong> or only the first tab will open.</p>
+
+<h3>US Name + State</h3>
+<a class="bm" href="javascript:(function(){var fn=prompt('First name');if(!fn)return;var ln=prompt('Last name');if(!ln)return;var st=prompt('State (2-letter, e.g. CA)');if(!st)return;var f=encodeURIComponent(fn),l=encodeURIComponent(ln),s=encodeURIComponent(st.toUpperCase());var urls=['https://www.truepeoplesearch.com/results?name='+f+'%20'+l+'&citystatezip='+s,'https://www.fastpeoplesearch.com/name/'+f+'-'+l+'_'+s,'https://www.familytreenow.com/search/genealogy/results?first='+f+'&last='+l+'&citystatezip='+s,'https://www.searchpeoplefree.com/find/'+f+'-'+l+'/'+s,'https://www.spokeo.com/'+f+'-'+l+'/'+s,'https://www.whitepages.com/name/'+f+'-'+l+'/'+s,'https://thatsthem.com/name/'+f+'-'+l+'/'+s,'https://www.cyberbackgroundchecks.com/people/'+f+'-'+l+'/'+s];urls.forEach(function(u){window.open(u,'_blank');});})();">US Name + State</a>
+
+<h3>US Phone</h3>
+<a class="bm" href="javascript:(function(){var ac=prompt('Area code (3 digits)');if(!ac)return;var px=prompt('Prefix (3 digits)');if(!px)return;var last=prompt('Last 4 digits');if(!last)return;var urls=['https://www.truepeoplesearch.com/results?phoneno=('+ac+')'+px+'-'+last,'https://www.fastpeoplesearch.com/'+ac+'-'+px+'-'+last,'https://www.peoplesearchnow.com/phone/'+ac+'-'+px+'-'+last,'https://thatsthem.com/phone/'+ac+'-'+px+'-'+last,'https://www.spytox.com/reverse-phone-lookup/'+ac+'-'+px+'-'+last,'https://www.usphonebook.com/'+ac+'-'+px+'-'+last,'https://www.cyberbackgroundchecks.com/phone/'+ac+'-'+px+'-'+last];urls.forEach(function(u){window.open(u,'_blank');});})();">US Phone</a>
+<p class="attr">Fewer sites than Griffin's originals (dropped the ones that fail hardest on VPN traffic).</p>
+
+<h2>D. Table Exporter</h2>
+<p class="desc">On any page with an HTML table, click this to detect all tables, score them by size,
+  and copy the largest one to clipboard as CSV. Useful for scraping people-search results,
+  domain reports, and any tabular investigative surface.</p>
+<a class="bm" href="javascript:(function(){var tables=document.querySelectorAll('table');if(!tables.length){alert('No tables on this page.');return;}var best=null,bestScore=0;tables.forEach(function(t){var rows=t.querySelectorAll('tr').length;var cols=(t.querySelector('tr')||{}).cells||[];var score=rows*(cols.length||1);if(score>bestScore){bestScore=score;best=t;}});if(!best){alert('No table with rows.');return;}var out=[];best.querySelectorAll('tr').forEach(function(r){var cells=[];r.querySelectorAll('th,td').forEach(function(c){var v=c.innerText.replace(/\"/g,'\"\"').replace(/\n/g,' ').trim();cells.push('\"'+v+'\"');});out.push(cells.join(','));});var csv=out.join('\n');navigator.clipboard.writeText(csv).then(function(){alert('Copied '+out.length+' rows as CSV to clipboard.');});})();">Table Exporter</a>
+<p class="attr">DOM-only. Zero network. Attribution: matches tools.myosint.training's "Table Exporter" pattern.</p>
+
+<hr style="border-color:#30363d;margin-top:32px">
+<p class="attr">Full library reference: <a href="https://tools.myosint.training" style="color:#58a6ff">tools.myosint.training</a>.
+Griffin's blog: <a href="https://hatless1der.com" style="color:#58a6ff">hatless1der.com</a>.
+Explore #2 v1 slice from Z:\\...\\research\\scope-explore-2-extension-port.md.</p>
+
+</body>
+</html>
