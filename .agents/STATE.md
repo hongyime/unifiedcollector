@@ -1,8 +1,9 @@
 # Agent State
 
-Current task: Collector phase. The WhatsApp bridge names stay hyphenated. The production compose file is checked in CI. The ig_ingest split and Postgres split are still ahead. env.defaults and the infra audit have no written change to make.
+Current task: Collector phase. Env examples now cover every referenced key. Threads, Facebook, and X have no worker class; they stay on the browser ingest bridge. Exposure and Lemon8 stay in one container because that merge was deliberate. Postgres stays last.
 
 Progress:
+- Completed the env vocabulary: `.env.example` now documents `ARCHIVE_FALLBACK_BATCH`, `ARCHIVE_FALLBACK_QPS`, `ARCHIVE_FALLBACK_DAILY_CAP`, and `COLLECTOR_STARTUP_DELAY_SECONDS` at the code defaults. `python scripts/verify_env_split.py` exits 0.
 - Completed the compose config check: `.github/workflows/compose-config.yml` runs `docker compose config` with a placeholder allowlist and does not start containers. Local check: missing `TELEGRAM_SPIDER_ACCOUNTS` exits 1; `ci-placeholder` exits 0.
 - Completed the env-split parser fix: lines before `services:` are not services, and `<<: *profile-probe` copies `common.env` onto each probe. The five probe containers are scanned. `PROFILE_ONLY_SOURCE` is documented in `.env.example`. Verification: `pytest tests/tools/test_env_split_profile_anchor.py` passed. `verify_env_split.py` scans 29 services with no phantom `volumes` service. The five probes have `missing=0`. The 42 missing archive-fallback keys were already missing before this change.
 - Completed the dead-plan cleanup and pushed `e2d6a52a`: `docs/plans/scheduler-refactor.md` is not cited under `src/` or `tests/`. The LOGIC-005 notes stay.
@@ -569,12 +570,12 @@ Current live update:
 <!-- MOLT_AUTO_START -->
 ## Auto State
 
-- Updated: 2026-10-01 21:08:05 +08:00
+- Updated: 2026-10-01 21:28:50 +08:00
 - Machine: dev-host-3.example
 - Harness: claude
 - Event: stop
 - Branch: main
-- HEAD: c3edf1e6
+- HEAD: dd9db650
 - Dirty files: 0
 - Resume hint: Read .agents/STATE.md, then the latest file in .agents/handoffs/ if present.
 <!-- MOLT_AUTO_END -->
