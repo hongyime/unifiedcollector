@@ -1,9 +1,10 @@
 # Agent State
 
-Current task: Collector phase. Dead scheduler-plan citations are gone. Next is the env-split parser: the profile-probe anchor is parsed as three fake services, and the five profile containers are not scanned. The wa-bridge service names stay hyphenated because the live bridge URL is http://wa-bridge-1:3001. env.defaults is still unspecified.
+Current task: Collector phase. Env-split parser now understands the profile-probe anchor. wa-bridge service names stay hyphenated because the live bridge URL is http://wa-bridge-1:3001. env.defaults, the infra audit, and the ig_ingest split are not specified enough to start.
 
 Progress:
-- Completed the dead-plan cleanup: `docs/plans/scheduler-refactor.md` is not cited under `src/` or `tests/`. The LOGIC-005 notes stay. Verification: `pytest tests/tools/test_no_dead_scheduler_plan.py tests/test_scheduler_graph_edges.py` passed 4.
+- Completed the env-split parser fix: lines before `services:` are not services, and `<<: *profile-probe` copies `common.env` onto each probe. The five probe containers are scanned. `PROFILE_ONLY_SOURCE` is documented in `.env.example`. Verification: `pytest tests/tools/test_env_split_profile_anchor.py` passed. `verify_env_split.py` scans 29 services with no phantom `volumes` service. The five probes have `missing=0`. The 42 missing archive-fallback keys were already missing before this change.
+- Completed the dead-plan cleanup and pushed `e2d6a52a`: `docs/plans/scheduler-refactor.md` is not cited under `src/` or `tests/`. The LOGIC-005 notes stay.
 - Completed T6 and pushed `11f8af86`: `x-profile-probe` holds the image, 192m, mounts, `common.env`, and the Postgres dependency. Each service still sets `--source`, its startup delay, and its own probe flag. `500b79e0` replaced the real host name in the state files with the placeholder.
 - Completed T5 and pushed `94305765`: removed `collector_profile_only`. Snapchat, PayPal, Airbnb, Bluesky, and Pinterest each run `profile_only_runner --source <name>` at 192m. Unset `PROFILE_ONLY_SOURCE` still runs all five. Default `up` starts 28 services.
 - Completed T4 and pushed `468ae5fa`: GitHub runs in `collector_github`. Lowrisk is strava+search.

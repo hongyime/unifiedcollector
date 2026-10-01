@@ -61,6 +61,10 @@ COMMON_WORKER_PATHS = [
     "src/db",
     "src/notifications",  # base_collector uses telegram notifier for alerts
 ]
+PROFILE_PROBE_PATHS = [
+    "src/collectors/profile_only_runner.py",
+    "src/core/profile_only_collector.py",
+]
 
 SERVICE_SOURCES: dict[str, list[str]] = {
     # External images -> no python source
@@ -69,14 +73,6 @@ SERVICE_SOURCES: dict[str, list[str]] = {
     "redis": [],
     "wa-bridge-1": [],
     "wa-bridge-2": [],
-
-    # Idle catch-all container: all sources disabled at runtime via
-    # COLLECTOR_DISABLED_SOURCES. Its executed code path is
-    # src.main -> src.worker (imports only). Collector modules are imported but
-    # their per-source env access is never exercised, so scope this narrowly.
-    "collector": ["src/main.py", "src/worker", "src/core/env.py",
-                  "src/core/logging_config.py", "src/core/health.py",
-                  "src/db"],
 
     # Recon-only: MUST NOT reference collector platform creds
     "collector_spiderfoot": [
@@ -97,6 +93,11 @@ SERVICE_SOURCES: dict[str, list[str]] = {
     "collector_youtube": COMMON_WORKER_PATHS + ["src/collectors/youtube"],
     "collector_tiktok": COMMON_WORKER_PATHS + ["src/collectors/tiktok", "src/core/tiktok_browser.py"],
     "collector_github": COMMON_WORKER_PATHS + ["src/collectors/github"],
+    "collector_snapchat": PROFILE_PROBE_PATHS + ["src/collectors/snapchat"],
+    "collector_paypal": PROFILE_PROBE_PATHS + ["src/collectors/paypal"],
+    "collector_airbnb": PROFILE_PROBE_PATHS + ["src/collectors/airbnb"],
+    "collector_bluesky": PROFILE_PROBE_PATHS + ["src/collectors/bluesky"],
+    "collector_pinterest": PROFILE_PROBE_PATHS + ["src/collectors/pinterest"],
     "collector_lowrisk": COMMON_WORKER_PATHS + [
         "src/collectors/strava",
         "src/collectors/search",
@@ -219,6 +220,10 @@ SERVICE_ALLOWLIST: dict[str, set[str]] = {
 # ---------------------------------------------------------------------------
 
 _SERVICE_RE = re.compile(r"^  ([a-z][a-z0-9_-]*):$")
+_ANCHOR_RE = re.compile(r"^x-[A-Za-z0-9_-]+: &([A-Za-z0-9_-]+)\s*$")
+_MERGE_RE = re.compile(r"^    <<: \*([A-Za-z0-9_-]+)\s*$")
+_ANCHOR_ENV_FILE_RE = re.compile(r"^  env_file:$")
+_ANCHOR_ENV_ENTRY_RE = re.compile(r"^    - (.+)$")
 _VOLUMES_TOP_RE = re.compile(r"^volumes:$")
 _ENV_FILE_RE = re.compile(r"^    env_file:$")
 _ENV_ENTRY_RE = re.compile(r"^      - (.+)$")
@@ -259,19 +264,49 @@ def parse_compose(compose: Path = COMPOSE_FILE) -> tuple[dict[str, list[str]], d
     lines = compose.read_text(encoding="utf-8").splitlines()
     env_files: dict[str, list[str]] = {}
     inline_env: dict[str, set[str]] = {}
+    anchors: dict[str, list[str]] = {}
     current: str | None = None
     section: str | None = None  # "env_file" | "environment" | None
+    anchor_name: str | None = None
+    anchor_section: str | None = None
+    in_services = False
     for line in lines:
+        if not in_services:
+            if line == "services:":
+                in_services = True
+                anchor_name = None
+                anchor_section = None
+                continue
+            anchor_match = _ANCHOR_RE.match(line)
+            if anchor_match:
+                anchor_name = anchor_match.group(1)
+                anchors[anchor_name] = []
+                anchor_section = None
+                continue
+            if anchor_name and _ANCHOR_ENV_FILE_RE.match(line):
+                anchor_section = "env_file"
+                continue
+            if anchor_name and anchor_section == "env_file":
+                entry_match = _ANCHOR_ENV_ENTRY_RE.match(line)
+                if entry_match:
+                    anchors[anchor_name].append(entry_match.group(1))
+                    continue
+                anchor_section = None
+            continue
         if _VOLUMES_TOP_RE.match(line):
             break
-        m = _SERVICE_RE.match(line)
-        if m:
-            current = m.group(1)
+        service_match = _SERVICE_RE.match(line)
+        if service_match:
+            current = service_match.group(1)
             env_files[current] = []
             inline_env[current] = set()
             section = None
             continue
         if current is None:
+            continue
+        merge_match = _MERGE_RE.match(line)
+        if merge_match:
+            env_files[current].extend(anchors.get(merge_match.group(1), []))
             continue
         if _ENV_FILE_RE.match(line):
             section = "env_file"

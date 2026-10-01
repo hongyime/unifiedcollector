@@ -1,4 +1,5 @@
 # UnifiedCollector Agent Journal
+- 2026-10-01: The env-split checker no longer treats the profile-probe anchor as services. Each probe container is scanned, and `PROFILE_ONLY_SOURCE` is documented.
 - 2026-10-01: Citations of the deleted scheduler plan are gone. The LOGIC-005 notes stay. The WhatsApp bridge service names stay hyphenated because the running collector calls http://wa-bridge-1:3001.
 - 2026-10-01: The five profile-probe containers share one compose anchor for image, memory, and mounts. Each still runs its own collector class. The environment map stays on the service because a YAML merge replaces it instead of combining it.
 - 2026-10-01: The five profile probes no longer share `collector_profile_only`. Each has its own container. An unset source still runs all five for ad-hoc use.
