@@ -1,9 +1,9 @@
 # Agent State
 
-Current task: Collector phase. T5 done locally — each profile probe has its own container. Next is T6, compose anchor.
+Current task: Collector phase. T5 pushed as `94305765`. Next is T6, compose anchor — meaning not specified in the repo. Waiting on that before editing.
 
 Progress:
-- Completed T5: removed `collector_profile_only`. Snapchat, PayPal, Airbnb, Bluesky, and Pinterest each run `profile_only_runner --source <name>` at 192m. Unset `PROFILE_ONLY_SOURCE` still runs all five. Default `up` starts 28 services. Verification: `pytest tests/collectors/test_profile_only_split.py tests/tools/test_compose_profile_split.py tests/collectors/test_paypal_enabled.py` passed 8; `docker compose config --services` lists the five probes and omits `collector_profile_only` and `collector_instagram_dm`.
+- Completed T5 and pushed `94305765`: removed `collector_profile_only`. Snapchat, PayPal, Airbnb, Bluesky, and Pinterest each run `profile_only_runner --source <name>` at 192m. Unset `PROFILE_ONLY_SOURCE` still runs all five. Default `up` starts 28 services. Verification: `pytest tests/collectors/test_profile_only_split.py tests/tools/test_compose_profile_split.py tests/collectors/test_paypal_enabled.py` passed 8; `docker compose config --services` lists the five probes and omits `collector_profile_only` and `collector_instagram_dm`.
 - Completed T4 and pushed `468ae5fa`: GitHub runs in `collector_github`. Lowrisk is strava+search.
 - Completed T3 and pushed `f761c9e1`: spiderfoot starts with the stack. `instagram-dm` stays opt-in.
 - Completed T2 and pushed `0fa1e77b`: PayPal probe defaults on. Opt-out remains `PAYPAL_PROBE_ENABLED=0`.
@@ -565,12 +565,12 @@ Current live update:
 <!-- MOLT_AUTO_START -->
 ## Auto State
 
-- Updated: 2026-10-01 14:17:10 +08:00
+- Updated: 2026-10-01 15:30:50 +08:00
 - Machine: dev-host-3.example
 - Harness: claude
 - Event: stop
 - Branch: main
-- HEAD: 4a9e7e1c
+- HEAD: 94305765
 - Dirty files: 0
 - Resume hint: Read .agents/STATE.md, then the latest file in .agents/handoffs/ if present.
 <!-- MOLT_AUTO_END -->
