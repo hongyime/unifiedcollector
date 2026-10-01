@@ -1,7 +1,6 @@
 """CookieCheckHandler — periodic active cookie-health validation.
 
-Extracted from ``Scheduler._maybe_check_cookies`` in the LOGIC-005 refactor
-(``docs/plans/scheduler-refactor.md`` step 7). Owns its own last-fire
+Extracted from ``Scheduler._maybe_check_cookies`` in the LOGIC-005 refactor (step 7). Owns its own last-fire
 timestamp and env-var read.
 
 Actively probes every stored social cookie so the dashboard never shows

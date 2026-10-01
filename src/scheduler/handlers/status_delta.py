@@ -1,7 +1,6 @@
 """StatusDeltaHandler — 15-minute delta status update (Feature 2).
 
-Extracted from ``Scheduler._maybe_status_delta`` in the LOGIC-005 refactor
-(``docs/plans/scheduler-refactor.md``). Owns its own last-fire timestamp and
+Extracted from ``Scheduler._maybe_status_delta`` in the LOGIC-005 refactor. Owns its own last-fire timestamp and
 env-var read; scheduler state no longer carries it.
 
 Independent from ``HeartbeatHandler``: the hourly digest keeps its own cadence

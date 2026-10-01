@@ -1,7 +1,6 @@
 """BuildGraphEdgesHandler — periodic social-graph edge synthesis.
 
-Extracted from ``Scheduler._build_graph_edges`` in the LOGIC-005 refactor
-(``docs/plans/scheduler-refactor.md`` step 11). Owns its own last-fire
+Extracted from ``Scheduler._build_graph_edges`` in the LOGIC-005 refactor (step 11). Owns its own last-fire
 timestamp; env-var reads happen inside ``should_run`` / ``run``.
 
 Computes three edge types from messaging membership into ``graph_edges``:

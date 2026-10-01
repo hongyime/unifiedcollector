@@ -9,7 +9,7 @@ Registry is populated by handler modules on import (via ``HANDLERS.append(...)``
 so adding a new periodic job is a pure additive change: one new file, one
 import, no edits to a monolithic ``_tick``.
 
-All periodic handlers listed in docs/plans/scheduler-refactor.md are now
+All periodic handlers from the LOGIC-005 scheduler split are now
 extracted. Step 15 will collapse the residual ``Scheduler`` shims.
 """
 from __future__ import annotations

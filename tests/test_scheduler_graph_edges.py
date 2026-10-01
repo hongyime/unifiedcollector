@@ -1,7 +1,7 @@
 """Source-level assertions on the WhatsApp/Telegram graph-edge builder SQL.
 
 Historically these assertions ran against ``Scheduler._build_graph_edges``.
-LOGIC-005 (``docs/plans/scheduler-refactor.md`` step 11) extracted that method
+LOGIC-005 step 11 extracted that method
 to ``src.scheduler.handlers.graph_edges.BuildGraphEdgesHandler.run``; the
 assertions still target the SQL text, only the inspection target moved.
 """

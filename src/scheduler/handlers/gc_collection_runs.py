@@ -1,7 +1,6 @@
 """GcCollectionRunsHandler — hourly retention GC for ``collection_runs``.
 
-Extracted from ``Scheduler._gc_collection_runs`` in the LOGIC-005 refactor
-(``docs/plans/scheduler-refactor.md`` step 8). Owns its own last-fire
+Extracted from ``Scheduler._gc_collection_runs`` in the LOGIC-005 refactor (step 8). Owns its own last-fire
 timestamp; env-var read is lazy on ``run``.
 
 P3-7 fix: ``collection_runs`` has no consumer and previously grew unbounded

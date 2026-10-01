@@ -1,9 +1,10 @@
 # Agent State
 
-Current task: Collector phase. T6 is the shared profile-probe compose anchor. Next specified jobs are the wa-bridge rename, the dead scheduler-refactor doc reference, and env.defaults. T7 "infra audit" is not specified.
+Current task: Collector phase. Dead scheduler-plan citations are gone. Next is the env-split parser: the profile-probe anchor is parsed as three fake services, and the five profile containers are not scanned. The wa-bridge service names stay hyphenated because the live bridge URL is http://wa-bridge-1:3001. env.defaults is still unspecified.
 
 Progress:
-- Completed T6: `x-profile-probe` holds the image, 192m, mounts, `common.env`, and the Postgres dependency. Each service still sets `--source`, its startup delay, and its own probe flag. A YAML merge replaces `environment` instead of combining it, so that map stays on the service. Verification: `pytest tests/tools/test_compose_profile_split.py tests/tools/test_compose_recon_default.py tests/tools/test_compose_github_split.py` passed 7. `docker compose config` renders 28 services, 192m as 201326592 bytes, the right command, and only that service's probe flag. `common.env` is inlined the same way as the other collectors.
+- Completed the dead-plan cleanup: `docs/plans/scheduler-refactor.md` is not cited under `src/` or `tests/`. The LOGIC-005 notes stay. Verification: `pytest tests/tools/test_no_dead_scheduler_plan.py tests/test_scheduler_graph_edges.py` passed 4.
+- Completed T6 and pushed `11f8af86`: `x-profile-probe` holds the image, 192m, mounts, `common.env`, and the Postgres dependency. Each service still sets `--source`, its startup delay, and its own probe flag. `500b79e0` replaced the real host name in the state files with the placeholder.
 - Completed T5 and pushed `94305765`: removed `collector_profile_only`. Snapchat, PayPal, Airbnb, Bluesky, and Pinterest each run `profile_only_runner --source <name>` at 192m. Unset `PROFILE_ONLY_SOURCE` still runs all five. Default `up` starts 28 services.
 - Completed T4 and pushed `468ae5fa`: GitHub runs in `collector_github`. Lowrisk is strava+search.
 - Completed T3 and pushed `f761c9e1`: spiderfoot starts with the stack. `instagram-dm` stays opt-in.
@@ -566,12 +567,12 @@ Current live update:
 <!-- MOLT_AUTO_START -->
 ## Auto State
 
-- Updated: 2026-10-01 17:19:30 +08:00
+- Updated: 2026-10-01 17:32:26 +08:00
 - Machine: dev-host-3.example
 - Harness: claude
 - Event: stop
 - Branch: main
-- HEAD: b5898ad2
+- HEAD: 500b79e0
 - Dirty files: 0
 - Resume hint: Read .agents/STATE.md, then the latest file in .agents/handoffs/ if present.
 <!-- MOLT_AUTO_END -->

@@ -1,7 +1,7 @@
 """ReconcileIdentitiesHandler — periodic social_users reconciliation.
 
 Extracted from ``Scheduler._maybe_reconcile_identities`` in the LOGIC-005
-refactor (``docs/plans/scheduler-refactor.md`` step 6). Owns its own last-fire
+refactor (LOGIC-005 step 6). Owns its own last-fire
 timestamp and env-var read.
 
 Merges fragmented ``social_users`` rows (username-keyed -> id-keyed) on the

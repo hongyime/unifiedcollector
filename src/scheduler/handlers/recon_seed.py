@@ -1,7 +1,7 @@
 """ReconSeedHandler — periodic recon-target seeding from collector data.
 
 Extracted from ``Scheduler._maybe_seed_recon_targets`` in the LOGIC-005
-refactor (``docs/plans/scheduler-refactor.md`` step 9). Owns its own
+refactor (LOGIC-005 step 9). Owns its own
 last-fire timestamp; env-var reads happen inside ``should_run`` / ``run``.
 
 Keeps the recon worker queue fed by enqueueing username targets discovered

@@ -1,7 +1,6 @@
 """PhoneIntelHandler — periodic offline WhatsApp phone-JID enrichment.
 
-Extracted from ``Scheduler._maybe_run_phone_intel`` in the LOGIC-005 refactor
-(``docs/plans/scheduler-refactor.md`` step 10). Owns its own last-fire
+Extracted from ``Scheduler._maybe_run_phone_intel`` in the LOGIC-005 refactor (step 10). Owns its own last-fire
 timestamp; env-var reads happen inside ``should_run`` / ``run``.
 
 Runs ``src.core.wa_phone_intel`` on a bounded batch of unenriched WhatsApp

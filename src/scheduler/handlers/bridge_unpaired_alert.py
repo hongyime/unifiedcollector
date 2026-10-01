@@ -1,7 +1,7 @@
 """BridgeUnpairedAlertHandler — Telegram alert on WhatsApp bridge outages.
 
 Extracted from ``Scheduler._maybe_alert_bridge_unpaired`` in the LOGIC-005
-refactor (``docs/plans/scheduler-refactor.md`` step 12). Owns its own
+refactor (LOGIC-005 step 12). Owns its own
 last-fire timestamp; env-var reads happen inside ``should_run`` / ``run``.
 
 ``src/collectors/whatsapp/__init__.py`` stamps

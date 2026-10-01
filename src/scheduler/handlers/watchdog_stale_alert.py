@@ -1,7 +1,7 @@
 """WatchdogStaleAlertHandler — escalation alert on persistently stale sources.
 
 Extracted from ``Scheduler._maybe_alert_watchdog_stale`` in the LOGIC-005
-refactor (``docs/plans/scheduler-refactor.md`` step 14). Owns its own
+refactor (LOGIC-005 step 14). Owns its own
 last-fire timestamp; env-var reads happen inside ``should_run`` / ``run``.
 
 The freshness watchdog (``src/watchdog/freshness.py``) restarts stale

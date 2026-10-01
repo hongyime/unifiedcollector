@@ -1,7 +1,7 @@
 """RealtimeFeedAlertHandler — alert on realtime-feed failed-queue depth.
 
 Extracted from ``Scheduler._maybe_alert_realtime_feed_failed`` in the
-LOGIC-005 refactor (``docs/plans/scheduler-refactor.md`` step 13). Owns its
+LOGIC-005 refactor (LOGIC-005 step 13). Owns its
 own last-fire timestamp; env-var reads happen inside ``should_run`` /
 ``run``.
 

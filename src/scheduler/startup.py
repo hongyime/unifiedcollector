@@ -1,8 +1,7 @@
 """Scheduler startup helpers — DB init, conditional collector registration,
 and notification emission around lifecycle transitions.
 
-Extracted from ``src/scheduler/__init__.py`` in the LOGIC-005 refactor
-(``docs/plans/scheduler-refactor.md``). These are entry-time / exit-time
+Extracted from ``src/scheduler/__init__.py`` in the LOGIC-005 refactor. These are entry-time / exit-time
 concerns rather than per-tick scheduling, so they belong out of the ``_tick``
 loop path.
 

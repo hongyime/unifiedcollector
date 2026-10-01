@@ -1,7 +1,6 @@
 """Status/heartbeat snapshot builders — pure reporting utilities.
 
-Extracted from ``src/scheduler/__init__.py`` in the LOGIC-005 refactor
-(``docs/plans/scheduler-refactor.md``). None of this is scheduler logic; it is
+Extracted from ``src/scheduler/__init__.py`` in the LOGIC-005 refactor. None of this is scheduler logic; it is
 DB-fanout reporting that assembles a snapshot for the Telegram heartbeat and
 the 15-minute delta notification.
 

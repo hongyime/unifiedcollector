@@ -1,7 +1,6 @@
 """HeartbeatHandler — periodic Telegram status digest.
 
-Extracted from ``Scheduler._maybe_heartbeat`` in the LOGIC-005 refactor
-(``docs/plans/scheduler-refactor.md``). Owns its own last-fire timestamp so
+Extracted from ``Scheduler._maybe_heartbeat`` in the LOGIC-005 refactor. Owns its own last-fire timestamp so
 scheduler state is no longer a bag of per-handler flags.
 
 Interval is read from ``STATUS_HEARTBEAT_INTERVAL_HOURS`` on first
