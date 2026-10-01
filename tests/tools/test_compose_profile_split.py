@@ -29,3 +29,22 @@ def test_profile_services_do_not_enable_the_other_probes() -> None:
     assert "PAYPAL_PROBE_ENABLED:" in paypal
     assert "SNAPCHAT_PROBE_ENABLED:" not in paypal
     assert "AIRBNB_PROBE_ENABLED:" not in paypal
+
+def test_profile_services_share_one_compose_anchor() -> None:
+    text = COMPOSE.read_text(encoding="utf-8")
+    match = re.search(
+        r"^x-profile-probe: &profile-probe\n(.*?)(?=^\S|\Z)",
+        text,
+        re.M | re.S,
+    )
+    assert match is not None
+    anchor = match.group(1)
+    assert "image: unifiedcollector-collector:latest" in anchor
+    assert "mem_limit: 192m" in anchor
+    assert "./env/common.env" in anchor
+    assert "PROBE_ENABLED" not in anchor
+    for source in _SOURCES:
+        block = _service_block(f"collector_{source}")
+        assert "<<: *profile-probe" in block
+        assert "mem_limit:" not in block
+        assert "image:" not in block

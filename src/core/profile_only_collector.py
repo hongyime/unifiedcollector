@@ -11,9 +11,9 @@ checkpoint manager, and media firehose, a ProfileOnlyCollector:
 - Marks queue rows as done / 404 / error.
 - Does NOT download media, run reconciler, or accumulate a spider queue.
 
-Deployment: all 5 (snapchat / paypal / airbnb / bluesky / pinterest) run
-inside a single ``collector_profile_only`` container (256MB) doing a
-round-robin over sources. See docker/docker-compose.yml + spec Do Next #3.
+Deployment: each source has its own container and its own collector class.
+Compose starts ``profile_only_runner --source <name>``. The shared piece is
+this base class plus that runner, not one process for all five.
 """
 from __future__ import annotations
 

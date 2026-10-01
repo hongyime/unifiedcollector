@@ -1,4 +1,5 @@
 # UnifiedCollector Agent Journal
+- 2026-10-01: The five profile-probe containers share one compose anchor for image, memory, and mounts. Each still runs its own collector class. The environment map stays on the service because a YAML merge replaces it instead of combining it.
 - 2026-10-01: The five profile probes no longer share `collector_profile_only`. Each has its own container. An unset source still runs all five for ad-hoc use.
 - 2026-10-01: GitHub now runs in `collector_github` (1024m). `collector_lowrisk` is strava+search only (2048m). A stale GitHub check restarts only the GitHub container.
 - 2026-10-01: Spiderfoot now starts with the production stack. The `recon` compose profile is gone; `instagram-dm` stays opt-in. Allowlist gating is unchanged.
@@ -192,3 +193,5 @@ Machine-specific values in this document use privacy placeholders.
 - 2026-10-01 11:33:22 +08:00 [dev-host-3.example/claude/stop] branch=main head=4a9e7e1c dirty=0
 - 2026-10-01 14:17:10 +08:00 [dev-host-3.example/claude/stop] branch=main head=4a9e7e1c dirty=0
 - 2026-10-01 15:30:50 +08:00 [dev-host-3.example/claude/stop] branch=main head=94305765 dirty=0
+- 2026-10-01 15:36:00 +08:00 [PRAWN-L390/claude/stop] branch=main head=b5898ad2 dirty=0
+- 2026-10-01 17:19:30 +08:00 [PRAWN-L390/claude/stop] branch=main head=b5898ad2 dirty=0
