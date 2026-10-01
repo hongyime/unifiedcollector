@@ -39,7 +39,7 @@ services that need them, and only those services:
 | `lemon8.env`                      | `collector_lemon8` |
 | `whatsapp.env`                    | `collector_whatsapp`, `wa_bridge_1`, `wa_bridge_2` |
 | `beeper.env`                      | `collector_beeper` |
-| `github.env`                      | `collector_lowrisk` |
+| `github.env`                      | `collector_github` |
 | `search.env`                      | `collector_lowrisk`, `collector_exposure` |
 | `website.env`                     | `collector_website` |
 | `exposure.env`                    | `collector_exposure` |

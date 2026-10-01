@@ -21,7 +21,7 @@ multi-user or SaaS component.
 
 ## 2. System Architecture
 
-**Runtime:** Docker Compose, 24 services on one shared Postgres 16
+**Runtime:** Docker Compose, 25 services on one shared Postgres 16
 (`pgvector/pgvector:pg16`), Redis 7, and RabbitMQ 3.13. Every container
 bind-mounts `../src:/app/src` so code changes apply on
 `docker compose restart <svc>` without image rebuild.
@@ -30,7 +30,7 @@ bind-mounts `../src:/app/src` so code changes apply on
 
 | Path | Provenance tag | Services |
 |---|---|---|
-| Headless collectors (server-side scraping) | `ingest_path='headless'` | `collector_youtube`, `collector_tiktok`, `collector_instagram`, `collector_lemon8`, `collector_website`, `collector_exposure`, `collector_lowrisk` (github+strava+search merged) |
+| Headless collectors (server-side scraping) | `ingest_path='headless'` | `collector_youtube`, `collector_tiktok`, `collector_instagram`, `collector_lemon8`, `collector_website`, `collector_exposure`, `collector_github`, `collector_lowrisk` (strava+search) |
 | Browser extension bridge | `ingest_path='extension'` | Chrome MV3 extension (host-side) posts to `ig_ingest:8765` — aiohttp bridge that persists into the same DB |
 | Realtime messaging | `ingest_path='messaging'` | `collector_telegram` (Telethon), `collector_whatsapp` (consumes RabbitMQ from `wa-bridge-1/2` Baileys), `collector_beeper` (Matrix) |
 
@@ -60,7 +60,7 @@ so `collector_spiderfoot` no longer sees Instagram/Telegram credentials
 
 | Feature | Module/Path | Status | Notes |
 |---|---|---|---|
-| GitHub collector | `src/collectors/github/` | Implemented | Merged into `collector_lowrisk` container |
+| GitHub collector | `src/collectors/github/` | Implemented | Own container `collector_github` |
 | Strava collector | `src/collectors/strava/` | Implemented | In `collector_lowrisk` |
 | Search collector | `src/collectors/search/` | Implemented | In `collector_lowrisk` |
 | Website spider | `src/collectors/website/` | Implemented | Own container |
@@ -258,7 +258,7 @@ persisted in DB so container restart preserves cooldown.
 uses `stop_event` in `SchedulerContext`; consumers check
 `self._stop.is_set()` between messages.
 
-**Health checks:** Docker healthchecks on 22 of 24 services
+**Health checks:** Docker healthchecks on 23 of 25 services
 (`collector_profile_only` and `ig_ingest` have no defined check). `dashboard`
 `/health` returns database + drive + vault + backup status.
 `ig_ingest` `/health` returns 503 when `db_pool` is absent and

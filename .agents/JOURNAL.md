@@ -1,4 +1,5 @@
 # UnifiedCollector Agent Journal
+- 2026-10-01: GitHub now runs in `collector_github` (1024m). `collector_lowrisk` is strava+search only (2048m). A stale GitHub check restarts only the GitHub container.
 - 2026-10-01: Spiderfoot now starts with the production stack. The `recon` compose profile is gone; `instagram-dm` stays opt-in. Allowlist gating is unchanged.
 - 2026-10-01: PayPal profile probe now defaults on, matching the other profile-only sources. The old ethics-gate default of 0 is gone; `PAYPAL_PROBE_ENABLED=0` still opts out.
 - 2026-10-01: Removed the idle production `collector` service (`worker --all` with every source disabled). Dedicated workers already build the collector image, and the `worker --all` CLI stays. Startup no longer falls back to that container.

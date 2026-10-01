@@ -1,9 +1,10 @@
 # Agent State
 
-Current task: Collector phase. T3 done locally — spiderfoot starts with the stack. Next is T4, split GitHub out of collector_lowrisk.
+Current task: Collector phase. T4 done locally — GitHub has its own container. Next is T5, split profile_only into separate workers.
 
 Progress:
-- Completed T3: removed the `recon` compose profile from `collector_spiderfoot`. A default `up` now starts 23 services; `instagram-dm` stays opt-in. Verification: `pytest tests/tools/test_compose_recon_default.py tests/tools/test_compose_idle_collector.py` passed 5; `docker compose config --services` lists `collector_spiderfoot` and omits `collector_instagram_dm` until `--profile instagram-dm`.
+- Completed T4: `collector_github` runs `--source github` at 1024m. `collector_lowrisk` is strava+search at 2048m. A stale GitHub check restarts `unifiedcollector_collector_github` only. Default `up` starts 24 services. Verification: `pytest tests/tools/test_compose_github_split.py tests/test_watchdog_freshness.py::test_headless_watchdog_uses_canonical_lowrisk_progress_queries` passed; `docker compose config --services` lists `collector_github` and still omits `collector_instagram_dm`.
+- Completed T3 and pushed `f761c9e1`: spiderfoot starts with the stack. `instagram-dm` stays opt-in.
 - Completed T2 and pushed `0fa1e77b`: PayPal probe defaults on. Opt-out remains `PAYPAL_PROBE_ENABLED=0`.
 - Completed T1 and pushed `2e67f031`: removed the idle production `collector` service. The `worker --all` CLI stays.
 

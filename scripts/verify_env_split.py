@@ -96,8 +96,8 @@ SERVICE_SOURCES: dict[str, list[str]] = {
     # Per-source collectors -- COMMON_WORKER_PATHS union per-source subdir
     "collector_youtube": COMMON_WORKER_PATHS + ["src/collectors/youtube"],
     "collector_tiktok": COMMON_WORKER_PATHS + ["src/collectors/tiktok", "src/core/tiktok_browser.py"],
+    "collector_github": COMMON_WORKER_PATHS + ["src/collectors/github"],
     "collector_lowrisk": COMMON_WORKER_PATHS + [
-        "src/collectors/github",
         "src/collectors/strava",
         "src/collectors/search",
         "src/core/strava_route_queue.py",

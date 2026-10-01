@@ -794,9 +794,9 @@ async def test_container_sweep_treats_dead_and_created_as_stopped(monkeypatch):
 
 
 def test_headless_watchdog_uses_canonical_lowrisk_progress_queries(monkeypatch):
-    """GitHub/Strava share collector_lowrisk, so stale checks must match the
-    dashboard/core liveness basis and not restart the shared container just
-    because one narrow table, such as github_commits, is quiet.
+    """GitHub has its own container. Strava and search still share lowrisk.
+    Stale checks must match the dashboard/core liveness basis and not restart
+    a container just because one narrow table, such as github_commits, is quiet.
     """
     monkeypatch.setenv("DATABASE_URL", "postgres://collector:collector@localhost/unifiedcollector")
     monkeypatch.setenv("WATCHDOG_HEADLESS_ENABLED", "1")
@@ -813,3 +813,7 @@ def test_headless_watchdog_uses_canonical_lowrisk_progress_queries(monkeypatch):
 
     assert freshness.CHECKS["strava"][0] == STRAVA_PROGRESS_QUERY
     assert "strava_athletes" in freshness.CHECKS["strava"][0]
+
+    assert freshness.CHECKS["github"][2] == ["unifiedcollector_collector_github"]
+    assert freshness.CHECKS["strava"][2] == ["unifiedcollector_collector_lowrisk"]
+    assert freshness.CHECKS["search"][2] == ["unifiedcollector_collector_lowrisk"]

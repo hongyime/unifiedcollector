@@ -258,30 +258,76 @@ services:
   # mem_limit values are tuned for a ~7.7GiB host (see total budget note).
   # ───────────────────────────────────────────────────────────────
 
-  # Merged low-risk / low-volume sources (github + strava + search) in ONE
-  # worker process. Each separate container carried a full Python-interpreter
-  # RSS baseline (~100-150MB just to exist); merging three reclaims ~1.5GB vs
-  # the old 1300+512+512. These three are low ban-risk and rarely wedge, so they
-  # are the safe candidates to give up per-source container fault-isolation.
+
+  # GitHub is split out of collector_lowrisk. Its spider reseed was restarting
+  # the shared worker and taking strava/search down with it. 1024m covers the
+  # github working set; lowrisk keeps the large search known-id set.
+  collector_github:
+    image: unifiedcollector-collector:latest
+    container_name: unifiedcollector_collector_github
+    init: true
+    command: python -m src.main worker --source github
+    mem_limit: 1024m
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      COLLECTOR_STARTUP_DELAY_SECONDS: "120"
+      COLLECTOR_DRIVE_PATH: /media
+      COLLECTOR_VAULT_ROOT: /vault
+      COLLECTOR_HANG_TIMEOUT_SECONDS: "7200"
+      GITHUB_API_DELAY: "0.25"
+      GITHUB_MAX_CONCURRENT: "12"
+      GITHUB_TARGET_CONCURRENCY: "2"
+      GITHUB_SPIDER_CONCURRENCY: "1"
+      GITHUB_SPIDER_BATCH_SIZE: "100"
+      GITHUB_API_QUOTA_TARGET_RATIO: "0.80"
+      GITHUB_MAX_COMMITS_PER_REPO: "1000"
+      GITHUB_MAX_ISSUES_PER_REPO: "0"
+      GITHUB_MAX_CONTRIBUTORS_PER_REPO: "0"
+      GITHUB_MAX_BRANCHES_PER_REPO: "50"
+      GITHUB_MAX_WEAK_FANOUT_PER_REPO: "500"
+      GITHUB_COLLECT_BRANCH_COMMITS: "true"
+      GITHUB_API_TRANSPORT_RETRIES: "4"
+      GITHUB_HTTP_TIMEOUT_SECONDS: "20"
+      GITHUB_QUOTA_PUSHER_ENABLED: "true"
+      GITHUB_QUOTA_PUSHER_TARGET_RATIO: "0.80"
+      GITHUB_QUOTA_PUSHER_MAX_CONCURRENT: "12"
+      GITHUB_QUOTA_PUSHER_BATCH_SIZE: "100"
+      COLLECTOR_CYCLE_SLEEP_GITHUB: "300"
+      DB_POOL_MAX_SIZE: "4"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - z:/unifiedcollector/media:/media
+      - z:/unifiedcollector:/vault
+      - ../credentials:/app/credentials
+      - sessions_data:/app/sessions
+      - ../config/sources:/app/config/sources:ro
+      - ../src:/app/src
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - ./env/common.env
+      - ./env/github.env
+    healthcheck:
+      test: ["CMD", "python", "-m", "src.core.health"]
+      interval: 60s
+      timeout: 45s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  # Strava and search stay in one worker. GitHub has its own container above.
+  # Search still holds the large known-id set, so this cap stays high, but it
+  # drops 2560m -> 2048m now that the github working set has left. Do not raise
+  # this container to 3072m on the ~7.7GiB VM.
   collector_lowrisk:
     image: unifiedcollector-collector:latest
     container_name: unifiedcollector_collector_lowrisk
     init: true  # reap search/gallery-dl subprocess zombies (this wedged a recreate before)
-    command: python -m src.main worker --source github,strava,search
-    # 768m was too tight for the merged github+strava+search worker — github's
-    # spider + ~42k seeded known-ids pushed it to ~93% and it got TERM'd ~every
-    # 35min (graceful exit-0, not cgroup-OOM). Raised to give headroom.
-    # EDIT 2026-07-13 (restart diagnosis): 1536m -> 2560m. RSS sat at ~1.25GiB
-    # (83%) steady; known-id seeds are now github ~15k + strava ~11k + search
-    # ~79k (search reconciler also holds per-row file_paths), and the github
-    # collector reseeds on every watchdog relaunch. NOTE the historical ~35min
-    # graceful TERM cadence matches the freshness watchdog (WATCHDOG_INTERVAL
-    # 300s + 1800s restart cooldown) restarting a stale lowrisk via the docker
-    # socket — NOT Docker OOM and NOT an in-process self-heal (those exit 42).
-    # Docker never restarts on unhealthy by itself (no autoheal service). Sized
-    # for the 7.76GiB WSL2 VM (~2GiB MemAvailable at edit time): +1GiB worst-
-    # case growth leaves ~1GiB VM headroom. Do NOT raise to 3072m on this VM.
-    mem_limit: 2560m
+    command: python -m src.main worker --source strava,search
+    # Strava + search only. The old 2560m cap included github's spider reseed.
+    mem_limit: 2048m
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_STARTUP_DELAY_SECONDS: "90"
@@ -320,30 +366,7 @@ services:
       STRAVA_GPS_BACKFILL_FIRST: "true"
       STRAVA_ROUTE_STREAM_SHARED_COOLDOWN: "true"
       STRAVA_PROFILE_ENRICH_BATCH: "15"
-      # GitHub graph expansion: no hard caps on high-signal repo history.
-      # Keep weak repo fanout bounded; stargazers/watchers are weaker evidence
-      # and can explode far faster than commits/issues/contributors.
-      GITHUB_API_DELAY: "0.25"
-      GITHUB_MAX_CONCURRENT: "12"
-      GITHUB_TARGET_CONCURRENCY: "2"
-      GITHUB_SPIDER_CONCURRENCY: "1"
-      GITHUB_SPIDER_BATCH_SIZE: "100"
-      GITHUB_API_QUOTA_TARGET_RATIO: "0.80"
-      GITHUB_MAX_COMMITS_PER_REPO: "1000"
-      GITHUB_MAX_ISSUES_PER_REPO: "0"
-      GITHUB_MAX_CONTRIBUTORS_PER_REPO: "0"
-      GITHUB_MAX_BRANCHES_PER_REPO: "50"
-      GITHUB_MAX_WEAK_FANOUT_PER_REPO: "500"
-      GITHUB_COLLECT_BRANCH_COMMITS: "true"
-      # CPU hygiene (A#4): low-volume / API-ceiling sources idle longer between
-      # cycles — fewer wakeups, lower steady-state CPU, zero data loss.
-      GITHUB_API_TRANSPORT_RETRIES: "4"
-      GITHUB_HTTP_TIMEOUT_SECONDS: "20"
-      GITHUB_QUOTA_PUSHER_ENABLED: "true"
-      GITHUB_QUOTA_PUSHER_TARGET_RATIO: "0.80"
-      GITHUB_QUOTA_PUSHER_MAX_CONCURRENT: "12"
-      GITHUB_QUOTA_PUSHER_BATCH_SIZE: "100"
-      COLLECTOR_CYCLE_SLEEP_GITHUB: "300"
+      # Low-volume sources idle between cycles.
       COLLECTOR_CYCLE_SLEEP_STRAVA: "600"
       COLLECTOR_CYCLE_SLEEP_SEARCH: "240"
       # Conn-budget hygiene (P2 review §5): low-volume, long-cycle sources — a
@@ -366,7 +389,6 @@ services:
     env_file:
       - ./env/common.env
       - ./env/strava.env
-      - ./env/github.env
       - ./env/search.env
     healthcheck:
       test: ["CMD", "python", "-m", "src.core.health"]
