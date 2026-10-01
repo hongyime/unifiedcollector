@@ -58,7 +58,6 @@ services:
       dockerfile: docker/Dockerfile.spiderfoot
     image: unifiedcollector-spiderfoot:latest
     container_name: unifiedcollector_spiderfoot
-    profiles: ["recon"]
     init: true
     command: python -m src.recon_spiderfoot_service --poll-interval ${RECON_SPIDERFOOT_POLL_INTERVAL:-10} --workers ${RECON_SPIDERFOOT_WORKERS:-1}
     mem_limit: ${RECON_SPIDERFOOT_MEM:-2g}

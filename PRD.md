@@ -40,7 +40,7 @@ containers via Docker socket), `scheduler` (12 periodic handlers),
 `realtime_feed` (drains Redis list to Telegram alerts),
 `browser_cookie_vault` (5-min Chrome CDP cookie snapshots), `backup`
 (daily pg_dump with verified atomic rename), `onboard_bot`,
-`collector_spiderfoot` (OSINT enrichment, compose profile `recon`).
+`collector_spiderfoot` (OSINT enrichment; starts with the stack).
 
 **State:** Postgres 16 + pgvector holds all structured state (145 public
 tables). Redis holds the realtime post-feed queue and anti-ban dedupe
@@ -81,7 +81,7 @@ so `collector_spiderfoot` no longer sees Instagram/Telegram credentials
 | Watchdog | `src/watchdog/freshness.py` | Implemented | Restarts realtime containers on staleness |
 | Realtime post feed | `src/notifications/realtime_feed.py` | Implemented | Redis → Telegram, rate-limited, dedupe TTL |
 | DB backup | `src/backup/db_backup.py` | Implemented | Daily pg_dump, verified rename, 7/4/3 retention |
-| Enrichment (maigret / SpiderFoot / GHunt) | `src/core/recon_spiderfoot.py`, `src/recon_spiderfoot_service.py` | Implemented | Compose profile `recon` |
+| Enrichment (maigret / SpiderFoot / GHunt) | `src/core/recon_spiderfoot.py`, `src/recon_spiderfoot_service.py` | Implemented | Starts with the stack; allowlist still required |
 | Phone-OSINT (offline) | `src/core/wa_phone_intel.py` | Implemented | Enrichment-only, never `identity_signals` |
 | CLI subcommands | `src/main.py` + `src/cli/commands/` (10 modules) | Implemented | 22 subcommands |
 | CI workflows | `.github/workflows/` (16 files) | Implemented | python-ci, codeql, bandit, semgrep, trufflehog, scorecard, lfs-guard, env-split-verify |

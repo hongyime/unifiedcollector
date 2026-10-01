@@ -1,10 +1,11 @@
 # Agent State
 
-Current task: Collector phase. T2 done locally — PayPal probe defaults on. Next is T3, recon/spiderfoot starts with the stack.
+Current task: Collector phase. T3 done locally — spiderfoot starts with the stack. Next is T4, split GitHub out of collector_lowrisk.
 
 Progress:
-- Completed T2: removed the PayPal ethics-gate override. Unset `PAYPAL_PROBE_ENABLED` now follows the shared profile-probe default (on). Compose default is `${PAYPAL_PROBE_ENABLED:-1}`. Opt-out remains `0`. Verification: `pytest tests/collectors/test_paypal_enabled.py` passed 3.
-- Completed T1 and pushed `2e67f031`: removed the idle production `collector` service. The `worker --all` CLI stays. Default `up` starts 22 services.
+- Completed T3: removed the `recon` compose profile from `collector_spiderfoot`. A default `up` now starts 23 services; `instagram-dm` stays opt-in. Verification: `pytest tests/tools/test_compose_recon_default.py tests/tools/test_compose_idle_collector.py` passed 5; `docker compose config --services` lists `collector_spiderfoot` and omits `collector_instagram_dm` until `--profile instagram-dm`.
+- Completed T2 and pushed `0fa1e77b`: PayPal probe defaults on. Opt-out remains `PAYPAL_PROBE_ENABLED=0`.
+- Completed T1 and pushed `2e67f031`: removed the idle production `collector` service. The `worker --all` CLI stays.
 
 ---
 

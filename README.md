@@ -77,17 +77,17 @@ pwsh scripts/start-scraper-chrome-cdp.ps1
 # Bring up the stack
 docker compose -f docker/docker-compose.yml up -d
 
-# Optional: enable the OSS enrichment pipeline
-docker compose -f docker/docker-compose.yml --profile recon up -d
+# collector_spiderfoot starts with that command. Instagram DM stays opt-in:
+# docker compose -f docker/docker-compose.yml --profile instagram-dm up -d
 
 # Register host-side scheduled tasks (browser autorecover + tab maintenance)
 pwsh scripts/register-browser-autorecover-task.ps1
 pwsh scripts/register-browser-maintenance-task.ps1
 ```
 
-Success looks like `docker compose ps` reporting all 22 default services `Up`
-with `(healthy)` on the 20 that define healthchecks (`recon` and
-`instagram-dm` stay opt-in), and
+Success looks like `docker compose ps` reporting all 23 default services `Up`
+with `(healthy)` on the 21 that define healthchecks (`instagram-dm` stays
+opt-in), and
 `curl http://localhost:8700/health` returning `{"status":"ok",...}`.
 
 ## Environment Configuration
@@ -137,7 +137,7 @@ The full variable catalogue (names, purposes) lives in the tracked
 | `DB_IDLE_IN_TRANSACTION_TIMEOUT_MS` | No | `300000` | Postgres reaps IIT sessions past this |
 | `RECON_ALLOWLIST` | No | empty | Comma-separated domains in scope for enrichment |
 | `RECON_ALLOW_UNSCOPED` | No | `0` | `1` to allow OSINT outside allowlist (use with care) |
-| `COMPOSE_PROFILES` | No | empty | Set to `recon` to bring up spiderfoot alongside core |
+| `COMPOSE_PROFILES` | No | empty | Set to `instagram-dm` to bring up the DM collector |
 
 The full list (240+ variables) is in `.env.example` +
 `docker/env/*.env.example`.
@@ -166,14 +166,8 @@ Expected outputs:
 config layer. Cron-style tasks (backup, scheduler) run inside their
 containers on `restart: unless-stopped`.
 
-**Enrichment (recon) mode**:
-
-```powershell
-docker compose -f docker/docker-compose.yml --profile recon up -d
-```
-
-This adds `collector_spiderfoot`. Requires `RECON_ALLOWLIST` to be
-populated unless `RECON_ALLOW_UNSCOPED=1`.
+**Enrichment:** `collector_spiderfoot` starts with the default stack. It still
+skips targets unless `RECON_ALLOWLIST` matches or `RECON_ALLOW_UNSCOPED=1`.
 
 ## Usage
 
@@ -208,8 +202,7 @@ docker exec unifiedcollector_scheduler `
     python -m src.core.wa_phone_intel --limit 20000
 ```
 
-**Regenerate the maigret false-positive blocklist** (inside the recon
-container, requires `--profile recon`):
+container):
 
 ```powershell
 docker exec unifiedcollector_spiderfoot `
