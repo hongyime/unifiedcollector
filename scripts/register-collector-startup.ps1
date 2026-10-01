@@ -69,7 +69,7 @@ $lines = @(
     "echo [%date% %time%] Syncing authorized Telegram sessions into shared sessions volume... >> %LOGFILE%",
     "set SESSION_TARGET=unifiedcollector_collector_telegram",
     "docker inspect %SESSION_TARGET% >nul 2>&1",
-    "if not %errorlevel% == 0 set SESSION_TARGET=unifiedcollector_collector",
+    "if not %errorlevel% == 0 set SESSION_TARGET=unifiedcollector_scheduler",
     "for %%S in ($sessionList) do (",
     "    if exist `"$repoPath\sessions\%%S.session`" (",
     "        docker cp `"$repoPath\sessions\%%S.session`" `"%SESSION_TARGET%:/app/sessions/%%S.session`" >> %LOGFILE% 2>&1",
@@ -82,8 +82,6 @@ $lines = @(
     "REM Telegram reads session files during startup; restart it after session sync.",
     "docker restart unifiedcollector_collector_telegram >> %LOGFILE% 2>&1",
     "echo [%date% %time%] collector_telegram restarted after session sync >> %LOGFILE%",
-    "docker restart unifiedcollector_collector >> %LOGFILE% 2>&1",
-    "echo [%date% %time%] collector restarted after session sync >> %LOGFILE%",
     "echo [%date% %time%] Startup complete. >> %LOGFILE%",
     "exit /b 0"
 )

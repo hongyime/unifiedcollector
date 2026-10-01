@@ -1,3 +1,12 @@
+# Agent State
+
+Current task: Collector phase. T1 done locally — idle production `collector` service removed. Next is T2, PayPal probe default-on.
+
+Progress:
+- Completed T1: removed the always-on `collector` service (`python -m src.main worker --all` with every source disabled). The `worker --all` CLI stays. Startup no longer restarts that container. Ad-hoc exec examples point at `unifiedcollector_scheduler`. Compose now defines 24 services; a default `up` starts 22 (`recon` and `instagram-dm` stay opt-in). Verification: `pytest tests/tools/test_compose_idle_collector.py tests/tools/test_startup_scripts.py` passed 9; `docker compose config --services` does not list `collector`. No live `unifiedcollector_collector` container. Not pushed yet.
+
+---
+
 ## Cleanup + smoke-test pass — 2026-09-30
 
 Follow-up to today's Do Now / Do Next / Explore batch. Operator asked to (a) enable all opt-in flags, (b) remove Whoxy and SauceNAO entirely (no keys available), (c) use HuggingFace for the GAN model, (d) fix the noisy-OR-with-negatives limitation, (e) backfill the schema_migrations ledger for the 10 migrations landed today, (f) smoke-test each new pipeline against live corpus with cleanup tags.
@@ -552,12 +561,12 @@ Current live update:
 <!-- MOLT_AUTO_START -->
 ## Auto State
 
-- Updated: 2026-09-30 23:19:18 +08:00
+- Updated: 2026-10-01 14:17:10 +08:00
 - Machine: dev-host-3.example
 - Harness: claude
 - Event: stop
 - Branch: main
-- HEAD: 0a1a5f89
+- HEAD: 4a9e7e1c
 - Dirty files: 0
 - Resume hint: Read .agents/STATE.md, then the latest file in .agents/handoffs/ if present.
 <!-- MOLT_AUTO_END -->

@@ -7,7 +7,7 @@ Live-Tor tests are gated on ``TOR_PROXY_LIVE=1`` and skipped by
 default. Run inside the collector container with the tor sidecar up:
 
     TOR_PROXY_LIVE=1 docker exec -e TOR_PROXY_LIVE=1 \\
-        unifiedcollector_collector \\
+        unifiedcollector_scheduler \\
         python -m pytest tests/core/test_tor_proxy.py -v
 """
 from __future__ import annotations

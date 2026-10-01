@@ -21,7 +21,7 @@ multi-user or SaaS component.
 
 ## 2. System Architecture
 
-**Runtime:** Docker Compose, 26 services on one shared Postgres 16
+**Runtime:** Docker Compose, 24 services on one shared Postgres 16
 (`pgvector/pgvector:pg16`), Redis 7, and RabbitMQ 3.13. Every container
 bind-mounts `../src:/app/src` so code changes apply on
 `docker compose restart <svc>` without image rebuild.
@@ -258,8 +258,8 @@ persisted in DB so container restart preserves cooldown.
 uses `stop_event` in `SchedulerContext`; consumers check
 `self._stop.is_set()` between messages.
 
-**Health checks:** Docker healthchecks on 22 of 26 services (`backup`
-and older `ig_ingest` are cron-style, no defined check). `dashboard`
+**Health checks:** Docker healthchecks on 22 of 24 services
+(`collector_profile_only` and `ig_ingest` have no defined check). `dashboard`
 `/health` returns database + drive + vault + backup status.
 `ig_ingest` `/health` returns 503 when `db_pool` is absent and
 startup task has given up (honest health).

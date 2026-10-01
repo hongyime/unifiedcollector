@@ -3,7 +3,7 @@
 Pure-function tests run anywhere; DB tests gated on DATABASE_URL being
 reachable. Run inside the collector container with:
 
-    docker exec unifiedcollector_collector \
+    docker exec unifiedcollector_scheduler \
         python -m pytest tests/core/test_dedupe_hash.py -v
 """
 

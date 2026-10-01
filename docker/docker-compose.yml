@@ -52,62 +52,6 @@ services:
     oom_score_adj: -500
     mem_reservation: 2g
 
-  collector:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
-    container_name: unifiedcollector_collector
-    command: python -m src.main worker --all
-    # Idle safety-net / image-builder: all sources disabled, so it is mostly
-    # quiet, but keep enough headroom for imports and ad-hoc exec checks.
-    mem_limit: 512m
-    environment:
-      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
-      COLLECTOR_STARTUP_DELAY_SECONDS: "5"
-      COLLECTOR_DRIVE_PATH: /media
-      COLLECTOR_VAULT_ROOT: /vault
-      # freeze fix: youtube AND tiktok run blocking subprocess downloaders
-      # (yt-dlp / gallery-dl) that wedge on lost SIGCHLD in WSL2/Docker and freeze
-      # the SHARED event loop (py-spy confirmed MainThread stuck in _run_subprocess).
-      # Both are disabled here and run out-of-process in their own containers (P3-1).
-      # The subprocess_downloader hard-timeout is the defense-in-depth backstop.
-      # P3-1 FULL SPLIT: every source runs in its OWN dedicated container.
-      # The main collector disables ALL sources and effectively idles --
-      # it remains only as the canonical image builder + safety net.
-      # Re-enable a source HERE only if you also remove its dedicated container.
-      COLLECTOR_DISABLED_SOURCES: "youtube,tiktok,instagram,search,exposure,website,lemon8,telegram,github,strava,beeper,whatsapp"
-      # Conn-budget hygiene (P2 review §5): this main worker idles (all sources
-      # disabled), so it needs almost no DB connections. Shrink its pool from the
-      # default 10 to free headroom under postgres max_connections=200 (14 pools ×
-      # 10 = 140 ignores watchdog/backup/dashboard/ad-hoc scripts).
-      DB_POOL_MAX_SIZE: "3"
-      # Beeper Desktop Local API runs on the host at 127.0.0.1:23373.
-      # The default URL inside .env (host.docker.internal:23373) resolves
-      # via the extra_hosts entry below.
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    cap_add:
-      - SYS_PTRACE
-    volumes:
-      - z:/unifiedcollector/media:/media
-      - z:/unifiedcollector:/vault
-      - ../credentials:/app/credentials
-      - sessions_data:/app/sessions
-      - ../config/sources:/app/config/sources:ro
-      - ../src:/app/src
-    depends_on:
-      postgres:
-        condition: service_healthy
-    env_file:
-      - ./env/common.env
-    healthcheck:
-      test: ["CMD", "python", "-m", "src.core.health"]
-      interval: 60s
-      timeout: 45s
-      retries: 3
-      start_period: 30s
-    restart: unless-stopped
-
   collector_spiderfoot:
     build:
       context: ..
@@ -186,8 +130,7 @@ services:
   # wedge on lost SIGCHLD in WSL2/Docker (py-spy confirmed); in the shared worker
   # that froze all 11 collectors. Here a wedge only affects youtube, and
   # restart:unless-stopped + the subprocess_downloader hard-timeout recover it.
-  # Re-enabled by NOT disabling it here (the main collector still disables it via
-  # COLLECTOR_DISABLED_SOURCES=youtube).
+  # recover it. This container is the only youtube worker.
   collector_youtube:
     build:
       context: ..
@@ -255,8 +198,7 @@ services:
   # stuck in threading wait at 0% CPU); in the shared worker that froze ALL
   # collectors. Here a wedge only affects tiktok, and restart:unless-stopped + the
   # subprocess_downloader hard-timeout recover it. The subprocess fallbacks are
-  # ENABLED here (overriding the .env defaults that keep them off for the shared
-  # main collector). The main collector disables tiktok via COLLECTOR_DISABLED_SOURCES.
+  # ENABLED here. This container is the only tiktok worker.
   collector_tiktok:
     build:
       context: ..
@@ -312,8 +254,8 @@ services:
   # Same image (unifiedcollector-collector:latest), command
   #   python -m src.main worker --source <name>
   # Shared volumes/env; restart:unless-stopped + per-container mem_limit.
-  # The main `collector` service disables ALL of these via
-  # COLLECTOR_DISABLED_SOURCES so nothing is collected twice.
+  # The idle all-sources collector was removed. Each source below runs only
+  # in its dedicated container, so nothing is collected twice.
   # mem_limit values are tuned for a ~7.7GiB host (see total budget note).
   # ───────────────────────────────────────────────────────────────
 

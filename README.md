@@ -5,7 +5,7 @@
 Read-only ingestion service that scrapes 14 social platforms
 (github, youtube, strava, search, website, tiktok, lemon8, whatsapp,
 telegram, instagram, beeper/matrix, threads, facebook, x) and writes
-into one shared Postgres database. Runs as a 26-service Docker Compose
+into one shared Postgres database. Runs as a 24-service Docker Compose
 stack on a single Windows host. Feeds a downstream `unifiedanalyzer`
 (separate repository) that does identity resolution and timelines.
 
@@ -85,8 +85,9 @@ pwsh scripts/register-browser-autorecover-task.ps1
 pwsh scripts/register-browser-maintenance-task.ps1
 ```
 
-Success looks like `docker compose ps` reporting all 26 services `Up`
-with `(healthy)` on the 22 that define healthchecks, and
+Success looks like `docker compose ps` reporting all 22 default services `Up`
+with `(healthy)` on the 20 that define healthchecks (`recon` and
+`instagram-dm` stay opt-in), and
 `curl http://localhost:8700/health` returning `{"status":"ok",...}`.
 
 ## Environment Configuration
@@ -203,7 +204,7 @@ docker exec unifiedcollector_scheduler `
 `phonenumbers` library only, no network):
 
 ```powershell
-docker exec unifiedcollector_collector `
+docker exec unifiedcollector_scheduler `
     python -m src.core.wa_phone_intel --limit 20000
 ```
 
@@ -227,7 +228,7 @@ See [Docker interpolation](https://docs.docker.com/compose/how-tos/environment-v
 **Python suite** (tracked under `tests/`):
 
 ```powershell
-docker exec unifiedcollector_collector sh -c `
+docker exec unifiedcollector_scheduler sh -c `
     'cd /app && python -m pytest tests/ -q --ignore=tests/verify_clean_boot.py --ignore=tests/verify_production.py'
 ```
 
@@ -287,7 +288,7 @@ unifiedcollector/
 ├── SECURITY.md                      Reporting + Dependabot policy
 ├── .env.example                     Monolithic template with all env names
 ├── docker/                          Compose stack + Dockerfiles
-│   ├── docker-compose.yml           26 services
+│   ├── docker-compose.yml           24 services
 │   ├── Dockerfile*                  5 build targets (collector, dashboard, spiderfoot, backup, whatsapp-bridge)
 │   ├── env/                         Per-service env templates (SEC-003)
 │   ├── patches/                     Runtime patches for GHunt + SpiderFoot
