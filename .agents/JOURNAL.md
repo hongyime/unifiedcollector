@@ -193,5 +193,5 @@ Machine-specific values in this document use privacy placeholders.
 - 2026-10-01 11:33:22 +08:00 [dev-host-3.example/claude/stop] branch=main head=4a9e7e1c dirty=0
 - 2026-10-01 14:17:10 +08:00 [dev-host-3.example/claude/stop] branch=main head=4a9e7e1c dirty=0
 - 2026-10-01 15:30:50 +08:00 [dev-host-3.example/claude/stop] branch=main head=94305765 dirty=0
-- 2026-10-01 15:36:00 +08:00 [PRAWN-L390/claude/stop] branch=main head=b5898ad2 dirty=0
-- 2026-10-01 17:19:30 +08:00 [PRAWN-L390/claude/stop] branch=main head=b5898ad2 dirty=0
+- 2026-10-01 15:36:00 +08:00 [dev-host-3.example/claude/stop] branch=main head=b5898ad2 dirty=0
+- 2026-10-01 17:19:30 +08:00 [dev-host-3.example/claude/stop] branch=main head=b5898ad2 dirty=0

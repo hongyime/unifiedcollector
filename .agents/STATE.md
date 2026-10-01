@@ -567,7 +567,7 @@ Current live update:
 ## Auto State
 
 - Updated: 2026-10-01 17:19:30 +08:00
-- Machine: PRAWN-L390
+- Machine: dev-host-3.example
 - Harness: claude
 - Event: stop
 - Branch: main
