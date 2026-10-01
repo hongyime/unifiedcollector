@@ -1,9 +1,10 @@
 # Agent State
 
-Current task: Collector phase. T4 done locally — GitHub has its own container. Next is T5, split profile_only into separate workers.
+Current task: Collector phase. T5 done locally — each profile probe has its own container. Next is T6, compose anchor.
 
 Progress:
-- Completed T4: `collector_github` runs `--source github` at 1024m. `collector_lowrisk` is strava+search at 2048m. A stale GitHub check restarts `unifiedcollector_collector_github` only. Default `up` starts 24 services. Verification: `pytest tests/tools/test_compose_github_split.py tests/test_watchdog_freshness.py::test_headless_watchdog_uses_canonical_lowrisk_progress_queries` passed; `docker compose config --services` lists `collector_github` and still omits `collector_instagram_dm`.
+- Completed T5: removed `collector_profile_only`. Snapchat, PayPal, Airbnb, Bluesky, and Pinterest each run `profile_only_runner --source <name>` at 192m. Unset `PROFILE_ONLY_SOURCE` still runs all five. Default `up` starts 28 services. Verification: `pytest tests/collectors/test_profile_only_split.py tests/tools/test_compose_profile_split.py tests/collectors/test_paypal_enabled.py` passed 8; `docker compose config --services` lists the five probes and omits `collector_profile_only` and `collector_instagram_dm`.
+- Completed T4 and pushed `468ae5fa`: GitHub runs in `collector_github`. Lowrisk is strava+search.
 - Completed T3 and pushed `f761c9e1`: spiderfoot starts with the stack. `instagram-dm` stays opt-in.
 - Completed T2 and pushed `0fa1e77b`: PayPal probe defaults on. Opt-out remains `PAYPAL_PROBE_ENABLED=0`.
 - Completed T1 and pushed `2e67f031`: removed the idle production `collector` service. The `worker --all` CLI stays.

@@ -1,16 +1,18 @@
-"""Round-robin driver for the 5 ProfileOnlyCollectors.
+"""Driver for the profile-only probes.
 
-Runs under docker service ``collector_profile_only``. All 5 subclasses
-share one process and one asyncpg pool. Each subclass has its own env
-gate (SOURCE_PROBE_ENABLED); if none are enabled, the service idles.
+Compose runs one source per container via ``--source``. With
+PROFILE_ONLY_SOURCE unset, the process still runs all five. Each source
+has its own env gate (``<SOURCE>_PROBE_ENABLED``).
 
-This is intentionally NOT a BaseCollector worker loop - the profile-only
-pattern is queue-driven, not firehose-driven. We poll the queue every
-``PROFILE_ROUND_ROBIN_INTERVAL_SECONDS`` (default 60s) and probe up to
-``<SOURCE>_PROBE_BATCH`` per source per tick.
+This is intentionally NOT a BaseCollector worker loop. The profile-only
+pattern is queue-driven. The process polls every
+``PROFILE_ROUND_ROBIN_INTERVAL_SECONDS`` (default 60s) and probes up to
+``<SOURCE>_PROBE_BATCH`` per enabled source per tick.
 """
+
 from __future__ import annotations
 
+import argparse
 import asyncio
 import logging
 import os
@@ -28,15 +30,31 @@ from src.core.profile_only_collector import ProfileOnlyCollector
 
 logger = logging.getLogger(__name__)
 
+_COLLECTORS: dict[str, type[ProfileOnlyCollector]] = {
+    "snapchat": SnapchatCollector,
+    "paypal": PayPalCollector,
+    "airbnb": AirbnbCollector,
+    "bluesky": BlueskyCollector,
+    "pinterest": PinterestCollector,
+}
+
 _INTERVAL = float(os.getenv("PROFILE_ROUND_ROBIN_INTERVAL_SECONDS", "60"))
 
 
+def _selected_source() -> str:
+    return os.getenv("PROFILE_ONLY_SOURCE", "").strip().lower()
+
+
 def _build_collectors() -> Iterable[ProfileOnlyCollector]:
-    yield SnapchatCollector()
-    yield PayPalCollector()
-    yield AirbnbCollector()
-    yield BlueskyCollector()
-    yield PinterestCollector()
+    chosen = _selected_source()
+    if not chosen:
+        for name in ("snapchat", "paypal", "airbnb", "bluesky", "pinterest"):
+            yield _COLLECTORS[name]()
+        return
+    factory = _COLLECTORS.get(chosen)
+    if factory is None:
+        raise SystemExit(f"unknown profile-only source: {chosen}")
+    yield factory()
 
 
 async def run() -> None:
@@ -47,18 +65,20 @@ async def run() -> None:
     if not dsn:
         raise SystemExit("DATABASE_URL not set")
 
-    pool = await asyncpg.create_pool(dsn, min_size=1, max_size=4)
+    single = bool(_selected_source())
+    pool = await asyncpg.create_pool(dsn, min_size=1, max_size=2 if single else 4)
 
     collectors: list[ProfileOnlyCollector] = []
     for c in _build_collectors():
         c.set_pool(pool)
         collectors.append(c)
-    logger.info("collector_profile_only: %d collectors initialized", len(collectors))
+    label = _selected_source() or "all"
+    logger.info("profile-only %s: %d collectors initialized", label, len(collectors))
 
     stop_event = asyncio.Event()
 
     def _handle_signal(*_):
-        logger.info("collector_profile_only: shutdown signal received")
+        logger.info("profile-only %s: shutdown signal received", label)
         stop_event.set()
 
     loop = asyncio.get_running_loop()
@@ -87,9 +107,18 @@ async def run() -> None:
         except asyncio.TimeoutError:
             pass
 
-    logger.info("collector_profile_only: exiting")
+    logger.info("profile-only %s: exiting", label)
     await pool.close()
 
 
-if __name__ == "__main__":
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--source", default="")
+    args = parser.parse_args()
+    if args.source:
+        os.environ["PROFILE_ONLY_SOURCE"] = args.source
     asyncio.run(run())
+
+
+if __name__ == "__main__":
+    main()

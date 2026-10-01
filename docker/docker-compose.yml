@@ -582,25 +582,101 @@ services:
       start_period: 30s
     restart: unless-stopped
 
-  # Do Next #3: 5 lightweight profile-only collectors (snapchat / paypal /
-  # airbnb / bluesky / pinterest) share one container. Queue-driven via
-  # profile_probe_queue, not firehose. Total budget 256m; each source has
-  # its own <SOURCE>_PROBE_ENABLED / _BATCH / _QPS env vars. paypal uses
-  # the same default-on probe flag as the other profile sources.
-  collector_profile_only:
+  # Profile probes each run alone so one stalled source cannot block the
+  # other four. 192m each; the old shared cap was 256m.
+  collector_snapchat:
     image: unifiedcollector-collector:latest
-    container_name: unifiedcollector_collector_profile_only
+    container_name: unifiedcollector_collector_snapchat
     init: true
-    command: python -m src.collectors.profile_only_runner
-    mem_limit: 256m
+    command: python -m src.collectors.profile_only_runner --source snapchat
+    mem_limit: 192m
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_STARTUP_DELAY_SECONDS: "30"
-      # Individual platform enable flags. All default on; set 0 to opt out.
       SNAPCHAT_PROBE_ENABLED: "${SNAPCHAT_PROBE_ENABLED:-1}"
+      PROFILE_ROUND_ROBIN_INTERVAL_SECONDS: "${PROFILE_ROUND_ROBIN_INTERVAL_SECONDS:-60}"
+    volumes:
+      - ../src:/app/src
+      - ../credentials:/app/credentials:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - ./env/common.env
+    restart: unless-stopped
+
+  collector_paypal:
+    image: unifiedcollector-collector:latest
+    container_name: unifiedcollector_collector_paypal
+    init: true
+    command: python -m src.collectors.profile_only_runner --source paypal
+    mem_limit: 192m
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      COLLECTOR_STARTUP_DELAY_SECONDS: "45"
       PAYPAL_PROBE_ENABLED: "${PAYPAL_PROBE_ENABLED:-1}"
+      PROFILE_ROUND_ROBIN_INTERVAL_SECONDS: "${PROFILE_ROUND_ROBIN_INTERVAL_SECONDS:-60}"
+    volumes:
+      - ../src:/app/src
+      - ../credentials:/app/credentials:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - ./env/common.env
+    restart: unless-stopped
+
+  collector_airbnb:
+    image: unifiedcollector-collector:latest
+    container_name: unifiedcollector_collector_airbnb
+    init: true
+    command: python -m src.collectors.profile_only_runner --source airbnb
+    mem_limit: 192m
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      COLLECTOR_STARTUP_DELAY_SECONDS: "60"
       AIRBNB_PROBE_ENABLED: "${AIRBNB_PROBE_ENABLED:-1}"
+      PROFILE_ROUND_ROBIN_INTERVAL_SECONDS: "${PROFILE_ROUND_ROBIN_INTERVAL_SECONDS:-60}"
+    volumes:
+      - ../src:/app/src
+      - ../credentials:/app/credentials:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - ./env/common.env
+    restart: unless-stopped
+
+  collector_bluesky:
+    image: unifiedcollector-collector:latest
+    container_name: unifiedcollector_collector_bluesky
+    init: true
+    command: python -m src.collectors.profile_only_runner --source bluesky
+    mem_limit: 192m
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      COLLECTOR_STARTUP_DELAY_SECONDS: "75"
       BLUESKY_PROBE_ENABLED: "${BLUESKY_PROBE_ENABLED:-1}"
+      PROFILE_ROUND_ROBIN_INTERVAL_SECONDS: "${PROFILE_ROUND_ROBIN_INTERVAL_SECONDS:-60}"
+    volumes:
+      - ../src:/app/src
+      - ../credentials:/app/credentials:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - ./env/common.env
+    restart: unless-stopped
+
+  collector_pinterest:
+    image: unifiedcollector-collector:latest
+    container_name: unifiedcollector_collector_pinterest
+    init: true
+    command: python -m src.collectors.profile_only_runner --source pinterest
+    mem_limit: 192m
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      COLLECTOR_STARTUP_DELAY_SECONDS: "90"
       PINTEREST_PROBE_ENABLED: "${PINTEREST_PROBE_ENABLED:-1}"
       PROFILE_ROUND_ROBIN_INTERVAL_SECONDS: "${PROFILE_ROUND_ROBIN_INTERVAL_SECONDS:-60}"
     volumes:

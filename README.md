@@ -5,7 +5,7 @@
 Read-only ingestion service that scrapes 14 social platforms
 (github, youtube, strava, search, website, tiktok, lemon8, whatsapp,
 telegram, instagram, beeper/matrix, threads, facebook, x) and writes
-into one shared Postgres database. Runs as a 25-service Docker Compose
+into one shared Postgres database. Runs as a 29-service Docker Compose
 stack on a single Windows host. Feeds a downstream `unifiedanalyzer`
 (separate repository) that does identity resolution and timelines.
 
@@ -85,7 +85,7 @@ pwsh scripts/register-browser-autorecover-task.ps1
 pwsh scripts/register-browser-maintenance-task.ps1
 ```
 
-Success looks like `docker compose ps` reporting all 24 default services `Up`
+Success looks like `docker compose ps` reporting all 28 default services `Up`
 with `(healthy)` on the 22 that define healthchecks (`instagram-dm` stays
 opt-in), and
 `curl http://localhost:8700/health` returning `{"status":"ok",...}`.
@@ -281,7 +281,7 @@ unifiedcollector/
 ├── SECURITY.md                      Reporting + Dependabot policy
 ├── .env.example                     Monolithic template with all env names
 ├── docker/                          Compose stack + Dockerfiles
-│   ├── docker-compose.yml           25 services
+│   ├── docker-compose.yml           29 services
 │   ├── Dockerfile*                  5 build targets (collector, dashboard, spiderfoot, backup, whatsapp-bridge)
 │   ├── env/                         Per-service env templates (SEC-003)
 │   ├── patches/                     Runtime patches for GHunt + SpiderFoot

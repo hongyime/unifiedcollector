@@ -1,4 +1,5 @@
 # UnifiedCollector Agent Journal
+- 2026-10-01: The five profile probes no longer share `collector_profile_only`. Each has its own container. An unset source still runs all five for ad-hoc use.
 - 2026-10-01: GitHub now runs in `collector_github` (1024m). `collector_lowrisk` is strava+search only (2048m). A stale GitHub check restarts only the GitHub container.
 - 2026-10-01: Spiderfoot now starts with the production stack. The `recon` compose profile is gone; `instagram-dm` stays opt-in. Allowlist gating is unchanged.
 - 2026-10-01: PayPal profile probe now defaults on, matching the other profile-only sources. The old ethics-gate default of 0 is gone; `PAYPAL_PROBE_ENABLED=0` still opts out.
