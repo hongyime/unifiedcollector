@@ -1,9 +1,10 @@
 # Agent State
 
-Current task: Collector phase. T1 done locally — idle production `collector` service removed. Next is T2, PayPal probe default-on.
+Current task: Collector phase. T2 done locally — PayPal probe defaults on. Next is T3, recon/spiderfoot starts with the stack.
 
 Progress:
-- Completed T1: removed the always-on `collector` service (`python -m src.main worker --all` with every source disabled). The `worker --all` CLI stays. Startup no longer restarts that container. Ad-hoc exec examples point at `unifiedcollector_scheduler`. Compose now defines 24 services; a default `up` starts 22 (`recon` and `instagram-dm` stay opt-in). Verification: `pytest tests/tools/test_compose_idle_collector.py tests/tools/test_startup_scripts.py` passed 9; `docker compose config --services` does not list `collector`. No live `unifiedcollector_collector` container. Not pushed yet.
+- Completed T2: removed the PayPal ethics-gate override. Unset `PAYPAL_PROBE_ENABLED` now follows the shared profile-probe default (on). Compose default is `${PAYPAL_PROBE_ENABLED:-1}`. Opt-out remains `0`. Verification: `pytest tests/collectors/test_paypal_enabled.py` passed 3.
+- Completed T1 and pushed `2e67f031`: removed the idle production `collector` service. The `worker --all` CLI stays. Default `up` starts 22 services.
 
 ---
 

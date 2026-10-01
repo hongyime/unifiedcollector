@@ -3,9 +3,6 @@
 URL: https://www.paypal.com/paypalme/<username> (public).
 Extracts display_name + avatar_url + currency preference (if shown).
 
-**Ethics gate:** PAYPAL_PROBE_ENABLED defaults to 0. This is a
-finance-adjacent surface; operator opts in per case, not always-on.
-See POLICY.md.
 
 Source: tools.myosint.training "PayPal Profile Bookmarklet".
 """
@@ -38,12 +35,6 @@ class PayPalCollector(ProfileOnlyCollector):
     SOURCE_NAME = "paypal"
     PROFILE_TABLE = "paypal_profiles"
 
-    @property
-    def enabled(self) -> bool:
-        # Explicit override: default DISABLED regardless of the base class's
-        # default 1. Ethics gate per POLICY.md.
-        import os
-        return os.getenv("PAYPAL_PROBE_ENABLED", "0") == "1"
 
     async def probe_profile(self, username: str) -> ProfileResult:
         url = f"https://www.paypal.com/paypalme/{username}"

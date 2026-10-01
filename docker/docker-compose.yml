@@ -564,8 +564,8 @@ services:
   # Do Next #3: 5 lightweight profile-only collectors (snapchat / paypal /
   # airbnb / bluesky / pinterest) share one container. Queue-driven via
   # profile_probe_queue, not firehose. Total budget 256m; each source has
-  # its own <SOURCE>_PROBE_ENABLED / _BATCH / _QPS env vars. paypal is
-  # DISABLED by default (POLICY.md ethics gate).
+  # its own <SOURCE>_PROBE_ENABLED / _BATCH / _QPS env vars. paypal uses
+  # the same default-on probe flag as the other profile sources.
   collector_profile_only:
     image: unifiedcollector-collector:latest
     container_name: unifiedcollector_collector_profile_only
@@ -575,9 +575,9 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_STARTUP_DELAY_SECONDS: "30"
-      # Individual platform enable flags. paypal defaults 0 - operator opts in.
+      # Individual platform enable flags. All default on; set 0 to opt out.
       SNAPCHAT_PROBE_ENABLED: "${SNAPCHAT_PROBE_ENABLED:-1}"
-      PAYPAL_PROBE_ENABLED: "${PAYPAL_PROBE_ENABLED:-0}"
+      PAYPAL_PROBE_ENABLED: "${PAYPAL_PROBE_ENABLED:-1}"
       AIRBNB_PROBE_ENABLED: "${AIRBNB_PROBE_ENABLED:-1}"
       BLUESKY_PROBE_ENABLED: "${BLUESKY_PROBE_ENABLED:-1}"
       PINTEREST_PROBE_ENABLED: "${PINTEREST_PROBE_ENABLED:-1}"
