@@ -1,4 +1,5 @@
 # UnifiedCollector Agent Journal
+- 2026-10-01: The WhatsApp bridge is not being renamed. Production compose is now validated in CI with a placeholder Telegram allowlist and no containers started.
 - 2026-10-01: The env-split checker no longer treats the profile-probe anchor as services. Each probe container is scanned, and `PROFILE_ONLY_SOURCE` is documented.
 - 2026-10-01: Citations of the deleted scheduler plan are gone. The LOGIC-005 notes stay. The WhatsApp bridge service names stay hyphenated because the running collector calls http://wa-bridge-1:3001.
 - 2026-10-01: The five profile-probe containers share one compose anchor for image, memory, and mounts. Each still runs its own collector class. The environment map stays on the service because a YAML merge replaces it instead of combining it.
@@ -198,3 +199,5 @@ Machine-specific values in this document use privacy placeholders.
 - 2026-10-01 15:36:00 +08:00 [dev-host-3.example/claude/stop] branch=main head=b5898ad2 dirty=0
 - 2026-10-01 17:19:30 +08:00 [dev-host-3.example/claude/stop] branch=main head=b5898ad2 dirty=0
 - 2026-10-01 17:32:26 +08:00 [dev-host-3.example/claude/stop] branch=main head=500b79e0 dirty=0
+- 2026-10-01 18:05:36 +08:00 [dev-host-3.example/claude/stop] branch=main head=c3edf1e6 dirty=0
+- 2026-10-01 21:08:05 +08:00 [dev-host-3.example/claude/stop] branch=main head=c3edf1e6 dirty=0

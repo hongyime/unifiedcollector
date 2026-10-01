@@ -1,0 +1,37 @@
+name: Compose Config
+
+# Reject a broken production compose file before it reaches the host.
+# TELEGRAM_SPIDER_ACCOUNTS is the only required interpolation. CI has no
+# private .env, so the job supplies a placeholder and does not start containers.
+
+on:
+  pull_request:
+    branches: [main, master]
+    paths:
+      - "docker/docker-compose.yml"
+      - ".github/workflows/compose-config.yml"
+  push:
+    branches: [main, master]
+    paths:
+      - "docker/docker-compose.yml"
+      - ".github/workflows/compose-config.yml"
+
+concurrency:
+  group: compose-config-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  config:
+    name: docker compose config
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Validate production compose
+        env:
+          TELEGRAM_SPIDER_ACCOUNTS: ci-placeholder
+        run: docker compose -f docker/docker-compose.yml config --quiet

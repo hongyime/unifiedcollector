@@ -1,8 +1,9 @@
 # Agent State
 
-Current task: Collector phase. Env-split parser now understands the profile-probe anchor. wa-bridge service names stay hyphenated because the live bridge URL is http://wa-bridge-1:3001. env.defaults, the infra audit, and the ig_ingest split are not specified enough to start.
+Current task: Collector phase. The WhatsApp bridge names stay hyphenated. The production compose file is checked in CI. The ig_ingest split and Postgres split are still ahead. env.defaults and the infra audit have no written change to make.
 
 Progress:
+- Completed the compose config check: `.github/workflows/compose-config.yml` runs `docker compose config` with a placeholder allowlist and does not start containers. Local check: missing `TELEGRAM_SPIDER_ACCOUNTS` exits 1; `ci-placeholder` exits 0.
 - Completed the env-split parser fix: lines before `services:` are not services, and `<<: *profile-probe` copies `common.env` onto each probe. The five probe containers are scanned. `PROFILE_ONLY_SOURCE` is documented in `.env.example`. Verification: `pytest tests/tools/test_env_split_profile_anchor.py` passed. `verify_env_split.py` scans 29 services with no phantom `volumes` service. The five probes have `missing=0`. The 42 missing archive-fallback keys were already missing before this change.
 - Completed the dead-plan cleanup and pushed `e2d6a52a`: `docs/plans/scheduler-refactor.md` is not cited under `src/` or `tests/`. The LOGIC-005 notes stay.
 - Completed T6 and pushed `11f8af86`: `x-profile-probe` holds the image, 192m, mounts, `common.env`, and the Postgres dependency. Each service still sets `--source`, its startup delay, and its own probe flag. `500b79e0` replaced the real host name in the state files with the placeholder.
@@ -568,12 +569,12 @@ Current live update:
 <!-- MOLT_AUTO_START -->
 ## Auto State
 
-- Updated: 2026-10-01 17:32:26 +08:00
+- Updated: 2026-10-01 21:08:05 +08:00
 - Machine: dev-host-3.example
 - Harness: claude
 - Event: stop
 - Branch: main
-- HEAD: 500b79e0
+- HEAD: c3edf1e6
 - Dirty files: 0
 - Resume hint: Read .agents/STATE.md, then the latest file in .agents/handoffs/ if present.
 <!-- MOLT_AUTO_END -->
