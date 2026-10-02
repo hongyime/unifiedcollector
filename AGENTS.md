@@ -51,6 +51,18 @@ people do not overwrite one another.
 Memory tools such as cognee or cavemem are optional local aids. Trust
 `.agents/STATE.md` and `git log` over an empty memory-tool result.
 
+### Hostname scrub (MANDATORY before every commit that touches `.agents/`)
+
+A stop-hook rewrites this machine's real hostname into `.agents/*.md`. Before
+staging any commit that includes `.agents/STATE.md` or `.agents/JOURNAL.md`:
+
+1. Replace the real hostname with the placeholder `dev-host-3.example`.
+2. Verify the STAGED blob, not just the working tree:
+   `git show :.agents/STATE.md` and `git show :.agents/JOURNAL.md` must
+   contain zero occurrences of the real hostname.
+3. Do not rewrite history to scrub commits that already contain it; fix only
+   going forward.
+
 ## Agent Types and Roles
 
 ### 1. Primary Coding Agent (Cursor/Claude Code)
