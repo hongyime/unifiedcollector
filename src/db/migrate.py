@@ -54,6 +54,7 @@ SKIP: frozenset[str] = frozenset({
     "v2_schema.sql",          # superseded full-schema dump (pre-2026-05-26); archived
     "v2_schema_final.sql",    # superseded adjustment dump; archived
     "drop_wa_face_tables.sql",  # destructive DROP — archived; apply by hand if needed
+    "20260930_add_gan_face_columns.sql",  # entity_faces is analyzer-owned; moved to analyzer repo
 })
 
 # Dated and older descriptive filenames coexist. Preserve names/checksums in

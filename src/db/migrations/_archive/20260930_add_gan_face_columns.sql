@@ -1,3 +1,10 @@
+-- ARCHIVED 2026-10-02: moved out of the auto-applied set. entity_faces is
+-- analyzer-owned (unifiedanalyzer src/db/schema.sql); running ALTER TABLE
+-- entity_faces against the collector DB fails on a clean split. The GAN
+-- columns + face_gan_overrides now live in the analyzer repo
+-- (src/db/schema.sql + migrations/20261002_add_gan_face_columns.sql).
+-- Kept here for history only; migrate.py SKIP also refuses it.
+--
 -- 2026-09-30: GAN-face synthetic-avatar score columns on entity_faces
 -- (Do Next #4). NULL = never scored; 0.0 = clearly real; 1.0 = clearly
 -- GAN-generated. Only populated for faces classified by GanDetector;
