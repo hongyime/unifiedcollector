@@ -33,3 +33,27 @@ def test_proximity_cache_refresh_has_bounded_analyzer_and_write_timeouts():
     assert "PROXIMITY_CACHE_WRITE_TIMEOUT_SECONDS" in src
     assert "command_timeout=analyzer_timeout" in src
     assert "timeout=write_timeout" in src
+
+
+def test_analyzer_database_url_is_explicit_only_no_derivation():
+    # W7 split: the old urlsplit/urlunsplit path-rewrite of DATABASE_URL to
+    # /unifiedanalyzer is gone. The analyzer lives on its own Postgres now, so
+    # the collector must be told its URL explicitly via ANALYZER_DATABASE_URL.
+    src = _source()
+
+    assert "urlsplit" not in src
+    assert "urlunsplit" not in src
+    assert 'os.getenv("ANALYZER_DATABASE_URL")' in src
+
+
+def test_analyzer_database_url_returns_env_or_none(monkeypatch):
+    import importlib
+
+    proximity = importlib.import_module("src.core.proximity")
+
+    monkeypatch.delenv("ANALYZER_DATABASE_URL", raising=False)
+    monkeypatch.setenv("DATABASE_URL", "postgres://collector:pw@postgres:5432/unifiedcollector")
+    assert proximity.analyzer_database_url() is None
+
+    monkeypatch.setenv("ANALYZER_DATABASE_URL", "postgres://collector:pw@analyzer_pg:5432/unifiedanalyzer")
+    assert proximity.analyzer_database_url() == "postgres://collector:pw@analyzer_pg:5432/unifiedanalyzer"

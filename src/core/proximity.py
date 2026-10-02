@@ -11,7 +11,6 @@ import json
 import logging
 import os
 import time
-from urllib.parse import urlsplit, urlunsplit
 
 import asyncpg
 
@@ -41,14 +40,14 @@ CREATE INDEX IF NOT EXISTS idx_account_proximity_cache_tier
 
 
 def analyzer_database_url() -> str | None:
-    explicit = os.getenv("ANALYZER_DATABASE_URL")
-    if explicit:
-        return explicit
-    collector = os.getenv("DATABASE_URL")
-    if not collector:
-        return None
-    parts = urlsplit(collector)
-    return urlunsplit((parts.scheme, parts.netloc, "/unifiedanalyzer", "", ""))
+    """Return the analyzer DB URL for the proximity-cache refresh, or None.
+
+    Post-split (W7): unifiedanalyzer lives on its own Postgres container, so the
+    old trick of rewriting DATABASE_URL's path to /unifiedanalyzer no longer
+    points anywhere real. ANALYZER_DATABASE_URL must be set explicitly in the
+    collector environment; unset means the caller skips the refresh.
+    """
+    return os.getenv("ANALYZER_DATABASE_URL") or None
 
 
 async def _ensure_lock():
