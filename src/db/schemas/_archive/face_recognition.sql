@@ -1,3 +1,10 @@
+-- ARCHIVED 2026-10-02 (W10, Postgres split): moved out of the auto-applied
+-- schemas/ set. schemas/*.sql is globbed non-recursively, so a file under
+-- _archive/ is never applied on boot. The wa_face_* tables are analyzer-
+-- destined (face work lives in unifiedanalyzer's facetracker schema now);
+-- drop them from the live collector DB with migrations/_archive/
+-- drop_wa_face_tables.sql. Kept here for history only.
+--
 -- Face Recognition tables (Phase 2: will be generalized to platform-agnostic
 -- face_identities / face_embeddings owned by unifiedanalyzer).
 -- Currently WA-specific. Not auto-applied — requires pgvector extension.
