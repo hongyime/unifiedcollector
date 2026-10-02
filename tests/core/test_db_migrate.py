@@ -89,3 +89,14 @@ async def test_apply_all_defers_when_advisory_lock_check_fails(caplog):
         and "advisory lock check failed" in record.message
         for record in caplog.records
     )
+
+
+def test_gan_face_migration_archived_not_applied():
+    # W1 split blocker: entity_faces is analyzer-owned, so the collector must
+    # never apply 20260930_add_gan_face_columns.sql. It is moved to _archive/
+    # (outside the top-level glob) AND listed in SKIP as defence-in-depth.
+    name = "20260930_add_gan_face_columns.sql"
+    top_level = {path.name for path in migrate.MIGRATIONS_DIR.glob("*.sql")}
+    assert name not in top_level
+    assert name in migrate.SKIP
+    assert (migrate.MIGRATIONS_DIR / "_archive" / name).exists()
