@@ -1,6 +1,13 @@
 # Agent State
 
-Current task: Collector phase. Env examples now cover every referenced key. Threads, Facebook, and X have no worker class; they stay on the browser ingest bridge. Exposure and Lemon8 stay in one container because that merge was deliberate. Postgres stays last.
+Current task: Postgres instance split (Option 1, two containers) + A1 face rework, cross-repo. Collector-side code/config waves are done and pushed. Live-DB waves (W2-T2, W3-T3, W4, W7-T2, W8, W9-T2/T3) are QUEUED until the stack is up; verify them with psql/pg_dump run inside the pgvector/pgvector:pg16 image (no host psql client). The analyzer side lives in C:\unifiedanalyzer; its code/config waves are also pushed.
+
+Progress:
+- W1 `ae4cc1a2`: archived the collector-side `20260930_add_gan_face_columns.sql` (entity_faces is analyzer-owned) and added it to `migrate.py` SKIP. Guard test `7ba6581a`.
+- W0 `0a068a18`: recorded the hostname-scrub protocol in AGENTS.md.
+- W6 `55aa08c9`: postgres healthcheck reads `${POSTGRES_DB:-unifiedcollector}`; documented in common.env.example.
+- W7 `b6cb07f9`: `src/core/proximity.py` requires an explicit `ANALYZER_DATABASE_URL` (dropped the urlsplit derivation that pointed at the shared instance). Tests added.
+- W10 `79e47630`: archived `src/db/schemas/face_recognition.sql` (wa_face tables are analyzer-destined; drop them from the live DB with `migrations/_archive/drop_wa_face_tables.sql`).
 
 Progress:
 - Completed the env vocabulary: `.env.example` now documents `ARCHIVE_FALLBACK_BATCH`, `ARCHIVE_FALLBACK_QPS`, `ARCHIVE_FALLBACK_DAILY_CAP`, and `COLLECTOR_STARTUP_DELAY_SECONDS` at the code defaults. `python scripts/verify_env_split.py` exits 0.
@@ -570,12 +577,12 @@ Current live update:
 <!-- MOLT_AUTO_START -->
 ## Auto State
 
-- Updated: 2026-10-01 21:28:50 +08:00
+- Updated: 2026-10-02 07:01:43 +08:00
 - Machine: dev-host-3.example
 - Harness: claude
 - Event: stop
 - Branch: main
-- HEAD: dd9db650
+- HEAD: abb36391
 - Dirty files: 0
 - Resume hint: Read .agents/STATE.md, then the latest file in .agents/handoffs/ if present.
 <!-- MOLT_AUTO_END -->

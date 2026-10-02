@@ -1,4 +1,5 @@
 # UnifiedCollector Agent Journal
+- 2026-10-02: Postgres split started (Option 1, two containers; the OOM history makes shared-instance blast radius unacceptable). Collector side: GAN migration archived (entity_faces is analyzer-owned), proximity.py requires explicit ANALYZER_DATABASE_URL, healthcheck POSTGRES_DB parameterized, face_recognition.sql archived. Live-DB waves deferred until the stack is up; use the pgvector image for psql/pg_dump.
 - 2026-10-01: The env-split checker is green. The four keys it flagged are documented at the code defaults.
 - 2026-10-01: The WhatsApp bridge is not being renamed. Production compose is now validated in CI with a placeholder Telegram allowlist and no containers started.
 - 2026-10-01: The env-split checker no longer treats the profile-probe anchor as services. Each probe container is scanned, and `PROFILE_ONLY_SOURCE` is documented.
@@ -203,3 +204,6 @@ Machine-specific values in this document use privacy placeholders.
 - 2026-10-01 18:05:36 +08:00 [dev-host-3.example/claude/stop] branch=main head=c3edf1e6 dirty=0
 - 2026-10-01 21:08:05 +08:00 [dev-host-3.example/claude/stop] branch=main head=c3edf1e6 dirty=0
 - 2026-10-01 21:28:50 +08:00 [dev-host-3.example/claude/stop] branch=main head=dd9db650 dirty=0
+- 2026-10-01 23:11:12 +08:00 [dev-host-3.example/claude/stop] branch=main head=abb36391 dirty=0
+- 2026-10-01 23:20:58 +08:00 [dev-host-3.example/claude/stop] branch=main head=abb36391 dirty=0
+- 2026-10-02 07:01:43 +08:00 [dev-host-3.example/claude/stop] branch=main head=abb36391 dirty=0
