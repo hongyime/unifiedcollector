@@ -27,6 +27,7 @@ __pycache__/
 # Sessions
 *.session
 sessions/
+docker_volume_sessions_data/
 
 # Runtime data
 data/
