@@ -8,7 +8,7 @@
 - 2026-10-01: The five profile probes no longer share `collector_profile_only`. Each has its own container. An unset source still runs all five for ad-hoc use.
 - 2026-10-01: GitHub now runs in `collector_github` (1024m). `collector_lowrisk` is strava+search only (2048m). A stale GitHub check restarts only the GitHub container.
 - 2026-10-01: Spiderfoot now starts with the production stack. The `recon` compose profile is gone; `instagram-dm` stays opt-in. Allowlist gating is unchanged.
-- 2026-10-01: PayPal profile probe now defaults on, matching the other profile-only sources. The old ethics-gate default of 0 is gone; `PAYPAL_PROBE_ENABLED=0` still opts out.
+- 2026-10-01: PayPal profile probe now runs unconditionally; no PayPal-specific opt-out environment variable remains.
 - 2026-10-01: Removed the idle production `collector` service (`worker --all` with every source disabled). Dedicated workers already build the collector image, and the `worker --all` CLI stays. Startup no longer falls back to that container.
 - 2026-09-27: Host hit 99.7% RAM exhaustion (confirmed by direct measurement — not disk space, which was fine), OOM-killing the shared unifiedcollector_postgres container 46h before discovery; it never restarted (sat `Exited (137)`) while every other container on the host auto-recovered fine, and every `docker ps`/`docker exec` hang everyone hit chasing this — including 3 parallel diagnostic subagents and an inbound report from the unifiedanalyzer-side agent — was Docker Desktop's own engine proxy being stuck, not the database. Invariant learned: after any host-level WSL2 disruption, `wsl --shutdown` can leave Docker Desktop's engine/init-control-API wedged (stranded AF_UNIX sockets, matches docker/for-win#15052) even after the VM itself comes back healthy — `wsl --terminate <distro>` + a clean Docker Desktop relaunch is the fix, not more waiting. Second invariant: `docker ps` (running-only) after a Docker Desktop recovery is not sufficient proof a container came back — always check `docker ps -a` explicitly for `Exited` containers that `restart: unless-stopped` failed to revive silently. Full ranked remediation checklist (including which Docker Desktop Troubleshoot menu options silently delete volumes despite their UI text) written to `.agents/docker-desktop-stuck-engine-remediation.md` for next time.
 
@@ -208,10 +208,12 @@ Machine-specific values in this document use privacy placeholders.
 - 2026-10-01 23:11:12 +08:00 [dev-host-3.example/claude/stop] branch=main head=abb36391 dirty=0
 - 2026-10-01 23:20:58 +08:00 [dev-host-3.example/claude/stop] branch=main head=abb36391 dirty=0
 - 2026-10-02 07:01:43 +08:00 [dev-host-3.example/claude/stop] branch=main head=abb36391 dirty=0
-- 2026-10-02 16:12:31 +08:00 [PRAWN-L390/claude/stop] branch=main head=4e978fd1 dirty=0
-- 2026-10-03 13:16:47 +08:00 [PRAWN-L390/claude/stop] branch=main head=4e978fd1 dirty=0
-- 2026-10-03 13:46:36 +08:00 [PRAWN-L390/claude/stop] branch=main head=4e978fd1 dirty=0
-- 2026-10-03 16:19:31 +08:00 [PRAWN-L390/claude/stop] branch=main head=4e978fd1 dirty=0
-- 2026-10-03 16:34:24 +08:00 [PRAWN-L390/claude/stop] branch=main head=4e978fd1 dirty=0
-- 2026-10-03 16:47:37 +08:00 [PRAWN-L390/claude/stop] branch=main head=4e978fd1 dirty=0
-- 2026-10-03 17:18:48 +08:00 [PRAWN-L390/claude/stop] branch=main head=4e978fd1 dirty=0
+- 2026-10-02 16:12:31 +08:00 [dev-host-3.example/claude/stop] branch=main head=4e978fd1 dirty=0
+- 2026-10-03 13:16:47 +08:00 [dev-host-3.example/claude/stop] branch=main head=4e978fd1 dirty=0
+- 2026-10-03 13:46:36 +08:00 [dev-host-3.example/claude/stop] branch=main head=4e978fd1 dirty=0
+- 2026-10-03 16:19:31 +08:00 [dev-host-3.example/claude/stop] branch=main head=4e978fd1 dirty=0
+- 2026-10-03 16:34:24 +08:00 [dev-host-3.example/claude/stop] branch=main head=4e978fd1 dirty=0
+- 2026-10-03 16:47:37 +08:00 [dev-host-3.example/claude/stop] branch=main head=4e978fd1 dirty=0
+- 2026-10-03 17:18:48 +08:00 [dev-host-3.example/claude/stop] branch=main head=4e978fd1 dirty=0
+2026-10-11: Began the approved collector overhaul on branch feat/collector-overhaul. Existing main history already had GitHub isolation, five profile services, default-on SpiderFoot, and the idle production collector removal; this pass completes the remaining Compose deduplication, PayPal gate retirement, and instagram_ingest naming/documentation work. Hostname placeholder for durable state: dev-host-3.example.
+2026-10-11: Overhaul defaults recorded: (1) use native Compose YAML anchors instead of a generator; (2) keep GitHub on the existing collector image/context but isolate it as collector_github; (3) split profile probes as Snapchat, PayPal, Airbnb, Bluesky, and Pinterest; (4) enable recon in both production and standalone dev Compose; (5) remove the PayPal flag entirely and make the public probe unconditional; (6) name the service instagram_ingest, retain the Python package src.bridges.ig_ingest for compatibility, and retire only the idle --all service while preserving the CLI option.

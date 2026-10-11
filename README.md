@@ -153,7 +153,7 @@ docker compose -f docker/docker-compose.yml up -d
 Ports bound on the host:
 - `${POSTGRES_HOST_PORT:-5433}` → postgres:5432
 - `8700` → dashboard (also mapped :8001)
-- `8765` → ig_ingest (Chrome extension endpoint)
+- `8765` → instagram_ingest (Chrome extension endpoint)
 - `8790` → browser_cookie_vault
 - `3011`, `3012` → wa-bridge-1/2 (management + QR scan)
 
@@ -337,15 +337,15 @@ unifiedcollector/
 
 Failure modes hit during the audit / hardening pass and their fixes:
 
-**1. `ig_ingest` reports `db_pool: false` after a container restart.**
+**1. `instagram_ingest` reports `db_pool: false` after a container restart.**
 Old symptom: `startup DB pool timed out` at boot when Postgres was slow
 to accept connections after the host wake-up. Fixed 2026-09-06 by
 extending startup retry to 300 s and by making `/health` return 503
 when db_pool is absent AND startup is not pending. If it still happens,
-`docker compose restart ig_ingest` and watch
-`docker logs unifiedcollector_ig_ingest --tail 20`.
+`docker compose restart instagram_ingest` and watch
+`docker logs unifiedcollector_instagram_ingest --tail 20`.
 
-**2. Chrome extension stops POSTing to `ig_ingest`.**
+**2. Chrome extension stops POSTing to `instagram_ingest`.**
 Diagnosis: `curl http://localhost:8790/health` (browser cookie vault)
 also fails, and `Test-NetConnection 127.0.0.1 -Port 9336` returns
 False. Fix: close all Chrome windows on the host, then re-run
@@ -425,7 +425,7 @@ Apache-2.0. See `LICENSE` and `NOTICE`.
 Use Docker Compose 2.24+. Create .env.dev with development settings. The standalone
 dev stack uses a separate project and fresh named data/account-session volumes.
 It starts the dashboard, Vite frontend, and local database/brokers. Background
-collectors require --profile workers; optional recon and WhatsApp integrations
+collectors require --profile workers; WhatsApp requires --profile whatsapp; recon runs by default
 require --profile recon or --profile whatsapp and your own authorized test accounts.
 
 ~~~sh

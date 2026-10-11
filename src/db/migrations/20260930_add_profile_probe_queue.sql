@@ -2,7 +2,7 @@
 -- (Do Next #3). Populated by handle_fanout, operator UI, and other
 -- collectors when they encounter a username on a platform we don't
 -- automate through a full worker loop (snapchat/paypal/airbnb/bluesky/
--- pinterest). Consumed by the single collector_profile_only container.
+-- pinterest). Consumed by the separate source-specific profile containers.
 --
 -- Round-robin friendly: source ordering ensures we don't starve one
 -- platform when another is backlogged.
