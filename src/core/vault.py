@@ -562,6 +562,22 @@ def blob_path_for_sha256(
     return root / "media" / "blobs" / digest[:2] / digest[2:4] / f"{digest}{suffix}"
 
 
+
+def _finalize_write(tmp: Path, path: Path) -> None:
+    """Move temp file to final path, working on all filesystems.
+
+    Tries atomic os.replace first (fast, preserves atomicity on Linux).
+    Falls back to copy+delete for filesystems where atomic rename fails
+    (e.g. NTFS ntfs3 driver, especially on cross-directory moves).
+    """
+    try:
+        tmp.replace(path)
+    except OSError:
+        # NTFS and some network filesystems reject atomic rename.
+        # Copy+delete is slower but works everywhere.
+        shutil.copy2(tmp, path)
+        tmp.unlink(missing_ok=True)
+
 def _atomic_write_text(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
@@ -573,7 +589,7 @@ def _atomic_write_text(path: Path, content: str) -> None:
                 f.write("\n")
             f.flush()
             os.fsync(f.fileno())
-        tmp.replace(path)
+        _finalize_write(tmp, path)
     finally:
         try:
             tmp.unlink(missing_ok=True)
@@ -590,7 +606,7 @@ def _atomic_write_bytes(path: Path, content: bytes) -> None:
             f.write(content)
             f.flush()
             os.fsync(f.fileno())
-        tmp.replace(path)
+        _finalize_write(tmp, path)
     finally:
         try:
             tmp.unlink(missing_ok=True)
@@ -608,7 +624,7 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
             f.write("\n")
             f.flush()
             os.fsync(f.fileno())
-        tmp.replace(path)
+        _finalize_write(tmp, path)
     finally:
         try:
             tmp.unlink(missing_ok=True)
@@ -684,7 +700,7 @@ def _atomic_write_raw_payload(path: Path, payload: Any, *, extension: str) -> in
                     text_file.detach()
                 raw_file.flush()
                 os.fsync(raw_file.fileno())
-            tmp.replace(path)
+            _finalize_write(tmp, path)
             return writer.bytes_written
 
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as text_file:
@@ -692,7 +708,7 @@ def _atomic_write_raw_payload(path: Path, payload: Any, *, extension: str) -> in
             _stream_raw_payload_text(writer, payload, extension=extension)
             text_file.flush()
             os.fsync(text_file.fileno())
-        tmp.replace(path)
+        _finalize_write(tmp, path)
         return None
     finally:
         try:
@@ -978,7 +994,7 @@ def write_atomic_artifact(
                 raise RuntimeError("existing blob checksum mismatch")
             tmp.unlink(missing_ok=True)
         else:
-            tmp.replace(blob_path)
+            _finalize_write(tmp, blob_path)
             blob_written = True
 
         if blob_path.stat().st_size != size or _sha256_path(blob_path) != digest:

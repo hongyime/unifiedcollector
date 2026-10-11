@@ -50,6 +50,7 @@ import contextlib
 import json
 import logging
 import os
+import shutil
 import sys
 import tempfile
 from datetime import datetime, timezone
@@ -407,7 +408,13 @@ class CookieVault:
                 json.dump(payload, fh, ensure_ascii=False, indent=2, sort_keys=True)
                 fh.flush()
                 os.fsync(fh.fileno())
-            os.replace(tmp_name, path)
+            try:
+                os.replace(tmp_name, path)
+            except OSError:
+                # NTFS and some network filesystems reject atomic rename;
+                # copy+delete works everywhere.
+                shutil.copy2(tmp_name, path)
+                os.unlink(tmp_name)
         except Exception:
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(tmp_name)
