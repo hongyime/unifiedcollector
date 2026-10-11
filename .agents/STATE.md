@@ -1,8 +1,8 @@
 # Agent State
-Current task: Publish the remaining collector Compose follow-up to main.
-The collector overhaul is already merged: HEAD is cb35165c, equal to origin/main. The follow-up makes host data mounts configurable, permits an empty Telegram spider allowlist, and updates the env documentation. Main sync, commit, and push are pending.
+Current task: Complete — the collector Compose follow-up is pushed to main.
+Commit cf5a4c2e makes host data mounts configurable, permits an empty Telegram spider allowlist, adds PostgreSQL shared memory, and updates env documentation. `git diff --check` passed; tests and runtime checks were not run.
 
-Next steps: commit the reviewed Compose/docs changes and push main; local main now matches origin/main. No tests or runtime checks have been run in this turn.
+Next steps: none. Local main and origin/main contain cf5a4c2e.
 Implementation complete: production and dev Compose configs parsed with temporary example env files; compileall and diff checks pass. Focused pytest/full pytest are unavailable because this host has no pytest or uv.
 Push blocker: commit c1b0c5b7 is local on feat/collector-overhaul; origin push requires GitHub authentication, and both gh auth and SSH key authentication are unavailable on this host.
 
@@ -584,13 +584,13 @@ Current live update:
 <!-- MOLT_AUTO_START -->
 ## Auto State
 
-- Updated: 2026-10-12 02:07:38 +0800
+- Updated: 2026-10-12 02:08:00 +0800
 - Machine: dev-host-3.example
 - Harness: bash
-- Event: publish
+- Event: push
 - Branch: main
-- HEAD: cb35165c
-- Dirty files: 7
+- HEAD: cf5a4c2e
+- Dirty files: 0
 - Resume hint: Read .agents/STATE.md, then the latest file in .agents/handoffs/ if present.
 <!-- MOLT_AUTO_END -->
 Machine-specific values in this document use privacy placeholders.
