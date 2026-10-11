@@ -34,6 +34,11 @@ def _decode_json_str(s: str) -> str:
 class PayPalCollector(ProfileOnlyCollector):
     SOURCE_NAME = "paypal"
     PROFILE_TABLE = "paypal_profiles"
+    @property
+    def enabled(self) -> bool:
+        # PayPal is public and intentionally has no feature gate.
+        return True
+
 
 
     async def probe_profile(self, username: str) -> ProfileResult:

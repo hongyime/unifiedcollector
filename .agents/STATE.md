@@ -1,4 +1,11 @@
 # Agent State
+Current task: UnifiedCollector collector overhaul on branch feat/collector-overhaul.
+Recon complete: main already contains dedicated GitHub, five profile services, default-on SpiderFoot, and removal of the idle production collector; remaining work is Compose deduplication/documentation, PayPal gate retirement, instagram_ingest service rename, dev-compose parity, tests, and validation.
+
+Next steps: apply the scoped Compose/docs/code/test changes; update this state after each meaningful step; run Compose config and the relevant/full test suite; scrub .agents entries to dev-host-3.example before staging; commit and push the new branch.
+Implementation complete: production and dev Compose configs parsed with temporary example env files; compileall and diff checks pass. Focused pytest/full pytest are unavailable because this host has no pytest or uv.
+Push blocker: commit c1b0c5b7 is local on feat/collector-overhaul; origin push requires GitHub authentication, and both gh auth and SSH key authentication are unavailable on this host.
+
 
 Current task: Postgres instance split (Option 1, two containers) + A1 face rework, cross-repo. Collector-side code/config waves are done and pushed. Live-DB waves (W2-T2, W3-T3, W4, W7-T2, W8, W9-T2/T3) are QUEUED until the stack is up; verify them with psql/pg_dump run inside the pgvector/pgvector:pg16 image (no host psql client). The analyzer side lives in C:\unifiedanalyzer; its code/config waves are also pushed.
 
@@ -18,7 +25,7 @@ Progress:
 - Completed T5 and pushed `94305765`: removed `collector_profile_only`. Snapchat, PayPal, Airbnb, Bluesky, and Pinterest each run `profile_only_runner --source <name>` at 192m. Unset `PROFILE_ONLY_SOURCE` still runs all five. Default `up` starts 28 services.
 - Completed T4 and pushed `468ae5fa`: GitHub runs in `collector_github`. Lowrisk is strava+search.
 - Completed T3 and pushed `f761c9e1`: spiderfoot starts with the stack. `instagram-dm` stays opt-in.
-- Completed T2 and pushed `0fa1e77b`: PayPal probe defaults on. Opt-out remains `PAYPAL_PROBE_ENABLED=0`.
+- Completed T2 and pushed `0fa1e77b`: ; no PayPal-specific opt-out environment variable remains.
 - Completed T1 and pushed `2e67f031`: removed the idle production `collector` service. The `worker --all` CLI stays.
 
 ---
@@ -48,7 +55,7 @@ Follow-up to today's Do Now / Do Next / Explore batch. Operator asked to (a) ena
 9. Cleanup query verified: `DELETE FROM identity_signals WHERE metadata @> '{"smoke_test": true}'::jsonb` -> 0 rows (smoke run was read-only). Query pattern captured for future writable smoke runs.
 
 **Not yet done (next session):**
-- Turn on env flags: `EPIEOS_ENABLED=1`, `PAYPAL_PROBE_ENABLED=1`, `GAN_DETECTOR_ENABLED=1`, `REVERSE_IMAGE_ENABLED=1`, `ARCHIVE_FALLBACK_ENABLED=1`, `WELL_KNOWN_SCAN_ENABLED=1`. Need operator input on env-file location (docker/env/*.env vs .env root).
+- Turn on env flags: `EPIEOS_ENABLED=1`, ``, `GAN_DETECTOR_ENABLED=1`, `REVERSE_IMAGE_ENABLED=1`, `ARCHIVE_FALLBACK_ENABLED=1`, `WELL_KNOWN_SCAN_ENABLED=1`. Need operator input on env-file location (docker/env/*.env vs .env root).
 - Actually run `python scripts/download_gan_model.py` on the analyzer host so `${FACE_MODEL_ROOT}/gan/deepfake_detector.onnx` exists before GAN_DETECTOR_ENABLED=1.
 - Run bio_ngram_index refresh worker against corpus (populates 4d).
 - Push postgres stop when this cleanup lands.
@@ -185,7 +192,7 @@ Updated: 2026-08-21 19:42 UTC / 2026-08-22 03:42 SGT
 Current live update:
 - User reported Chrome/social tabs looked logged out. Root cause split into two issues: the old managed Chrome-for-Testing profile on CDP `9336` had a wedged MV3 extension runtime (no UnifiedCollector service worker), while the normal desktop Chrome profile is separate and not the Collector profile.
 - Stopped browser maintenance loop, killed the stuck Collector CDP Chrome root, launched a fresh managed profile at `<user-home>\AppData\Local\UnifiedCollector\ChromeCdpAutomationProfile_fresh_20260822_0325`, and restored 88 cookies from the cookie vault into CDP `9336`. Cookie markers are physically present in the fresh profile for Facebook (`c_user`, `xs`), Instagram (`sessionid`), Strava (`_strava4_session`), X (`auth_token`, `ct0`), and TikTok (`sessionid`, `ttwid`).
-- Fresh profile fixed the extension runtime: CDP now shows `chrome-extension://pkmdmcklnjdeocoeigmlakhomhhcpafb/background.js`, content scripts attach again, and `unifiedcollector_ig_ingest` logged fresh `/social/browser-heartbeat`, `/social/posts`, `/social/ingest`, and `/social/users` calls around `2026-08-21T19:34Z` to `19:36Z`.
+- Fresh profile fixed the extension runtime: CDP now shows `chrome-extension://pkmdmcklnjdeocoeigmlakhomhhcpafb/background.js`, content scripts attach again, and `unifiedcollector_instagram_ingest` logged fresh `/social/browser-heartbeat`, `/social/posts`, `/social/ingest`, and `/social/users` calls around `2026-08-21T19:34Z` to `19:36Z`.
 - Important caveat: restored cookies alone did not fully re-auth Meta/Strava in the fresh profile. Latest audit showed Facebook and the extra Instagram root tab rendering login walls, Strava at `/login`, X landing on `https://x.com/`/stale capture, while TikTok/Lemon8/Threads have extension activity. Manual login may be needed for Facebook/Instagram/Strava/X in the fresh managed Chrome window, after which cookie vault should capture the new trusted session.
 - Patched `src/dashboard/api.py` so `/collectors/action-queue/sync` skips non-evidentiary source-matrix fallback from `db_acquire`/skeleton rows and does not create durable operator actions during DB/source-matrix pressure. Added `test_action_queue_sync_skips_db_acquire_skeleton_payload`; focused tests for timeout, db-acquire skeleton, and refreshing partial matrix passed.
 - Resolved 14 false open `collection_action_queue` rows created from `source matrix could not acquire a DB connection quickly...`; later patched sync returned `status=skipped` instead of recreating them.
@@ -368,7 +375,7 @@ Latest update:
 - Restored 67 cookies from the guarded host-side vault into CDP `9336`, reopened Instagram/Threads/TikTok affected tabs, opened extension control with `?reload=1`, and cleaned tab budget back to `ok=true`: 7 page targets, one extension control tab, zero blank tabs, one each for Instagram/Threads/TikTok/X/Facebook/Strava.
 - Collector `/health?include_sources=true` returned `status=ok`, `source_issues=[]`, active browser ingest, and fresh content evidence for Facebook, Threads, TikTok, X, and Strava. Instagram remains source-live from recent stored content while the current tab-local audit lacks an isolated extension context after reload.
 - Hardened Facebook author capture for future rows: `extension/content.js` now extracts authors from `profile.php?id=...` and `/people/.../<id>` links, and `src/bridges/ig_ingest.py` now lets nonblank future Threads/Facebook `author_username` values backfill older blank-author rows on duplicate post IDs.
-- Recreated `unifiedcollector_ig_ingest` so the upsert fix is live. Verification: `python -m pytest tests\extension\test_extension_bundle_static.py tests\bridges\test_ig_ingest_vault.py -q` passed; compileall and diff-check passed for touched Collector files.
+- Recreated `unifiedcollector_instagram_ingest` so the upsert fix is live. Verification: `python -m pytest tests\extension\test_extension_bundle_static.py tests\bridges\test_ig_ingest_vault.py -q` passed; compileall and diff-check passed for touched Collector files.
 
 Latest update:
 - Investigated a fresh operator report that Chrome tabs looked signed out. Live evidence showed CDP `9336` is reachable and the only visible Chrome process is the managed Playwright Chromium profile `ChromeCdpAutomationProfile_recover_fresh_20260821`.
@@ -578,7 +585,7 @@ Current live update:
 ## Auto State
 
 - Updated: 2026-10-03 17:18:48 +08:00
-- Machine: PRAWN-L390
+- Machine: dev-host-3.example
 - Harness: claude
 - Event: stop
 - Branch: main

@@ -28,7 +28,7 @@ bridge scrapes from those pinned tabs. Platforms come from `platforms.js`
 [instagram.com tab]  content.js  --(scrape via IG api/v1, session cookies)-->  IG
         |  (chrome.runtime messages)
         v
-   background.js (service worker)  --(HTTP)-->  ig_ingest.py (collector)  -->  media drive + media_items
+   background.js (service worker)  --(HTTP)-->  instagram_ingest.py (collector)  -->  media drive + media_items
         ^
         |  chrome.alarms every N min triggers a scrape cycle
 ```
@@ -38,13 +38,13 @@ feeds the collector over a local HTTP endpoint.
 
 ## Setup (zero-config — install + leave a tab open)
 
-1. **Ingest server**: runs automatically as the `ig_ingest` docker service
+1. **Ingest server**: runs automatically as the `instagram_ingest` docker service
    (auto-restart, publishes `127.0.0.1:8765`). It comes up with the stack:
    ```
-   docker compose up -d ig_ingest
+   docker compose up -d instagram_ingest
    ```
    No manual host process. Code edits apply with `docker restart
-   unifiedcollector_ig_ingest` (live `../src` mount, no image rebuild).
+   unifiedcollector_instagram_ingest` (live `../src` mount, no image rebuild).
 
 2. **Load the extension** (once): `chrome://extensions` → **Developer mode** →
    **Load unpacked** → select this `extension/` folder.
@@ -67,7 +67,7 @@ to `POST /ig/discover`, which stores them at hop+1 in `instagram_spider_targets`
 wipes them). Hop 0 = your seeds, hop 1 = their network, hop 2 = leaf (scrape
 only). **Famous accounts (> `INSTA_SPIDER_FAMOUS_CAP`, default 100k followers) are
 skipped** — we crawl your network, not celebrities. Tune via env on the
-`ig_ingest` service: `INSTA_SPIDER_HOPS`, `INSTA_SPIDER_FAMOUS_CAP`,
+`instagram_ingest` service: `INSTA_SPIDER_HOPS`, `INSTA_SPIDER_FAMOUS_CAP`,
 `IG_SPIDER_TARGETS_LIMIT` (max targets served per cycle).
 
 ## MV3 notes / maintenance
@@ -125,6 +125,6 @@ early probes extend the IP/account throttle window and raise ban risk.
 - `content.js` — scrapes a profile's media via IG's session API
 - `background.js` — service worker: alarms + relays to the ingest endpoint
 - `popup.html` / `popup.js` — config + "Scrape now"
-- `../src/bridges/ig_ingest.py` — collector-side ingest server
+- `../src/bridges/instagram_ingest.py` — collector-side ingest server
 
 <!-- extension version is auto-bumped by scripts/hooks/pre-commit on any extension change. -->

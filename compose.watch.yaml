@@ -3,20 +3,7 @@ x-watch-ignore: &watch-ignore ["**/.[eE][nN][vV]*", "**/*[sS][eE][cC][rR][eE][tT
 services:
   db-init:
     volumes: !override []
-  collector:
-    volumes: !override ["dev-data:/app/data", "dev-sessions:/app/sessions"]
-    develop:
-      watch:
-      - action: sync
-        path: ./src
-        target: /app/src
-        initial_sync: true
-        ignore: *watch-ignore
-      - action: sync
-        path: ./config
-        target: /app/config
-        initial_sync: true
-        ignore: *watch-ignore
+  # The former --all fallback worker was retired; use dedicated source services.
   collector_spiderfoot:
     volumes: !override ["dev-data:/app/data", "dev-sessions:/app/sessions"]
     develop:
@@ -199,7 +186,7 @@ services:
         target: /app/config
         initial_sync: true
         ignore: *watch-ignore
-  ig_ingest:
+  instagram_ingest:
     volumes: !override ["dev-data:/app/data", "dev-sessions:/app/sessions"]
     develop:
       watch:
