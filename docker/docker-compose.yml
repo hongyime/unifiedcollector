@@ -84,7 +84,7 @@ services:
     cpus: "${RECON_SPIDERFOOT_CPUS:-2.0}"
     pids_limit: 256
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
       RECON_ALLOWLIST: "${RECON_ALLOWLIST:-}"
       RECON_ALLOW_UNSCOPED: "${RECON_ALLOW_UNSCOPED:-0}"
       RECON_ALLOWED_SOURCES: "${RECON_ALLOWED_SOURCES:-beeper,facebook,github,instagram,lemon8,search,strava,telegram,threads,tiktok,website,whatsapp,x,youtube}"
@@ -160,7 +160,7 @@ services:
     command: python -m src.main worker --source youtube
     mem_limit: 384m
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
       COLLECTOR_STARTUP_DELAY_SECONDS: "35"
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
@@ -187,12 +187,12 @@ services:
       YOUTUBE_MAX_VIDEO_DURATION_MINUTES: "0"
       YOUTUBE_COOKIE_FILE: /app/credentials/youtube/cookies.txt
     extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - "host.docker.internal:172.20.0.1"
     cap_add:
       - SYS_PTRACE
     volumes:
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}/media:/media"
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}:/vault"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -228,7 +228,7 @@ services:
     command: python -m src.main worker --source tiktok
     mem_limit: 384m
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
       COLLECTOR_STARTUP_DELAY_SECONDS: "25"
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
@@ -244,12 +244,12 @@ services:
       TIKTOK_YTDLP_FALLBACK_ENABLED: "true"
       TIKTOK_GALLERY_DL_ENABLED: "true"
     extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - "host.docker.internal:172.20.0.1"
     cap_add:
       - SYS_PTRACE
     volumes:
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}/media:/media"
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}:/vault"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -289,7 +289,7 @@ services:
     command: python -m src.main worker --source github
     mem_limit: 1024m
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
       COLLECTOR_STARTUP_DELAY_SECONDS: "120"
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
@@ -315,10 +315,10 @@ services:
       COLLECTOR_CYCLE_SLEEP_GITHUB: "300"
       DB_POOL_MAX_SIZE: "4"
     extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - "host.docker.internal:172.20.0.1"
     volumes:
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}/media:/media"
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}:/vault"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -349,7 +349,7 @@ services:
     # Strava + search only. The old 2560m cap included github's spider reseed.
     mem_limit: 2048m
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
       COLLECTOR_STARTUP_DELAY_SECONDS: "90"
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
@@ -393,12 +393,12 @@ services:
       # small pool is plenty. Default 10 -> 4.
       DB_POOL_MAX_SIZE: "4"
     extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - "host.docker.internal:172.20.0.1"
     cap_add:
       - SYS_PTRACE
     volumes:
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}/media:/media"
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}:/vault"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -430,7 +430,7 @@ services:
     command: python -m src.watchdog.freshness
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
       WATCHDOG_INTERVAL: "300"
       WATCHDOG_STALE_TELEGRAM: "3600"
       WATCHDOG_STALE_WHATSAPP: "14400"
@@ -477,7 +477,7 @@ services:
     command: python -m src.main worker --source website
     mem_limit: 384m
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
       COLLECTOR_STARTUP_DELAY_SECONDS: "45"
       COLLECTOR_HANG_TIMEOUT_SECONDS: "7200"
       COLLECTOR_DRIVE_PATH: /media
@@ -506,12 +506,12 @@ services:
       # because up to WEBSITE_MAX_CONCURRENT_TASKS pages may write concurrently.
       DB_POOL_MAX_SIZE: "6"
     extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - "host.docker.internal:172.20.0.1"
     cap_add:
       - SYS_PTRACE
     volumes:
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}/media:/media"
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}:/vault"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -542,7 +542,7 @@ services:
     command: python -m src.main worker --source exposure,lemon8
     mem_limit: 512m
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
       COLLECTOR_HANG_TIMEOUT_SECONDS: "7200"
@@ -577,12 +577,12 @@ services:
       LEMON8_FEED_MEDIA_PER_CYCLE: "40"
       LEMON8_FYP_DETAIL_PER_CYCLE: "2"
     extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - "host.docker.internal:172.20.0.1"
     cap_add:
       - SYS_PTRACE
     volumes:
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}/media:/media"
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}:/vault"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -611,7 +611,7 @@ services:
     container_name: unifiedcollector_collector_snapchat
     command: python -m src.collectors.profile_only_runner --source snapchat
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
       COLLECTOR_STARTUP_DELAY_SECONDS: "30"
       SNAPCHAT_PROBE_ENABLED: "${SNAPCHAT_PROBE_ENABLED:-1}"
       PROFILE_ROUND_ROBIN_INTERVAL_SECONDS: "${PROFILE_ROUND_ROBIN_INTERVAL_SECONDS:-60}"
@@ -620,7 +620,7 @@ services:
     container_name: unifiedcollector_collector_paypal
     command: python -m src.collectors.profile_only_runner --source paypal
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
       COLLECTOR_STARTUP_DELAY_SECONDS: "45"
       PROFILE_ROUND_ROBIN_INTERVAL_SECONDS: "${PROFILE_ROUND_ROBIN_INTERVAL_SECONDS:-60}"
   collector_airbnb:
@@ -628,7 +628,7 @@ services:
     container_name: unifiedcollector_collector_airbnb
     command: python -m src.collectors.profile_only_runner --source airbnb
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
       COLLECTOR_STARTUP_DELAY_SECONDS: "60"
       AIRBNB_PROBE_ENABLED: "${AIRBNB_PROBE_ENABLED:-1}"
       PROFILE_ROUND_ROBIN_INTERVAL_SECONDS: "${PROFILE_ROUND_ROBIN_INTERVAL_SECONDS:-60}"
@@ -637,7 +637,7 @@ services:
     container_name: unifiedcollector_collector_bluesky
     command: python -m src.collectors.profile_only_runner --source bluesky
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
       COLLECTOR_STARTUP_DELAY_SECONDS: "75"
       BLUESKY_PROBE_ENABLED: "${BLUESKY_PROBE_ENABLED:-1}"
       PROFILE_ROUND_ROBIN_INTERVAL_SECONDS: "${PROFILE_ROUND_ROBIN_INTERVAL_SECONDS:-60}"
@@ -646,7 +646,7 @@ services:
     container_name: unifiedcollector_collector_pinterest
     command: python -m src.collectors.profile_only_runner --source pinterest
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
       COLLECTOR_STARTUP_DELAY_SECONDS: "90"
       PINTEREST_PROBE_ENABLED: "${PINTEREST_PROBE_ENABLED:-1}"
       PROFILE_ROUND_ROBIN_INTERVAL_SECONDS: "${PROFILE_ROUND_ROBIN_INTERVAL_SECONDS:-60}"
@@ -658,7 +658,7 @@ services:
     command: python -m src.main worker --source telegram
     mem_limit: 384m
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
       # collect() now BLOCKS in the realtime listener (like whatsapp), so the
@@ -699,12 +699,12 @@ services:
       # 4 accounts is queued (user: "ensure we get ALL historical chats").
       TELEGRAM_SPIDER_QUEUE_MAX: "20000"
     extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - "host.docker.internal:172.20.0.1"
     cap_add:
       - SYS_PTRACE
     volumes:
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}/media:/media"
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}:/vault"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -733,7 +733,7 @@ services:
     command: python -m src.main worker --source beeper
     mem_limit: 768m
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
       BEEPER_DESKTOP_API_URL: http://host.docker.internal:23373
@@ -772,12 +772,12 @@ services:
       BEEPER_TOMBSTONE_RETRY_LIMIT: "5"
       BEEPER_TOMBSTONE_RETRY_MIN_AGE_DAYS: "7"
     extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - "host.docker.internal:172.20.0.1"
     cap_add:
       - SYS_PTRACE
     volumes:
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}/media:/media"
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}:/vault"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -803,7 +803,7 @@ services:
     command: python -m src.main worker --source whatsapp
     mem_limit: 384m
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
       WHATSAPP_SPIDER_SESSIONS: "session_2"
@@ -834,12 +834,12 @@ services:
       WA_CONTACT_BATCH_MAX: "100"
       WA_CONTACT_BATCH_TIMEOUT_MS: "250"
     extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - "host.docker.internal:172.20.0.1"
     cap_add:
       - SYS_PTRACE
     volumes:
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}/media:/media"
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}:/vault"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -868,7 +868,7 @@ services:
     command: python -m src.main worker --source instagram
     mem_limit: 1g
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
       COLLECTOR_STARTUP_DELAY_SECONDS: "75"
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
@@ -894,12 +894,12 @@ services:
       INSTA_SPIDER_FOLLOWERS: "false"
       COLLECTOR_CYCLE_SLEEP_INSTAGRAM: "1200"
     extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - "host.docker.internal:172.20.0.1"
     cap_add:
       - SYS_PTRACE
     volumes:
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}/media:/media"
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}:/vault"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -941,7 +941,7 @@ services:
     command: python -m src.main worker --source instagram_dm
     mem_limit: 512m
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
       COLLECTOR_STARTUP_DELAY_SECONDS: "10"
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
@@ -956,8 +956,8 @@ services:
       # PROXY_URL (which would share exit IP with the main IG collector).
       INSTAGRAM_DM_PROXY_URL: ""
     volumes:
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}/media:/media"
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}:/vault"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}:/vault"
       # Only mount the isolated credentials subdir — the main credentials/
       # tree is intentionally NOT bind-mounted here so a code bug cannot
       # accidentally read credentials/instagram/*.txt.
@@ -993,7 +993,7 @@ services:
     ports:
       - "8765:8765"
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
       # skip accounts > 3k followers when spider-discovering (user: close network only)
@@ -1011,8 +1011,8 @@ services:
       BROWSER_CONTENT_HINT_RESPONSE_TIMEOUT_SECONDS: "2.0"
       UC_EXTENSION_EXPECTED_VERSION: "1.23.103"
     volumes:
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}/media:/media"
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}:/vault"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}:/vault"
       - ../credentials:/app/credentials   # so /social/cookies can write live sessions
       - ../src:/app/src
     depends_on:
@@ -1035,7 +1035,7 @@ services:
     mem_limit: ${COLLECTOR_SCHED_MEM:-512m}
     cpus: "${COLLECTOR_SCHED_CPUS:-1.0}"
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
       # Conn-budget hygiene (P2 review §5): scheduler triggers + reconciliation are
@@ -1069,8 +1069,8 @@ services:
       WA_STAGING_MERGE_INTERVAL_MS: "${WA_STAGING_MERGE_INTERVAL_MS:-5000}"
       WA_STAGING_BATCH_MAX: "${WA_STAGING_BATCH_MAX:-1000}"
     volumes:
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}/media:/media"
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}:/vault"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       # live src mount so scheduler code (e.g. identity reconciliation) applies on
@@ -1099,7 +1099,7 @@ services:
     mem_limit: 256m
     command: python -m src.bots.onboard_bot
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
     volumes:
       - ../src:/app/src
     depends_on:
@@ -1132,7 +1132,7 @@ services:
     command: python -m src.notifications.realtime_feed
     mem_limit: 256m
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
       REDIS_HOST: redis
@@ -1152,8 +1152,8 @@ services:
     volumes:
       # The vault mount lets the drain read local media files instead of
       # relying on Telegram to fetch a URL (which fails for auth-gated media).
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}/media:/media"
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}:/vault"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}:/vault"
       - ../src:/app/src
     depends_on:
       redis:
@@ -1187,7 +1187,7 @@ services:
       - "8001:8700"
       - "8700:8700"
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
       UC_EXTENSION_EXPECTED_VERSION: "1.23.103"
@@ -1209,8 +1209,8 @@ services:
       GITHUB_QUOTA_PUSHER_MAX_CONCURRENT: "12"
       GITHUB_QUOTA_PUSHER_BATCH_SIZE: "100"
     volumes:
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}/media:/media"
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}:/vault"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - ../tmp:/app/tmp
       - ../src:/app/src
@@ -1306,7 +1306,7 @@ services:
       # live-mount compiled build/ so code changes apply on recreate (no image
       # rebuild — vhdx must not grow).
       - ../src/bridges/whatsapp/build:/app/build
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}/media:/data/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/data/media"
     depends_on:
       rabbitmq:
         condition: service_started
@@ -1345,7 +1345,7 @@ services:
     volumes:
       - ../sessions/whatsapp:/app/auth_info
       - ../src/bridges/whatsapp/build:/app/build
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}/media:/data/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/data/media"
     depends_on:
       rabbitmq:
         condition: service_started
@@ -1385,7 +1385,7 @@ services:
       # auth-bearing latest snapshot.
       BROWSER_COOKIE_VAULT_AUTORESTORE: "1"
     extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - "host.docker.internal:172.20.0.1"
     volumes:
       - ../src:/app/src
       - ../credentials/browser_cookies:/app/credentials/browser_cookies
