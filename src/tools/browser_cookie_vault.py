@@ -682,6 +682,31 @@ async def _backup_loop(vault: CookieVault, interval: int, stop_event: asyncio.Ev
                 backoff = min(_BACKOFF_MAX, backoff * _BACKOFF_MULT)
 
 
+async def _check_chrome_reachable(cdp_url: str, timeout: int = 30) -> bool:
+    """Check if Chrome CDP endpoint is reachable within timeout.
+
+    Fail-fast startup gate: returns True if reachable, False otherwise.
+    We want a clear error, not 70 retries against a dead endpoint.
+    """
+    import time
+    start = time.monotonic()
+    async with aiohttp.ClientSession() as session:
+        while time.monotonic() - start < timeout:
+            try:
+                headers = {"Host": "localhost:9222"}
+                async with session.get(
+                    f"{cdp_url}/json/version",
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=5),
+                ) as resp:
+                    if resp.status == 200:
+                        return True
+            except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+                pass
+            await asyncio.sleep(2)
+    return False
+
+
 async def run_daemon() -> int:
     """Launch the health endpoint and backup loop until SIGTERM/SIGINT."""
     _configure_logging()
@@ -705,6 +730,18 @@ async def run_daemon() -> int:
         vault.backup_dir,
         INTERVAL_SECONDS,
     )
+
+    # Fail-fast gate (Fudan pattern): verify Chrome CDP reachable within 30s.
+    # If not, exit with clear error instead of retrying indefinitely.
+    # See docs/chrome-setup.md for required Chrome config.
+    if not await _check_chrome_reachable(vault.cdp_url, timeout=30):
+        logger.error(
+            "Chrome not reachable at %s after 30s. Launch with: "
+            "google-chrome --headless --remote-debugging-port=9222 "
+            "--user-data-dir=/home/bryan/.config/chrome-collector",
+            vault.cdp_url,
+        )
+        return 1
     tasks = [
         asyncio.create_task(_backup_loop(vault, INTERVAL_SECONDS, stop_event)),
         asyncio.create_task(_serve_health(vault, HEALTH_PORT, stop_event)),
