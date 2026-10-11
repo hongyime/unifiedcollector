@@ -1,8 +1,8 @@
 # Agent State
-Current task: UnifiedCollector collector overhaul on branch feat/collector-overhaul.
-Recon complete: main already contains dedicated GitHub, five profile services, default-on SpiderFoot, and removal of the idle production collector; remaining work is Compose deduplication/documentation, PayPal gate retirement, instagram_ingest service rename, dev-compose parity, tests, and validation.
+Current task: Publish the remaining collector Compose follow-up to main.
+The collector overhaul is already merged: HEAD is cb35165c, equal to origin/main. The follow-up makes host data mounts configurable, permits an empty Telegram spider allowlist, and updates the env documentation. Main sync, commit, and push are pending.
 
-Next steps: apply the scoped Compose/docs/code/test changes; update this state after each meaningful step; run Compose config and the relevant/full test suite; scrub .agents entries to dev-host-3.example before staging; commit and push the new branch.
+Next steps: commit the reviewed Compose/docs changes and push main; local main now matches origin/main. No tests or runtime checks have been run in this turn.
 Implementation complete: production and dev Compose configs parsed with temporary example env files; compileall and diff checks pass. Focused pytest/full pytest are unavailable because this host has no pytest or uv.
 Push blocker: commit c1b0c5b7 is local on feat/collector-overhaul; origin push requires GitHub authentication, and both gh auth and SSH key authentication are unavailable on this host.
 
@@ -584,13 +584,13 @@ Current live update:
 <!-- MOLT_AUTO_START -->
 ## Auto State
 
-- Updated: 2026-10-03 17:18:48 +08:00
+- Updated: 2026-10-12 02:07:38 +0800
 - Machine: dev-host-3.example
-- Harness: claude
-- Event: stop
+- Harness: bash
+- Event: publish
 - Branch: main
-- HEAD: 4e978fd1
-- Dirty files: 0
+- HEAD: cb35165c
+- Dirty files: 7
 - Resume hint: Read .agents/STATE.md, then the latest file in .agents/handoffs/ if present.
 <!-- MOLT_AUTO_END -->
 Machine-specific values in this document use privacy placeholders.

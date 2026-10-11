@@ -38,6 +38,7 @@ services:
     image: pgvector/pgvector:pg16
     container_name: unifiedcollector_postgres
     init: true
+    shm_size: 1gb
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -190,8 +191,8 @@ services:
     cap_add:
       - SYS_PTRACE
     volumes:
-      - z:/unifiedcollector/media:/media
-      - z:/unifiedcollector:/vault
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -247,8 +248,8 @@ services:
     cap_add:
       - SYS_PTRACE
     volumes:
-      - z:/unifiedcollector/media:/media
-      - z:/unifiedcollector:/vault
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -316,8 +317,8 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
-      - z:/unifiedcollector/media:/media
-      - z:/unifiedcollector:/vault
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -396,8 +397,8 @@ services:
     cap_add:
       - SYS_PTRACE
     volumes:
-      - z:/unifiedcollector/media:/media
-      - z:/unifiedcollector:/vault
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -509,8 +510,8 @@ services:
     cap_add:
       - SYS_PTRACE
     volumes:
-      - z:/unifiedcollector/media:/media
-      - z:/unifiedcollector:/vault
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -580,8 +581,8 @@ services:
     cap_add:
       - SYS_PTRACE
     volumes:
-      - z:/unifiedcollector/media:/media
-      - z:/unifiedcollector:/vault
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -674,7 +675,7 @@ services:
       TELEGRAM_AUTO_BACKFILL_NEW_ACCOUNTS: "false"
       # Only these lower-risk accounts may process spider/join work. Other
       # Telegram accounts still collect existing dialogs and realtime messages.
-      TELEGRAM_SPIDER_ACCOUNTS: "${TELEGRAM_SPIDER_ACCOUNTS:?Set the existing Telegram spider account allowlist before starting Compose}"
+      TELEGRAM_SPIDER_ACCOUNTS: "${TELEGRAM_SPIDER_ACCOUNTS:-}"
       # Discussion groups: 0 means read all available history, not just the old
       # 2,000-message recent window. Member collection is already full-list when
       # Telegram allows participant enumeration.
@@ -702,8 +703,8 @@ services:
     cap_add:
       - SYS_PTRACE
     volumes:
-      - z:/unifiedcollector/media:/media
-      - z:/unifiedcollector:/vault
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -775,8 +776,8 @@ services:
     cap_add:
       - SYS_PTRACE
     volumes:
-      - z:/unifiedcollector/media:/media
-      - z:/unifiedcollector:/vault
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -837,8 +838,8 @@ services:
     cap_add:
       - SYS_PTRACE
     volumes:
-      - z:/unifiedcollector/media:/media
-      - z:/unifiedcollector:/vault
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -897,8 +898,8 @@ services:
     cap_add:
       - SYS_PTRACE
     volumes:
-      - z:/unifiedcollector/media:/media
-      - z:/unifiedcollector:/vault
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -955,8 +956,8 @@ services:
       # PROXY_URL (which would share exit IP with the main IG collector).
       INSTAGRAM_DM_PROXY_URL: ""
     volumes:
-      - z:/unifiedcollector/media:/media
-      - z:/unifiedcollector:/vault
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}:/vault"
       # Only mount the isolated credentials subdir — the main credentials/
       # tree is intentionally NOT bind-mounted here so a code bug cannot
       # accidentally read credentials/instagram/*.txt.
@@ -1010,8 +1011,8 @@ services:
       BROWSER_CONTENT_HINT_RESPONSE_TIMEOUT_SECONDS: "2.0"
       UC_EXTENSION_EXPECTED_VERSION: "1.23.103"
     volumes:
-      - z:/unifiedcollector/media:/media
-      - z:/unifiedcollector:/vault
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}:/vault"
       - ../credentials:/app/credentials   # so /social/cookies can write live sessions
       - ../src:/app/src
     depends_on:
@@ -1068,8 +1069,8 @@ services:
       WA_STAGING_MERGE_INTERVAL_MS: "${WA_STAGING_MERGE_INTERVAL_MS:-5000}"
       WA_STAGING_BATCH_MAX: "${WA_STAGING_BATCH_MAX:-1000}"
     volumes:
-      - z:/unifiedcollector/media:/media
-      - z:/unifiedcollector:/vault
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       # live src mount so scheduler code (e.g. identity reconciliation) applies on
@@ -1151,8 +1152,8 @@ services:
     volumes:
       # The vault mount lets the drain read local media files instead of
       # relying on Telegram to fetch a URL (which fails for auth-gated media).
-      - z:/unifiedcollector/media:/media
-      - z:/unifiedcollector:/vault
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}:/vault"
       - ../src:/app/src
     depends_on:
       redis:
@@ -1208,8 +1209,8 @@ services:
       GITHUB_QUOTA_PUSHER_MAX_CONCURRENT: "12"
       GITHUB_QUOTA_PUSHER_BATCH_SIZE: "100"
     volumes:
-      - z:/unifiedcollector/media:/media
-      - z:/unifiedcollector:/vault
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - ../tmp:/app/tmp
       - ../src:/app/src
@@ -1305,7 +1306,7 @@ services:
       # live-mount compiled build/ so code changes apply on recreate (no image
       # rebuild — vhdx must not grow).
       - ../src/bridges/whatsapp/build:/app/build
-      - z:/unifiedcollector/media:/data/media
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}/media:/data/media"
     depends_on:
       rabbitmq:
         condition: service_started
@@ -1344,7 +1345,7 @@ services:
     volumes:
       - ../sessions/whatsapp:/app/auth_info
       - ../src/bridges/whatsapp/build:/app/build
-      - z:/unifiedcollector/media:/data/media
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-z:/unifiedcollector}/media:/data/media"
     depends_on:
       rabbitmq:
         condition: service_started

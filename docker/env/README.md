@@ -53,6 +53,10 @@ services that need them, and only those services:
 The full service ↔ env_file mapping lives in `docs/plans/per-service-env-split.md`
 Section 3.
 
+Compose host binds for media and the vault use `UNIFIEDCOLLECTOR_HOST_ROOT`
+(default `z:/unifiedcollector`). Set it in the project `.env` when the Docker host
+stores collector data elsewhere.
+
 ## Dual-source model (during transition)
 
 Once wiring lands in the follow-up sprint, each service's `env_file:` list will
