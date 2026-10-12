@@ -1,7 +1,10 @@
 # Agent State
-Current task: Restore the nightly PostgreSQL logical backup on Linux 3410.
-Status: Complete. BACKUP_DRY_RUN=1 passed; the real dump is 20261012T1602.dump (7,915,963,290 bytes), and independent pg_restore --list found 1,069 TOC entries. Commit 0a978f18 is pushed to main; Bryan user crontab is installed for 03:15 SGT.
-Next steps: None.
+Current task: Document the implemented UnifiedCollector architecture and review collection efficiency.
+Status: Complete. `docs/architecture.md` records the code-backed system map, per-platform metadata/quirks, collection-layer gaps, and static efficiency review. The task changes are ready for the requested commit and push to `main`.
+Findings: Base collection and spidering exist with uneven per-platform coverage; recommendation-feed collection is partial; only Telegram, WhatsApp, and Beeper are persistent realtime worker sources. UnifiedAnalyzer is external; no Supabase exporter exists in this repository.
+Next steps: Commit and push the reviewed documentation and shared-state updates to `main`.
+
+## Prior handoff history
 
 Progress:
 - W1 `ae4cc1a2`: archived the collector-side `20260930_add_gan_face_columns.sql` (entity_faces is analyzer-owned) and added it to `migrate.py` SKIP. Guard test `7ba6581a`.
