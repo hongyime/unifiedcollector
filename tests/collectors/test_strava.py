@@ -652,19 +652,47 @@ async def test_collect_no_auth_skips_target(monkeypatch, caplog):
                 "STRAVA_REFRESH_TOKEN", "STRAVA_SESSION_COOKIE"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("STRAVA_COOKIES_FILE", "/nonexistent/strava_cookies.txt")
+    monkeypatch.delenv("STRAVA_COLLECTOR_ENABLED", raising=False)
     monkeypatch.setenv("STRAVA_SPIDER_ENABLED", "false")
     monkeypatch.setenv("STRAVA_FOLLOW_SCRAPE_ENABLED", "false")
 
-    coll = StravaCollector()
+    monkeypatch.setattr(strava_mod, "_STRAVA_DISABLED_NOTICE_LOGGED", False)
     pool = _make_pool()
-    coll.set_pool(pool)
-    coll.checkpoint.save_progress = AsyncMock()
 
     with caplog.at_level("WARNING", logger="src.collectors.strava"):
-        await coll.collect(["12345"])
+        coll = StravaCollector()
+        coll.set_pool(pool)
+        coll.checkpoint.save_progress = AsyncMock()
+        await coll.collect(["12345", "67890"])
 
-    coll.checkpoint.save_progress.assert_awaited_once_with("12345")
-    assert any("no auth available" in r.getMessage() for r in caplog.records)
+    coll.checkpoint.save_progress.assert_not_awaited()
+    assert coll.intentional_idle_reason == "no auth configured"
+    disabled_messages = [r.getMessage() for r in caplog.records if "STRAVA DISABLED:" in r.getMessage()]
+    assert len(disabled_messages) == 1
+    assert "no auth configured" in disabled_messages[0]
+    assert not any("no auth available" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_run_no_auth_parks_before_base_collector_work(monkeypatch):
+    for var in (
+        "STRAVA_CLIENT_ID",
+        "STRAVA_CLIENT_SECRET",
+        "STRAVA_REFRESH_TOKEN",
+        "STRAVA_SESSION_COOKIE",
+        "STRAVA_COLLECTOR_ENABLED",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("STRAVA_COOKIES_FILE", "/nonexistent/strava_cookies.txt")
+    monkeypatch.setattr(strava_mod, "_STRAVA_DISABLED_NOTICE_LOGGED", False)
+    base_run = AsyncMock()
+    monkeypatch.setattr(strava_mod.BaseCollector, "run", base_run)
+
+    coll = StravaCollector()
+    await coll.run(["12345"])
+
+    base_run.assert_not_awaited()
+    assert coll.intentional_idle_reason == "no auth configured"
 
 
 @pytest.mark.asyncio

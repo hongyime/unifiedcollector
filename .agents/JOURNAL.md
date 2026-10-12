@@ -226,3 +226,5 @@ Machine-specific values in this document use privacy placeholders.
 - 2026-10-11 21:10:50 +0800 [dev-host-3.example/bash/test] branch=feat/collector-overhaul head=cb35165c dirty=18
 2026-10-12: Prepared the Compose follow-up for main: parameterize the host data root while retaining the previous default, keep Postgres connections on the Compose service DNS name, and document the GitHub service mapping. Tests and runtime validation were not run in this turn.
 2026-10-12: Pushed collector Compose follow-up commit cf5a4c2e to main. `git diff --check` passed; tests and runtime checks were not run.
+
+2026-10-12: For unauthenticated Strava, the collector now reports one disabled notice and parks as intentional idle; WATCHDOG_STALE_STRAVA=0 opts Strava out of freshness alerts without disabling other watchdog sources. Default monitoring remains 72h when enabled.

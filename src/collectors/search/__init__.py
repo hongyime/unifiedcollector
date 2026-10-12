@@ -70,6 +70,15 @@ SEARCH_MAX_ACTIVE_DOMAINS      Max concurrently active spider/download domains (
 SEARCH_MAX_REQUESTS_PER_DOMAIN Per-domain in-flight request cap (default 2).
 SEARCH_DOMAIN_DELAY_SECONDS    Base delay before each domain-paced request.
 SEARCH_DOMAIN_JITTER_SECONDS   Additional random request delay.
+SEARCH_DDG_RETRIES             Retry attempts per DDG text/image call on
+                               transient failures ("malformed headers",
+                               dropped connections, timeouts, 5xx; default 3).
+                               Genuine 429s are never retried here — the
+                               politeness gate and rate limiter own those.
+SEARCH_DDG_TIMEOUT             Per-attempt timeout (seconds) for the DDGS
+                               client (default 30).
+SEARCH_DDG_RETRY_BASE_SECONDS  Base backoff between DDG retries; waits grow
+                               as base * 2**attempt plus jitter (default 2.0).
 SEARCH_BING_PAGES              Pages of Bing results to scrape (default 3).
 SEARCH_SERPER_THRESHOLD        Use Serper only when DDG+Bing < this many results
                                (default 5; conserves API credits).
@@ -85,6 +94,7 @@ import os
 import random
 import re
 import tempfile
+import time
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -396,6 +406,29 @@ class SearchCollector(BaseCollector):
                 "quota exhausted",
             )
         )
+
+    #: Markers for transient DuckDuckGo failures worth retrying. DDG's edge
+    #: intermittently returns responses whose headers reqwest's strict parser
+    #: rejects ("malformed headers"); the Rust ddgs 9.x client exposes no
+    #: header/HTTP-version knobs, so retry-with-backoff is the mitigation.
+    _DDG_TRANSIENT_MARKERS = (
+        "malformed headers",
+        "error sending request",
+        "connection",
+        "reset",
+        "timeout",
+        "timed out",
+        "temporarily",
+        "try again",
+        "502",
+        "503",
+        "504",
+    )
+
+    @classmethod
+    def _is_ddg_transient_error(cls, error: Exception) -> bool:
+        msg = str(error).lower()
+        return any(marker in msg for marker in cls._DDG_TRANSIENT_MARKERS)
 
     @staticmethod
     def _default_429_cooldown_seconds() -> int | None:
@@ -877,23 +910,58 @@ class SearchCollector(BaseCollector):
         text_rate_limit: dict[str, str] | None = None
         image_rate_limit: dict[str, str] | None = None
 
+        # Retry config for transient DDG failures (intermittent "malformed
+        # headers" responses from DDG's edge, dropped connections, timeouts,
+        # 5xx). Env-tunable; SEARCH_DDG_RETRIES=1 disables retries.
+        ddg_retries = max(1, int(os.getenv("SEARCH_DDG_RETRIES", "3")))
+        ddg_timeout = int(os.getenv("SEARCH_DDG_TIMEOUT", "30"))
+        ddg_retry_base = float(os.getenv("SEARCH_DDG_RETRY_BASE_SECONDS", "2.0"))
+
+        def _ddg_call(kind: str) -> list[dict]:
+            """Run one DDGS text/images call, retrying transient failures.
+
+            Runs inside the executor thread, so time.sleep is safe here.
+            Genuine 429s are NOT retried — the politeness gate and unified
+            rate limiter own those.
+            """
+            last_exc: Optional[Exception] = None
+            for attempt in range(ddg_retries):
+                try:
+                    with DDGS(timeout=ddg_timeout) as ddgs:
+                        if kind == "text":
+                            return list(ddgs.text(query, max_results=self._max_results))
+                        return list(ddgs.images(query, max_results=self._max_results))
+                except Exception as e:  # noqa: BLE001 - classified below
+                    last_exc = e
+                    if self._looks_like_rate_limit_error(e):
+                        raise
+                    if not self._is_ddg_transient_error(e) or attempt + 1 >= ddg_retries:
+                        raise
+                    wait = ddg_retry_base * (2 ** attempt) + random.uniform(0, 1)
+                    logger.warning(
+                        "[DDG] %s search transient failure (attempt %d/%d): %s — retrying in %.1fs",
+                        kind, attempt + 1, ddg_retries, e, wait,
+                    )
+                    time.sleep(wait)
+            assert last_exc is not None  # for type checkers
+            raise last_exc
+
         def _do_text() -> list[dict]:
             nonlocal text_rate_limit
             out: list[dict] = []
             try:
-                with DDGS() as ddgs:
-                    for r in ddgs.text(query, max_results=self._max_results):
-                        # ddgs (new) uses 'href'; legacy duckduckgo_search uses 'link'
-                        url = r.get("href") or r.get("link") or r.get("url")
-                        if not url:
-                            continue
-                        out.append({
-                            "url": url,
-                            "title": r.get("title"),
-                            "snippet": r.get("body") or r.get("snippet"),
-                            "engine": "ddg",
-                            "domain": urlparse(url).netloc,
-                        })
+                for r in _ddg_call("text"):
+                    # ddgs (new) uses 'href'; legacy duckduckgo_search uses 'link'
+                    url = r.get("href") or r.get("link") or r.get("url")
+                    if not url:
+                        continue
+                    out.append({
+                        "url": url,
+                        "title": r.get("title"),
+                        "snippet": r.get("body") or r.get("snippet"),
+                        "engine": "ddg",
+                        "domain": urlparse(url).netloc,
+                    })
             except Exception as e:
                 if self._looks_like_rate_limit_error(e):
                     text_rate_limit = {"message": str(e)}
@@ -904,18 +972,17 @@ class SearchCollector(BaseCollector):
             nonlocal image_rate_limit
             out: list[dict] = []
             try:
-                with DDGS() as ddgs:
-                    for r in ddgs.images(query, max_results=self._max_results):
-                        url = r.get("image") or r.get("url")
-                        if not url:
-                            continue
-                        out.append({
-                            "url": url,
-                            "title": r.get("title"),
-                            "snippet": r.get("source"),
-                            "engine": "ddg-img",
-                            "domain": urlparse(url).netloc,
-                        })
+                for r in _ddg_call("images"):
+                    url = r.get("image") or r.get("url")
+                    if not url:
+                        continue
+                    out.append({
+                        "url": url,
+                        "title": r.get("title"),
+                        "snippet": r.get("source"),
+                        "engine": "ddg-img",
+                        "domain": urlparse(url).netloc,
+                    })
             except Exception as e:
                 if self._looks_like_rate_limit_error(e):
                     image_rate_limit = {"message": str(e)}

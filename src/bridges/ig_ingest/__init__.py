@@ -1593,9 +1593,9 @@ async def _download_and_save(pool, session, platform, username, item, reject_sta
                 exc_info=True,
             )
         return True
-    except Exception:
+    except Exception as exc:
         logger.debug("save failed platform=%s cid=%s", platform, cid, exc_info=True)
-        return _reject("exception")
+        return _reject("exception", f"{exc.__class__.__name__}: {exc}")
 
 
 def _merge_reject_stats(dest: dict, src: dict | None) -> None:

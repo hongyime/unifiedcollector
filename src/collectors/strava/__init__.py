@@ -36,6 +36,15 @@ STRAVA_WEB = "https://www.strava.com"
 # considered to have been clipped by a Strava privacy zone vs the GPS track.
 _PRIVACY_ZONE_THRESHOLD_M = 50.0
 _GPS_429_EVENT_DEDUPE_SECONDS = 120.0
+_STRAVA_DISABLED_NOTICE_LOGGED = False
+
+
+def _log_disabled_once(message: str) -> None:
+    global _STRAVA_DISABLED_NOTICE_LOGGED
+    if _STRAVA_DISABLED_NOTICE_LOGGED:
+        return
+    logger.warning(message)
+    _STRAVA_DISABLED_NOTICE_LOGGED = True
 
 
 def _format_exception(exc) -> str:
@@ -346,6 +355,10 @@ class StravaCollector(BaseCollector):
 
     def __init__(self):
         super().__init__()
+        from src.core.env import env_bool
+
+        self._collector_enabled = env_bool("STRAVA_COLLECTOR_ENABLED", default=True)
+        self._disabled_reason: str | None = None
         self._client_id = os.getenv("STRAVA_CLIENT_ID", "")
         self._client_secret = os.getenv("STRAVA_CLIENT_SECRET", "")
         self._refresh_token = os.getenv("STRAVA_REFRESH_TOKEN", "")
@@ -409,6 +422,16 @@ class StravaCollector(BaseCollector):
 
         self._use_api = bool(self._client_id and self._client_secret and self._refresh_token)
         self._use_web = bool(self._session_cookie)
+        if not self._collector_enabled:
+            self._disabled_reason = "disabled by STRAVA_COLLECTOR_ENABLED=false"
+            _log_disabled_once("STRAVA DISABLED: STRAVA_COLLECTOR_ENABLED=false")
+        elif not self._use_api and not self._use_web:
+            self._collector_enabled = False
+            self._disabled_reason = "no auth configured"
+            _log_disabled_once(
+                "STRAVA DISABLED: no auth configured; set Strava API credentials, "
+                "STRAVA_SESSION_COOKIE, or STRAVA_COOKIES_FILE to enable collection"
+            )
         self._photo_tracker = ProfilePhotoTracker()
         self._gps_enabled = os.getenv("STRAVA_GPS_ENABLED", "true").lower() == "true"
         self._follow_scrape_enabled = os.getenv("STRAVA_FOLLOW_SCRAPE_ENABLED", "true").lower() == "true"
@@ -753,10 +776,15 @@ class StravaCollector(BaseCollector):
         except Exception as e:
             logger.debug("strava: failed to mark invalid target %s: %s", target, e)
 
+    async def run(self, targets: list[str]):
+        if not self._collector_enabled:
+            self._intentional_idle_reason = self._disabled_reason
+            return
+        await super().run(targets)
+
     async def collect(self, targets: list[str]):
-        from src.core.env import env_bool
-        if not env_bool("STRAVA_COLLECTOR_ENABLED", default=True):
-            logger.info("strava: disabled via STRAVA_COLLECTOR_ENABLED=false, skipping")
+        if not self._collector_enabled:
+            self._intentional_idle_reason = self._disabled_reason
             return
         if not self._use_api:
             logger.warning(

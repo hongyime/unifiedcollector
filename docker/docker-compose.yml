@@ -434,6 +434,7 @@ services:
       WATCHDOG_INTERVAL: "300"
       WATCHDOG_STALE_TELEGRAM: "3600"
       WATCHDOG_STALE_WHATSAPP: "14400"
+      WATCHDOG_STALE_STRAVA: "${WATCHDOG_STALE_STRAVA:-259200}"
       # Beeper threshold raised 2026-09-10 from 3h to 12h. Bryan's connected
       # Beeper networks (Discord/Telegram bridging) go quiet overnight in
       # single-tenant use, so 3h triggered 19 false-positive restarts in a

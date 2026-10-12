@@ -1,13 +1,7 @@
 # Agent State
-Current task: Complete — the collector Compose follow-up is pushed to main.
-Commit cf5a4c2e makes host data mounts configurable, permits an empty Telegram spider allowlist, adds PostgreSQL shared memory, and updates env documentation. `git diff --check` passed; tests and runtime checks were not run.
-
-Next steps: none. Local main and origin/main contain cf5a4c2e.
-Implementation complete: production and dev Compose configs parsed with temporary example env files; compileall and diff checks pass. Focused pytest/full pytest are unavailable because this host has no pytest or uv.
-Push blocker: commit c1b0c5b7 is local on feat/collector-overhaul; origin push requires GitHub authentication, and both gh auth and SSH key authentication are unavailable on this host.
-
-
-Current task: Postgres instance split (Option 1, two containers) + A1 face rework, cross-repo. Collector-side code/config waves are done and pushed. Live-DB waves (W2-T2, W3-T3, W4, W7-T2, W8, W9-T2/T3) are QUEUED until the stack is up; verify them with psql/pg_dump run inside the pgvector/pgvector:pg16 image (no host psql client). The analyzer side lives in C:\unifiedanalyzer; its code/config waves are also pushed.
+Current task: prawn-3410 — quiet Strava missing-auth noise and health-check unifiedcollector containers.
+Status: Runtime smoke checks pass for one Strava disabled notice/intentional idle and watchdog zero/positive thresholds; compileall, Compose config, and diff checks pass. Host pytest is unavailable. The read-only base property is set through _intentional_idle_reason during collect().
+Next steps: Set WATCHDOG_STALE_STRAVA=0 in ignored local .env, recreate only watchdog and collector_lowrisk, then inspect post-change logs and all 28 container states.
 
 Progress:
 - W1 `ae4cc1a2`: archived the collector-side `20260930_add_gan_face_columns.sql` (entity_faces is analyzer-owned) and added it to `migrate.py` SKIP. Guard test `7ba6581a`.

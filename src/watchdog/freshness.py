@@ -158,17 +158,24 @@ if os.getenv("WATCHDOG_HEADLESS_ENABLED", "1") == "1":
             int(os.getenv("WATCHDOG_STALE_GITHUB", str(_D * 3))),      # 72h (900s cycle sleep)
             ["unifiedcollector_collector_github"],
         ),
-        "strava": (
-            STRAVA_PROGRESS_QUERY,
-            int(os.getenv("WATCHDOG_STALE_STRAVA", str(_D * 3))),      # 72h
-            ["unifiedcollector_collector_lowrisk"],
-        ),
         "search": (
             "SELECT extract(epoch FROM now()-max(collected_at)) FROM search_results",
             int(os.getenv("WATCHDOG_STALE_SEARCH", str(_D * 3))),      # 72h
             ["unifiedcollector_collector_lowrisk"],
         ),
     })
+    _strava_stale_threshold = int(os.getenv("WATCHDOG_STALE_STRAVA", str(_D * 3)))
+    if _strava_stale_threshold > 0:
+        CHECKS["strava"] = (
+            STRAVA_PROGRESS_QUERY,
+            _strava_stale_threshold,  # 72h by default; 0 disables Strava monitoring
+            ["unifiedcollector_collector_lowrisk"],
+        )
+    else:
+        log.info(
+            "strava freshness monitoring disabled by WATCHDOG_STALE_STRAVA=%s",
+            _strava_stale_threshold,
+        )
 
 _last_restart: dict[str, float] = {}
 _last_cooldown_stale_alert: dict[str, float] = {}

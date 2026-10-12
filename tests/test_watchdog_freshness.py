@@ -4,6 +4,26 @@ import time
 import pytest
 
 
+def test_watchdog_stale_strava_zero_disables_source_check(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgres://collector:collector@localhost/unifiedcollector")
+    monkeypatch.setenv("WATCHDOG_STALE_STRAVA", "0")
+    import src.watchdog.freshness as freshness
+
+    freshness = importlib.reload(freshness)
+
+    assert "strava" not in freshness.CHECKS
+
+
+def test_watchdog_stale_strava_positive_threshold_remains_configurable(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgres://collector:collector@localhost/unifiedcollector")
+    monkeypatch.setenv("WATCHDOG_STALE_STRAVA", "12345")
+    import src.watchdog.freshness as freshness
+
+    freshness = importlib.reload(freshness)
+
+    assert freshness.CHECKS["strava"][1] == 12345
+
+
 @pytest.mark.asyncio
 async def test_watchdog_skips_stale_restart_during_active_429_cooldown(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "postgres://collector:collector@localhost/unifiedcollector")
