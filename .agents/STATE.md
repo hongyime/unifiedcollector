@@ -1,7 +1,7 @@
 # Agent State
 Current task: Restore the nightly PostgreSQL logical backup on Linux 3410.
-Status: Linux default path and PostgreSQL 18 runner are implemented. Dry-run passed; the real 31 GB dump is in progress. Bryan user crontab is installed; commit and push remain.
-Next steps: Finish and validate the real dump, then commit and push.
+Status: Complete. BACKUP_DRY_RUN=1 passed; the real dump is 20261012T1602.dump (7,915,963,290 bytes), and independent pg_restore --list found 1,069 TOC entries. Commit 0a978f18 is pushed to main; Bryan user crontab is installed for 03:15 SGT.
+Next steps: None.
 
 Progress:
 - W1 `ae4cc1a2`: archived the collector-side `20260930_add_gan_face_columns.sql` (entity_faces is analyzer-owned) and added it to `migrate.py` SKIP. Guard test `7ba6581a`.
