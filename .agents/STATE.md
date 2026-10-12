@@ -1,7 +1,8 @@
 # Agent State
-Current task: Fix Telegram session loading and hot-reload startup (2026-10-12).
-Status: Both Telegram fixes are implemented and runtime-confirmed. After restarting only `collector_telegram`, all four DB StringSessions loaded, `4/4 worker(s) connected`, the NOTIFY listener became active, recent logs had no session-drift errors, and the container remained healthy through a 3-minute watch. Fix commit `8458b23e` is pushed to `main`.
-Next steps: None.
+Current task: Add cookie-less YouTube player-client args to every yt-dlp invocation (2026-10-12).
+Status: Shared args cover all five URL-bearing paths and preserve comment options. AST syntax checks, helper behavior checks, and `git diff --check` passed. No cookie handling was added.
+Progress: `python -m pytest tests/collectors/test_youtube.py -q` was attempted on host and in the running collector; both environments lack pytest.
+Next steps: Commit and push the reviewed change to `main`.
 
 Progress:
 - W1 `ae4cc1a2`: archived the collector-side `20260930_add_gan_face_columns.sql` (entity_faces is analyzer-owned) and added it to `migrate.py` SKIP. Guard test `7ba6581a`.

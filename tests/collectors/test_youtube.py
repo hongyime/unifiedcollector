@@ -173,6 +173,17 @@ def test_module_constants():
     assert YT_API_BASE.startswith("https://")
 
 
+def test_youtube_extractor_args_include_web_clients_and_preserve_call_options():
+    assert youtube_mod._youtube_extractor_args() == [
+        "--extractor-args",
+        "youtube:player_client=web,mweb",
+    ]
+    assert youtube_mod._youtube_extractor_args("max_comments=20", "comment_sort=top") == [
+        "--extractor-args",
+        "youtube:player_client=web,mweb;max_comments=20;comment_sort=top",
+    ]
+
+
 # ── construction ─────────────────────────────────────────────────────────
 
 
