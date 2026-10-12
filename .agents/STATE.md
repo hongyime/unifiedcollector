@@ -1,8 +1,7 @@
 # Agent State
-Current task: Add cookie-less YouTube player-client args to every yt-dlp invocation (2026-10-12).
-Status: Cookie-less YouTube player-client fix is pushed to `main` as `ac9ee584`; shared args cover all five URL-bearing paths and preserve comment options.
-Progress: AST syntax checks, helper behavior checks, and `git diff --check` passed. The targeted pytest file could not run because pytest is absent on the host and in the running collector environment.
-Next steps: None.
+Current task: Restore the nightly PostgreSQL logical backup on Linux 3410.
+Status: Linux default path and PostgreSQL 18 runner are implemented. Dry-run passed; the real 31 GB dump is in progress. Bryan user crontab is installed; commit and push remain.
+Next steps: Finish and validate the real dump, then commit and push.
 
 Progress:
 - W1 `ae4cc1a2`: archived the collector-side `20260930_add_gan_face_columns.sql` (entity_faces is analyzer-owned) and added it to `migrate.py` SKIP. Guard test `7ba6581a`.

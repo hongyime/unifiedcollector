@@ -6,14 +6,15 @@ collectors, (b) never overloads Postgres CPU, (c) never fights a concurrent
 backup, (d) skips if a fresh dump already exists, (e) verifies via pg_restore
 --list before pruning old dumps.
 
-Runs standalone (host or docker) — imports only stdlib + asyncpg (already in
-the collector image). Not wired into compose or the scheduler; Phase A ships
-the script only, operator invokes manually.
+Runs standalone with stdlib + asyncpg. Production uses the host-side launcher
+`scripts/run_pg_dump_backup.sh`, which runs this script in a disposable
+PostgreSQL 18 utility container from Bryan's user crontab.
 
 Env vars (all optional, defaults sensible for this deployment):
 
     BACKUP_ENABLED             "1" = run, "0" = exit 0 immediately (kill switch)
-    BACKUP_DIR                 target dir, default Z:/unifiedcollector/backups/db
+    BACKUP_DIR                 target dir, default /media/seagate-expansion/unifiedcollector/backups/db
+                                (falls back to Z:/unifiedcollector/backups/db only when that path exists)
     BACKUP_SKIP_IF_FRESH_HOURS default 20 — skip if newest .dump is younger
     BACKUP_ADVISORY_LOCK_KEY   default hashtext('unifiedcollector_pg_dump')
     BACKUP_PG_DUMP_COMPRESSION default 1 (fast, low pg CPU)
@@ -63,7 +64,14 @@ logging.basicConfig(
 logger = logging.getLogger("pg_dump_backup")
 
 
-DEFAULT_BACKUP_DIR = pathlib.Path("Z:/unifiedcollector/backups/db")
+LINUX_BACKUP_DIR = pathlib.Path("/media/seagate-expansion/unifiedcollector/backups/db")
+WINDOWS_BACKUP_DIR = pathlib.Path("Z:/unifiedcollector/backups/db")
+if LINUX_BACKUP_DIR.parent.parent.exists():
+    DEFAULT_BACKUP_DIR = LINUX_BACKUP_DIR
+elif WINDOWS_BACKUP_DIR.exists():
+    DEFAULT_BACKUP_DIR = WINDOWS_BACKUP_DIR
+else:
+    DEFAULT_BACKUP_DIR = LINUX_BACKUP_DIR
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 5433
 DEFAULT_DB = "unifiedcollector"
