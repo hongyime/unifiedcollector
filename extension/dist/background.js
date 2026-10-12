@@ -1892,7 +1892,7 @@
         if (_mainWorldHookHostRe.test(host) && chrome.scripting && chrome.scripting.executeScript) {
           await chrome.scripting.executeScript({
             target: { tabId: t.id, allFrames: false },
-            files: ["inject.js"],
+            files: ["dist/inject.js"],
             world: "MAIN"
           });
         }

@@ -1,7 +1,7 @@
 # Agent State
-Current task: Enable Strava cookie sync via the Chrome extension — complete.
-Status: Implementation commit `2e7554a8` is pushed to main. 77 cookie + ig_ingest bridge tests pass; extension build and synthetic handler/parser/auto-discovery smoke pass. Instagram cookie behavior is unchanged. Shared credentials mount and collector discovery path align without a Compose override.
-Next steps: None.
+Current task: Fix Chrome extension MAIN-world hook injection failure (2026-10-12).
+Status: Root cause confirmed and fixed in source: the service worker requested extension-root `inject.js`, while the manifest and esbuild output use `dist/inject.js`. `npm run build` passed; the built worker requests `dist/inject.js`, and that file exists under the extension root. Browser was not touched.
+Next steps: Commit and push the verified fix to main, then record the result here.
 
 Progress:
 - W1 `ae4cc1a2`: archived the collector-side `20260930_add_gan_face_columns.sql` (entity_faces is analyzer-owned) and added it to `migrate.py` SKIP. Guard test `7ba6581a`.
