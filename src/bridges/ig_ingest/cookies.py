@@ -24,7 +24,10 @@ logger = logging.getLogger("social_ingest")
 
 
 def _sanitize_account(value: object) -> str:
-    return re.sub(r"[^A-Za-z0-9_.-]", "_", str(value or "extension_live"))[:60]
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]", "_", str(value or "extension_live"))[:60]
+    # Strip leading dots so the result can never be "." or ".." (path traversal).
+    cleaned = cleaned.lstrip(".") or "extension_live"
+    return cleaned
 
 
 def _netscape_cookie_lines(cookies: Iterable[Any], default_domain: str) -> list[str]:
@@ -47,10 +50,20 @@ def _write_cookie_jar(
     cookies: Iterable[Any],
     default_domain: str,
 ) -> None:
-    directory.mkdir(parents=True, exist_ok=True)
-    tmp = directory / (filename + ".tmp")
+    # Defense in depth against path traversal: the filename is derived from
+    # request-supplied account names, so pin it to a single safe component
+    # inside the fixed base directory.
+    safe_name = os.path.basename(filename)
+    if not safe_name or safe_name in (".", ".."):
+        raise ValueError(f"refusing unsafe cookie filename: {filename!r}")
+    base = directory.resolve()
+    base.mkdir(parents=True, exist_ok=True)
+    target = base / safe_name
+    if target.parent != base:
+        raise ValueError(f"cookie filename escapes base directory: {filename!r}")
+    tmp = base / (safe_name + ".tmp")
     tmp.write_text("\n".join(_netscape_cookie_lines(cookies, default_domain)) + "\n")
-    os.replace(tmp, directory / filename)
+    os.replace(tmp, target)
 
 
 async def cookies_handler(request):
