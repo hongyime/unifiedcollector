@@ -314,7 +314,30 @@ class TelegramCollector(
                 # Check if already loaded from env (env takes precedence)
                 existing = [a for a in self.account_pool._accounts if a.name == row["name"]]
                 if existing:
-                    logger.debug("Skipping DB account %s — already loaded from env", row["name"])
+                    env_session = existing[0].credentials.get("session", "")
+                    env_session_usable = bool(
+                        env_session
+                        and (
+                            len(env_session) > 100
+                            or Path(env_session).exists()
+                        )
+                    )
+                    db_session = row["session_string"]
+                    if (
+                        not env_session_usable
+                        and db_session
+                        and len(db_session) > 100
+                    ):
+                        existing[0].credentials["session"] = db_session
+                        logger.info(
+                            "Replaced unusable env session for account %s with DB StringSession",
+                            row["name"],
+                        )
+                    else:
+                        logger.debug(
+                            "Skipping DB account %s — already loaded from env",
+                            row["name"],
+                        )
                     continue
 
                 self.account_pool.add_account(
@@ -805,6 +828,13 @@ class TelegramCollector(
 
         logger.info("[telegram.collect] calling _spawn_workers")
         self._workers = await self._spawn_workers()
+
+        # Start the listener even when this collection cycle has no connected
+        # workers, so bot-onboarded accounts can recover the collector in place.
+        if self._hot_reload_task is None or self._hot_reload_task.done():
+            self._hot_reload_task = asyncio.create_task(self._listen_for_new_accounts())
+            logger.info("[telegram.collect] hot_reload_task started")
+
         if not self._workers:
             logger.error("No Telegram workers connected — aborting cycle")
             return
@@ -842,12 +872,6 @@ class TelegramCollector(
         await self._hub_notifier.start()
         await self._bot_pool.start_health_monitor()
         logger.info("[telegram.collect] HubNotifier + BotPool started")
-
-        # Start hot-reload listener for new accounts (item 4.6).
-        # This listens for pg_notify('telegram_account_added', name) and spawns
-        # a new worker when an account is onboarded via bot or dashboard.
-        self._hot_reload_task = asyncio.create_task(self._listen_for_new_accounts())
-        logger.info("[telegram.collect] hot_reload_task started")
 
         if not getattr(self, "_mention_backfill_task", None):
             self._mention_backfill_task = asyncio.create_task(self._mention_backfill_loop())

@@ -1,7 +1,7 @@
 # Agent State
-Current task: Fix Chrome extension MAIN-world hook injection failure (2026-10-12).
-Status: Fixed the extension-root path mismatch: the service worker now requests `dist/inject.js`, matching the manifest and esbuild output. `npm run build` passed and the built worker's requested file exists under the extension root. Fix commit `e6d842eb` is pushed to main. Browser was not touched.
-Next steps: None.
+Current task: Fix Telegram session loading and hot-reload startup (2026-10-12).
+Status: Both Telegram fixes are implemented and runtime-confirmed. After restarting only `collector_telegram`, all four DB StringSessions loaded, `4/4 worker(s) connected`, the NOTIFY listener became active, recent logs had no session-drift errors, and the container remained healthy through a 3-minute watch.
+Next steps: Commit the scoped code and state changes to main, then push to origin/main.
 
 Progress:
 - W1 `ae4cc1a2`: archived the collector-side `20260930_add_gan_face_columns.sql` (entity_faces is analyzer-owned) and added it to `migrate.py` SKIP. Guard test `7ba6581a`.
