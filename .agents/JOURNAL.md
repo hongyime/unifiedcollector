@@ -234,3 +234,4 @@ Machine-specific values in this document use privacy placeholders.
 
 2026-10-12: Telegram session loading now falls back from an unusable env session path to an active DB StringSession; the pg_notify hot-reload listener starts before the zero-worker cycle abort and is guarded against duplicate tasks. Runtime confirmation is pending.
 2026-10-12: Restarted only `collector_telegram` after the Telegram session fallback and listener-order fixes. During the 3-minute log watch, all four DB StringSessions loaded, `4/4 worker(s) connected`, the hot-reload listener subscribed, no session-drift errors appeared in the live window, and the container stayed healthy.
+2026-10-12: Pushed Telegram session-loading and hot-reload fix commit `8458b23e` to `main`.
