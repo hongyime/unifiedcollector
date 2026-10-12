@@ -1,7 +1,7 @@
 # Agent State
-Current task: Enable Strava cookie sync via the Chrome extension.
-Status: 77 cookie + ig_ingest bridge tests pass in a disposable collector-image container. Extension build and synthetic handler/parser/auto-discovery smoke pass. Nine intended source, test, generated bundle, and handoff files are staged; staged hostname, env/credential path, and whitespace checks pass.
-Next steps: Commit the staged Strava cookie sync change to main, push to origin, and verify the final clean status and commit hash.
+Current task: Enable Strava cookie sync via the Chrome extension — complete.
+Status: Implementation commit `2e7554a8` is pushed to main. 77 cookie + ig_ingest bridge tests pass; extension build and synthetic handler/parser/auto-discovery smoke pass. Instagram cookie behavior is unchanged. Shared credentials mount and collector discovery path align without a Compose override.
+Next steps: None.
 
 Progress:
 - W1 `ae4cc1a2`: archived the collector-side `20260930_add_gan_face_columns.sql` (entity_faces is analyzer-owned) and added it to `migrate.py` SKIP. Guard test `7ba6581a`.

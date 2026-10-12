@@ -15,4 +15,4 @@ Verification so far: `npm ci` and `npm run build` pass after correcting the Type
 
 Verification complete: 77 tests pass across `test_ig_ingest_cookies.py` and the existing `test_ig_ingest_vault.py` in a disposable collector-image container. `npm run build` passes. Synthetic bridge-to-collector write, Netscape parsing, and auto-discovery smoke passes.
 
-Next: inspect the final diff; stage only intended source, test, generated extension bundle, and shared state files; verify staged state contains no real hostname or credentials; then commit and push to `main`.
+Completed and pushed as commit `2e7554a8` on `main`. The extension bundle builds, 77 cookie and ig_ingest bridge tests pass, and synthetic handler-to-collector parsing and auto-discovery pass. Instagram success behavior is unchanged. Both services share `/app/credentials`; no Compose cookie-path override was needed.
