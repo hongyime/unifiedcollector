@@ -1,8 +1,8 @@
 # Agent State
 Current task: Document the implemented UnifiedCollector architecture and review collection efficiency.
-Status: Complete. `docs/architecture.md` records the code-backed system map, per-platform metadata/quirks, collection-layer gaps, and static efficiency review. The task changes are ready for the requested commit and push to `main`.
+Status: Complete. `docs/architecture.md` records the code-backed system map, per-platform metadata/quirks, collection-layer gaps, and static efficiency review. Documentation commit `7c8cd60b` is pushed to `main`; the post-push worktree check was clean.
 Findings: Base collection and spidering exist with uneven per-platform coverage; recommendation-feed collection is partial; only Telegram, WhatsApp, and Beeper are persistent realtime worker sources. UnifiedAnalyzer is external; no Supabase exporter exists in this repository.
-Next steps: Commit and push the reviewed documentation and shared-state updates to `main`.
+Next steps: None.
 
 ## Prior handoff history
 
