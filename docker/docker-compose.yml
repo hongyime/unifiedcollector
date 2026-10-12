@@ -426,6 +426,8 @@ services:
   watchdog:
     image: unifiedcollector-collector:latest
     container_name: unifiedcollector_watchdog
+    group_add:
+      - "986"  # docker group on 3410 host — lets watchdog restart containers via docker.sock
     mem_limit: 128m
     command: python -m src.watchdog.freshness
     restart: unless-stopped
