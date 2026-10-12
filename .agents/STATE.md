@@ -1,7 +1,7 @@
 # Agent State
 Current task: Fix Chrome extension MAIN-world hook injection failure (2026-10-12).
-Status: Root cause confirmed and fixed in source: the service worker requested extension-root `inject.js`, while the manifest and esbuild output use `dist/inject.js`. `npm run build` passed; the built worker requests `dist/inject.js`, and that file exists under the extension root. Browser was not touched.
-Next steps: Commit and push the verified fix to main, then record the result here.
+Status: Fixed the extension-root path mismatch: the service worker now requests `dist/inject.js`, matching the manifest and esbuild output. `npm run build` passed and the built worker's requested file exists under the extension root. Fix commit `e6d842eb` is pushed to main. Browser was not touched.
+Next steps: None.
 
 Progress:
 - W1 `ae4cc1a2`: archived the collector-side `20260930_add_gan_face_columns.sql` (entity_faces is analyzer-owned) and added it to `migrate.py` SKIP. Guard test `7ba6581a`.
