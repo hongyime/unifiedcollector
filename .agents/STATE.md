@@ -1,8 +1,8 @@
 # Agent State
 Current task: Add cookie-less YouTube player-client args to every yt-dlp invocation (2026-10-12).
-Status: Shared args cover all five URL-bearing paths and preserve comment options. AST syntax checks, helper behavior checks, and `git diff --check` passed. No cookie handling was added.
-Progress: `python -m pytest tests/collectors/test_youtube.py -q` was attempted on host and in the running collector; both environments lack pytest.
-Next steps: Commit and push the reviewed change to `main`.
+Status: Cookie-less YouTube player-client fix is pushed to `main` as `ac9ee584`; shared args cover all five URL-bearing paths and preserve comment options.
+Progress: AST syntax checks, helper behavior checks, and `git diff --check` passed. The targeted pytest file could not run because pytest is absent on the host and in the running collector environment.
+Next steps: None.
 
 Progress:
 - W1 `ae4cc1a2`: archived the collector-side `20260930_add_gan_face_columns.sql` (entity_faces is analyzer-owned) and added it to `migrate.py` SKIP. Guard test `7ba6581a`.

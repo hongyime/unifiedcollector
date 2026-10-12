@@ -237,3 +237,4 @@ Machine-specific values in this document use privacy placeholders.
 2026-10-12: Pushed Telegram session-loading and hot-reload fix commit `8458b23e` to `main`.
 2026-10-12: YouTube's URL-bearing yt-dlp paths will share extractor args `youtube:player_client=web,mweb`; per-call extractor options such as comment limits and sorting remain appended. This follows the verified unauthenticated web/mweb client behavior and adds no cookie handling.
 2026-10-12: YouTube extractor-args change passed AST syntax checks, direct shared-builder checks, and `git diff --check`. The targeted pytest file could not run because pytest is absent both on the host and in the running collector environment; no packages were installed and no containers were restarted.
+2026-10-12: Pushed the cookie-less YouTube player-client fix, commit `ac9ee584`, to `main`.
