@@ -1331,6 +1331,26 @@
     } catch (e) {
     }
   }
+  async function syncStravaCookies() {
+    try {
+      const cookies = await chrome.cookies.getAll({ domain: "strava.com" });
+      if (!cookies || !cookies.some((c) => c.name === "_strava4_session")) return;
+      const athlete = cookies.find((c) => c.name === "athlete_id" && c.value);
+      const account = String(athlete ? athlete.value : "extension_live").replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 60) || "extension_live";
+      const base = await ingestBase();
+      const r = await fetch(base + "/social/cookies", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(withExtensionVersion({
+          platform: "strava",
+          account,
+          cookies: cookies.map((c) => ({ name: c.name, value: c.value, domain: c.domain, path: c.path, secure: c.secure, expirationDate: c.expirationDate }))
+        }))
+      });
+      if (r.ok) await log("info", `synced live Strava session \u2192 headless backup (${account})`);
+    } catch (e) {
+    }
+  }
   async function refreshScraperTabs(options = {}) {
     if (_tabsOpInProgress) return { ok: false, reason: "tabs_operation_in_progress", reloaded: 0, errors: 0 };
     if (!options.force && !await autoTabsEnabled()) return { ok: false, reason: "auto_tabs_disabled", reloaded: 0, errors: 0 };
@@ -1560,6 +1580,8 @@
     await scheduleAlarm().catch((e) => log("warn", `${reason} schedule failed: ${e && e.message ? e.message : e}`));
     await syncCookies().catch(() => {
     });
+    await syncStravaCookies().catch(() => {
+    });
     if (openTabs) {
       await ensureScraperTabsOpen(reason, { force }).catch((e) => log("warn", `${reason} tab audit failed: ${e && e.message ? e.message : e}`));
     }
@@ -1602,6 +1624,7 @@
       await refreshScraperTabs({ reason: "scheduled" });
       await reportScraperTabHeartbeats("refresh");
       await syncCookies();
+      await syncStravaCookies();
     } else if (a.name === ALARM_MEMORY) {
       await _alarmJitter();
       await checkMemorySensitiveTabs("scheduled");

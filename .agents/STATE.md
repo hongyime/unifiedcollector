@@ -1,7 +1,7 @@
 # Agent State
-Current task: prawn-3410 — quiet Strava missing-auth noise and health-check unifiedcollector containers.
-Status: Runtime smoke checks pass for one Strava disabled notice/intentional idle and watchdog zero/positive thresholds; compileall, Compose config, and diff checks pass. Host pytest is unavailable. The read-only base property is set through _intentional_idle_reason during collect().
-Next steps: Set WATCHDOG_STALE_STRAVA=0 in ignored local .env, recreate only watchdog and collector_lowrisk, then inspect post-change logs and all 28 container states.
+Current task: Enable Strava cookie sync via the Chrome extension.
+Status: 77 cookie + ig_ingest bridge tests pass in a disposable collector-image container. Extension build and synthetic handler/parser/auto-discovery smoke pass. Nine intended source, test, generated bundle, and handoff files are staged; staged hostname, env/credential path, and whitespace checks pass.
+Next steps: Commit the staged Strava cookie sync change to main, push to origin, and verify the final clean status and commit hash.
 
 Progress:
 - W1 `ae4cc1a2`: archived the collector-side `20260930_add_gan_face_columns.sql` (entity_faces is analyzer-owned) and added it to `migrate.py` SKIP. Guard test `7ba6581a`.

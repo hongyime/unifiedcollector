@@ -228,3 +228,4 @@ Machine-specific values in this document use privacy placeholders.
 2026-10-12: Pushed collector Compose follow-up commit cf5a4c2e to main. `git diff --check` passed; tests and runtime checks were not run.
 
 2026-10-12: For unauthenticated Strava, the collector now reports one disabled notice and parks as intentional idle; WATCHDOG_STALE_STRAVA=0 opts Strava out of freshness alerts without disabling other watchdog sources. Default monitoring remains 72h when enabled.
+2026-10-12: Strava extension cookie sync writes `strava_<account>.txt` beneath CREDENTIALS_ROOT/strava. The bridge and collector share `/app/credentials`, and the collector's `/app` working directory makes its default discovery path align; no Compose cookie path override is needed.

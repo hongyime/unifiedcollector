@@ -34,11 +34,11 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 /** @type {EntryConfig[]} */
 const entries = [
-  { name: "content", entry: resolve(__dirname, "src/content.js"), sourcemap: "linked" },
-  { name: "background", entry: resolve(__dirname, "src/background.js"), sourcemap: "linked" },
-  { name: "inject", entry: resolve(__dirname, "src/inject.js"), sourcemap: false },
-  { name: "popup", entry: resolve(__dirname, "src/popup.js"), sourcemap: false },
-  { name: "tabs", entry: resolve(__dirname, "src/tabs.js"), sourcemap: false },
+  { name: "content", entry: resolve(__dirname, "src/content.ts"), sourcemap: "linked" },
+  { name: "background", entry: resolve(__dirname, "src/background.ts"), sourcemap: "linked" },
+  { name: "inject", entry: resolve(__dirname, "src/inject.ts"), sourcemap: false },
+  { name: "popup", entry: resolve(__dirname, "src/popup.ts"), sourcemap: false },
+  { name: "tabs", entry: resolve(__dirname, "src/tabs.ts"), sourcemap: false },
   // platforms.js is loaded standalone by tabs.html via <script src=...>. It
   // sets globalThis.UC_PLATFORMS and has no imports today. A step 7 refactor
   // will fold it into src/shared/ and bundle it into tabs; until then it needs
