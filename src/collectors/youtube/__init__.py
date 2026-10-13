@@ -56,6 +56,7 @@ import logging
 import os
 import re
 import subprocess
+import shutil
 import tempfile
 import time
 from pathlib import Path
@@ -2419,7 +2420,7 @@ class YoutubeCollector(BaseCollector):
                         extra.extend(["--playlist-end", "50"])
                     result = await yt_dlp_download(
                         url,
-                        cookies_file=self._usable_cookie_file() or None,
+                        cookies_file=self._create_writable_cookie_snapshot(tmpdir),
                         output_template=os.path.join(tmpdir, "%(id)s.%(ext)s"),
                         max_downloads=None,  # respect playlist-end / per-video
                         retries=3,
@@ -2511,11 +2512,12 @@ class YoutubeCollector(BaseCollector):
 
     def _usable_cookie_file(self) -> str:
         """Return a valid Netscape cookies.txt path, or blank if unusable."""
-        if self._usable_cookie_file_cache is not None:
-            return self._usable_cookie_file_cache
+        if self._usable_cookie_file_cache:
+            if Path(self._usable_cookie_file_cache).is_file():
+                return self._usable_cookie_file_cache
+            self._usable_cookie_file_cache = None
         path = (self._cookie_file or "").strip()
         if not path:
-            self._usable_cookie_file_cache = ""
             return ""
         candidates = [Path(path)]
         parent = candidates[0].parent
@@ -2531,8 +2533,32 @@ class YoutubeCollector(BaseCollector):
                     logger.info("youtube: using fallback cookie file %s instead of %s", candidate, path)
                 self._usable_cookie_file_cache = str(candidate)
                 return str(candidate)
-        self._usable_cookie_file_cache = ""
         return ""
+
+    def _create_writable_cookie_snapshot(self, dest_dir: str | Path) -> str | None:
+        """Create a writable copy of the validated Netscape cookies in dest_dir.
+
+        yt-dlp attempts to save updated session cookies back to the cookie file
+        upon exit. If the mount is read-only or owned by a different user (e.g. host
+        uid 1000 vs container uid 1001), yt-dlp raises PermissionError. A fresh copy
+        per operation inside the operation's tempdir ensures writable permissions and
+        isolates concurrent invocations.
+        """
+        src = self._usable_cookie_file()
+        if not src:
+            return None
+        try:
+            dest = Path(dest_dir) / "yt_cookies.txt"
+            shutil.copyfile(src, dest)
+            return str(dest)
+        except Exception as exc:
+            logger.warning(
+                "youtube: failed to snapshot cookie file %s into %s: %s",
+                src,
+                dest_dir,
+                _safe_log_text(exc),
+            )
+            return src
 
     def _validate_cookie_file(self, p: Path) -> bool:
         path = str(p)
@@ -2625,7 +2651,7 @@ class YoutubeCollector(BaseCollector):
                 extra.extend(["--cookies-from-browser", self._cookie_browser])
             result = await yt_dlp_download(
                 channel_url,
-                cookies_file=self._usable_cookie_file() or None,
+                cookies_file=self._create_writable_cookie_snapshot(tmpdir),
                 output_template=os.path.join(tmpdir, "%(id)s.%(ext)s"),
                 max_downloads=None,
                 retries=3,
@@ -2726,7 +2752,7 @@ class YoutubeCollector(BaseCollector):
             ]
             if self._cookie_browser:
                 cmd.extend(["--cookies-from-browser", self._cookie_browser])
-            cookie_file = self._usable_cookie_file()
+            cookie_file = self._create_writable_cookie_snapshot(tmpdir)
             if cookie_file:
                 cmd.extend(["--cookies", cookie_file])
             cmd.extend(["--", url])
@@ -2825,7 +2851,7 @@ class YoutubeCollector(BaseCollector):
             ]
             if self._cookie_browser:
                 cmd.extend(["--cookies-from-browser", self._cookie_browser])
-            cookie_file = self._usable_cookie_file()
+            cookie_file = self._create_writable_cookie_snapshot(tmpdir)
             if cookie_file:
                 cmd.extend(["--cookies", cookie_file])
             cmd.extend(["--", url])
@@ -3685,19 +3711,20 @@ class YoutubeCollector(BaseCollector):
             cmd.extend(["--dateafter", f"now-{days}days"])
         if self._cookie_browser:
             cmd.extend(["--cookies-from-browser", self._cookie_browser])
-        cookie_file = self._usable_cookie_file()
-        if cookie_file:
-            cmd.extend(["--cookies", cookie_file])
-        cmd.extend(["--", url])
-
         loop = asyncio.get_event_loop()
-        try:
-            proc = await loop.run_in_executor(
-                None, lambda: subprocess.run(cmd, capture_output=True, text=True, timeout=180)
-            )
-        except subprocess.TimeoutExpired:
-            logger.warning("yt-dlp custom playlist timed out: %s", url)
-            return []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cookie_file = self._create_writable_cookie_snapshot(tmpdir)
+            if cookie_file:
+                cmd.extend(["--cookies", cookie_file])
+            cmd.extend(["--", url])
+
+            try:
+                proc = await loop.run_in_executor(
+                    None, lambda: subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+                )
+            except subprocess.TimeoutExpired:
+                logger.warning("yt-dlp custom playlist timed out: %s", url)
+                return []
         if proc.returncode != 0 or not proc.stdout.strip():
             stderr_tail = (proc.stderr or "").strip().splitlines()[-3:]
             logger.warning("yt-dlp custom playlist rc=%s for %s: %s",

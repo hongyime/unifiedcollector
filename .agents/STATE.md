@@ -9,7 +9,7 @@ Progress:
 - Phase 3 shared discovery gates remain off, and its additive evidence migration remains unapplied. Do not touch Beeper; preserve platform pacing and per-platform gates.
 Next: implement Phase 5 feed adapter coverage and Phase 6 operations/rollout in order. See `.agents/handoffs/20261013-spider-phases-2-6.json`.
 
-Previous task: YouTube cookies were exported locally. The active collector yt-dlp `2026.03.17` hit a bot-related sign-in challenge; official yt-dlp `2026.08.19` returned no metadata on two public probes without a bot-related message (one age/unavailable, one generic failure). No media was downloaded; see the journal and never include cookie values.
+Previous task: YouTube bot-check resolved. Cross-project survey (musicstream, healthkaki-pov, unifiedcollector) identified root cause as cookie jar writeback permissions: yt-dlp calls save_cookies() at exit, raising PermissionError on host-owned read-only cookie mount in the container (uid 1001), misclassified as a restricted/bot failure, compounded by negative-cache memoization in _usable_cookie_file(). Added ephemeral writable cookie snapshotting (_create_writable_cookie_snapshot) into operation tempdirs across video, thumbnail, transcript, comment, and playlist calls. Verified with public probe video jNQXAC9IVRw (RC 0, metadata and 11 formats extracted, zero bot check). No media was bulk-downloaded; never include cookie values.
 
 ## Prior handoff history
 
