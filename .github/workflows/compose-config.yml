@@ -31,6 +31,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Prepare runtime env files from tracked examples
+        run: |
+          for example in docker/env/*.env.example; do
+            cp "$example" "${example%.example}"
+          done
+
       - name: Validate production compose
         env:
           TELEGRAM_SPIDER_ACCOUNTS: ci-placeholder
