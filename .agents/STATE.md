@@ -1,8 +1,8 @@
 # Agent State
 Current task: Apply Bryan-approved collection efficiency fixes and sweep repository Markdown documentation.
-Status: Approved fixes and the documentation sweep are complete. TikTok gallery-dl files use the path-based vault writer; Instagram shares the TikTok/Lemon8 advisory-lock group; generic and TikTok candidate/revisit writes and X/TikTok/Lemon8 target enqueues are batched with row fallback. The checksum-matched migration is recorded in live Postgres; both indexes are present and EXPLAIN confirms their use. Thirty-four tracked Markdown files were link-checked with no broken relative links. The profile-probe change remains excluded.
+Status: Complete and pushed to `main` in commit `93d14759`. TikTok gallery-dl files use the path-based vault writer; Instagram shares the TikTok/Lemon8 advisory-lock group; generic and TikTok candidate/revisit writes and X/TikTok/Lemon8 target enqueues are batched with row fallback. The checksum-matched migration is recorded in live Postgres; both indexes are present and EXPLAIN confirms their use. Thirty-four tracked Markdown files were link-checked with no broken relative links. The profile-probe change remains excluded.
 Verification: Python AST syntax checks, runtime imports, TikTok path-writer smoke, bridge batch smoke, Compose config, environment-split checker, `git diff --check`, live migration/index/checksum checks and query plans passed. Targeted pytest could not run because pytest is not installed in the host or running test environment.
-Next steps: Stage, hostname-scrub-check, commit the reviewed changes on `main`, and push to `origin`.
+Next steps: None for this task.
 
 ## Prior handoff history
 
