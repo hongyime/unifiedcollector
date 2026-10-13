@@ -181,7 +181,15 @@ function renderDiagnostics(backgroundError) {
     .slice(-8)
     .map((e) => `${hhmmss(e.t)} [${e.level}] ${e.msg}`)
     .join("\n");
-  const workerFresh = status.swStartedAt && Date.now() - Number(status.swStartedAt) < 10 * 60 * 1000;
+  // swStartedAt is the current service-worker instance's start time. MV3
+  // workers may stay active across many alarm cycles, so instance age alone
+  // does not indicate liveness. Use timestamps written by recent worker work.
+  const workerActivityAt = Math.max(
+    Number(status.lastScraperHeartbeatAt || 0),
+    Number(status.lastLoopPing || 0),
+    Number(status.lastBridgeHeartbeatOkAt || 0),
+  );
+  const workerActive = workerActivityAt > 0 && Date.now() - workerActivityAt < 12 * 60 * 1000;
   const probe = lastProbe
     ? lastProbe.ok
       ? `<span class="ok">${lastProbe.auto ? "auto" : "manual"} ingest ok</span> (${escapeHtml(lastProbe.base || "")})`
@@ -198,8 +206,9 @@ function renderDiagnostics(backgroundError) {
     : "scraper heartbeat not confirmed";
   el.innerHTML =
     `<strong>Extension ${escapeHtml((lastDiag && lastDiag.version) || pageVersion)}</strong> ` +
-    `<span class="${workerFresh ? "ok" : "warn"}">worker ${workerFresh ? "fresh" : "not fresh"}</span><br>` +
-    `Worker started ${escapeHtml(ago(status.swStartedAt))}; loop ping ${escapeHtml(ago(status.lastLoopPing))}; ` +
+    `<span class="${workerActive ? "ok" : "warn"}">worker ${workerActive ? "active" : "inactive"}</span><br>` +
+    `Worker instance started ${escapeHtml(ago(status.swStartedAt))}; last activity ${escapeHtml(ago(workerActivityAt))}; ` +
+    `loop ping ${escapeHtml(ago(status.lastLoopPing))}; ` +
     `ingest ${escapeHtml((lastDiag && lastDiag.ingestBase) || "")}<br>` +
     `${bridgeHeartbeat}; ${scraperHeartbeat}${bridgeProblem}<br>` +
     `Probe: ${probe}` +

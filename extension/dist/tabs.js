@@ -148,12 +148,17 @@
     }
     const status = lastDiag && lastDiag.status || {};
     const logs = (lastDiag && lastDiag.log || []).slice(-8).map((e) => `${hhmmss(e.t)} [${e.level}] ${e.msg}`).join("\n");
-    const workerFresh = status.swStartedAt && Date.now() - Number(status.swStartedAt) < 10 * 60 * 1e3;
+    const workerActivityAt = Math.max(
+      Number(status.lastScraperHeartbeatAt || 0),
+      Number(status.lastLoopPing || 0),
+      Number(status.lastBridgeHeartbeatOkAt || 0)
+    );
+    const workerActive = workerActivityAt > 0 && Date.now() - workerActivityAt < 12 * 60 * 1e3;
     const probe = lastProbe ? lastProbe.ok ? `<span class="ok">${lastProbe.auto ? "auto" : "manual"} ingest ok</span> (${escapeHtml(lastProbe.base || "")})` : `<span class="bad">${lastProbe.auto ? "auto" : "manual"} ingest failed</span>: ${escapeHtml(lastProbe.error || "unknown")}` : "manual ingest not tested from this page";
     const bridgeHeartbeat = status.lastBridgeHeartbeatOkAt ? `bridge heartbeat ok ${escapeHtml(ago(status.lastBridgeHeartbeatOkAt))}` : "bridge heartbeat not confirmed";
     const bridgeProblem = status.lastBridgeHeartbeatError ? `<br><span class="bad">Bridge heartbeat error:</span> ${escapeHtml(status.lastBridgeHeartbeatError)}` : "";
     const scraperHeartbeat = status.lastScraperHeartbeatAt ? `scraper heartbeat ${escapeHtml(ago(status.lastScraperHeartbeatAt))}: ${Number(status.lastScraperHeartbeatSent || 0)}/${Number(status.lastScraperHeartbeatSeen || 0)} sent` : "scraper heartbeat not confirmed";
-    el.innerHTML = `<strong>Extension ${escapeHtml(lastDiag && lastDiag.version || pageVersion)}</strong> <span class="${workerFresh ? "ok" : "warn"}">worker ${workerFresh ? "fresh" : "not fresh"}</span><br>Worker started ${escapeHtml(ago(status.swStartedAt))}; loop ping ${escapeHtml(ago(status.lastLoopPing))}; ingest ${escapeHtml(lastDiag && lastDiag.ingestBase || "")}<br>${bridgeHeartbeat}; ${scraperHeartbeat}${bridgeProblem}<br>Probe: ${probe}` + (logs ? `<pre>${escapeHtml(logs)}</pre>` : "");
+    el.innerHTML = `<strong>Extension ${escapeHtml(lastDiag && lastDiag.version || pageVersion)}</strong> <span class="${workerActive ? "ok" : "warn"}">worker ${workerActive ? "active" : "inactive"}</span><br>Worker instance started ${escapeHtml(ago(status.swStartedAt))}; last activity ${escapeHtml(ago(workerActivityAt))}; loop ping ${escapeHtml(ago(status.lastLoopPing))}; ingest ${escapeHtml(lastDiag && lastDiag.ingestBase || "")}<br>${bridgeHeartbeat}; ${scraperHeartbeat}${bridgeProblem}<br>Probe: ${probe}` + (logs ? `<pre>${escapeHtml(logs)}</pre>` : "");
   }
   async function maybeAutoProbe(backgroundError) {
     if (backgroundError || autoProbeInFlight) return;

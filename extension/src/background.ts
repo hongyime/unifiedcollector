@@ -325,21 +325,37 @@ async function reportScraperHeartbeatSummary(base, reason, summary) {
     : failed > 0 || sent <= 0
       ? "scraper_heartbeat_degraded"
       : "scraper_heartbeat_ok";
-  await postJsonWithTimeout(base + "/social/browser-heartbeat", withExtensionVersion({
-    platform: "bridge",
-    label: "UnifiedCollector Bridge",
-    running: true,
-    tab_id: "scraper_tabs",
-    url: "chrome-extension://" + chrome.runtime.id + "/background.js",
-    health_status: healthStatus,
-    health_reason: reason || "background_watchdog",
-    scraper_tabs_seen: seen,
-    scraper_tabs_sent: sent,
-    scraper_tabs_failed: failed,
-    scraper_tabs_canonical: Number(summary && summary.canonical || 0),
-    scraper_tabs_skipped: Number(summary && summary.skipped || 0),
-    scraper_heartbeat_error: lastError,
-  }), SCRAPER_HEARTBEAT_TIMEOUT_MS);
+  try {
+    await postJsonWithTimeout(base + "/social/browser-heartbeat", withExtensionVersion({
+      platform: "bridge",
+      label: "UnifiedCollector Bridge",
+      running: true,
+      tab_id: "scraper_tabs",
+      url: "chrome-extension://" + chrome.runtime.id + "/background.js",
+      health_status: healthStatus,
+      health_reason: reason || "background_watchdog",
+      scraper_tabs_seen: seen,
+      scraper_tabs_sent: sent,
+      scraper_tabs_failed: failed,
+      scraper_tabs_canonical: Number(summary && summary.canonical || 0),
+      scraper_tabs_skipped: Number(summary && summary.skipped || 0),
+      scraper_heartbeat_error: lastError,
+    }), SCRAPER_HEARTBEAT_TIMEOUT_MS);
+    await setStatus({
+      lastBridgeHeartbeatOkAt: Date.now(),
+      lastBridgeHeartbeatError: null,
+      lastBridgeHeartbeatBase: base,
+      lastBridgeHeartbeatReason: reason || "scraper_heartbeat_summary",
+    });
+  } catch (e) {
+    await setStatus({
+      lastBridgeHeartbeatFailAt: Date.now(),
+      lastBridgeHeartbeatError: String(e && e.message ? e.message : e),
+      lastBridgeHeartbeatBase: base,
+      lastBridgeHeartbeatReason: reason || "scraper_heartbeat_summary",
+    });
+    throw e;
+  }
 }
 
 const lastForcedCycleByTab = {};
@@ -1986,7 +2002,15 @@ async function ensureLoops(reason) {
         });
       }
     } catch (e) {
-      await log("warn", `page hook inject failed for tab ${t.id}: ${e && e.message ? e.message : e}`);
+      const error = String(e && e.message ? e.message : e);
+      // Chromium's own network-error document (chrome-error://chromewebdata/)
+      // is not an extension-injectable page. The manifest hook also cannot run
+      // there; keep it visible as an expected skip instead of a scraper error.
+      const browserErrorDocument = /chrome-error:\/\/|chromewebdata/i.test(error);
+      await log(
+        browserErrorDocument ? "info" : "warn",
+        `${browserErrorDocument ? "page hook injection skipped on browser error page" : "page hook inject failed"} for tab ${t.id}: ${error}`,
+      );
     }
     try {
       await sendTabMessageWithTimeout(t.id, { type: forceCycle ? "scrapeCycle" : "ensureLoop", reason });
