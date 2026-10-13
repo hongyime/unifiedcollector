@@ -66,6 +66,19 @@ class MembersMixin:
 
         seen: set[int] = set()
         upserted = 0
+        shared_enabled = False
+        shared_limit = 0
+        shared_count = 0
+        try:
+            from src.core.spider_graph_store import shared_spider_enabled, bounded_limit
+
+            shared_enabled = shared_spider_enabled("telegram")
+            if shared_enabled:
+                shared_limit = bounded_limit(
+                    "TELEGRAM_SHARED_MEMBERS_PER_CHAT", 50, maximum=200
+                )
+        except Exception:
+            logger.debug("telegram shared member discovery is unavailable", exc_info=True)
         try:
             async for participant in client.iter_participants(entity):
                 if self._stop.is_set():
@@ -120,6 +133,37 @@ class MembersMixin:
                             last_seen_at = NOW(),
                             refreshed_at = NOW()
                     """, chat_uuid, user_uuid, role, joined_at)
+                    if shared_enabled and shared_count < shared_limit:
+                        try:
+                            from src.core.spider_discovery_store import persist_discovery_target
+
+                            await persist_discovery_target(
+                                conn,
+                                "telegram",
+                                str(pid),
+                                target_type="member",
+                                discovery_type="telegram_chat_member",
+                                source_table="telegram_chat_members",
+                                source_record_id=f"{chat_uuid}:{user_uuid}",
+                                confidence=0.95,
+                                priority=7,
+                                source_metadata={
+                                    "chat_platform_id": chat_platform_id,
+                                    "user_platform_id": str(pid),
+                                    "role": role,
+                                },
+                                max_pending=bounded_limit(
+                                    "TELEGRAM_SHARED_SPIDER_MAX_PENDING", 500, maximum=5000
+                                ),
+                            )
+                            shared_count += 1
+                        except Exception:
+                            logger.debug(
+                                "telegram member discovery shadow write skipped chat=%s user=%s",
+                                chat_platform_id,
+                                pid,
+                                exc_info=True,
+                            )
                 upserted += 1
         except Exception as exc:
             if _is_flood_wait(exc):

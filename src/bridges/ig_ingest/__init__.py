@@ -2735,6 +2735,10 @@ async def _record_users(pool, platform, users, context, owner=None) -> int:
                 or u.get("avatar_url")
                 or None
             ),
+            "source_record_id": str(
+                u.get("source_record_id") or u.get("post_id")
+                or u.get("comment_id") or ""
+            ).strip() or None,
         })
     if not rows:
         return 0
@@ -2821,7 +2825,7 @@ async def _record_users(pool, platform, users, context, owner=None) -> int:
                         exc_info=True,
                     )
         usernames = [r["username"] for r in successful_rows if r["username"]]
-        ctx = context_value.lower()
+        ctx = re.sub(r"[\s_-]+", "", context_value.lower())
         target_metadata = {
             "source": "social_users",
             "context": context_value,
@@ -2860,6 +2864,71 @@ async def _record_users(pool, platform, users, context, owner=None) -> int:
                 await _enqueue_lemon8_profile_targets(conn, usernames, source, priority, target_metadata)
         except Exception:
             logger.debug("post-user enqueue failed platform=%s context=%s", platform, context_value, exc_info=True)
+        if platform in {"x", "threads", "facebook"} and successful_rows:
+            try:
+                from src.core.spider_discovery_store import persist_discovery_target
+                from src.core.spider_graph_store import shared_spider_enabled, bounded_limit
+
+                if shared_spider_enabled(platform):
+                    max_targets = bounded_limit(
+                        "SOCIAL_SHARED_DISCOVERY_MAX_PER_CAPTURE", 50, maximum=100
+                    )
+                    confidence_by_context = {
+                        "follow": 0.95,
+                        "following": 0.95,
+                        "follower": 0.95,
+                        "profile": 0.9,
+                        "author": 0.75,
+                        "comment": 0.65,
+                        "foryou": 0.6,
+                    }
+                    context_key = ctx
+                    discovery_type = (
+                        "browser_foryou_author"
+                        if context_key == "foryou"
+                        else f"browser_{context_key}_account"
+                    )[:64]
+                    post_tables = {
+                        "x": "x_posts",
+                        "threads": "threads_posts",
+                        "facebook": "facebook_posts",
+                    }
+                    for r in successful_rows[:max_targets]:
+                        target_id = r["user_id"] or r["username"]
+                        if not target_id:
+                            continue
+                        source_record_id = r.get("source_record_id")
+                        source_table = post_tables[platform] if source_record_id else "social_users"
+                        if not source_record_id:
+                            source_record_id = f"{platform}:{r['uid']}"
+                        await persist_discovery_target(
+                            conn,
+                            platform,
+                            str(target_id),
+                            target_type="account",
+                            discovery_type=discovery_type,
+                            source_table=source_table,
+                            source_record_id=source_record_id,
+                            confidence=confidence_by_context.get(context_key, 0.55),
+                            priority=60,
+                            source_metadata={
+                                "capture_context": context_value,
+                                "owner_account": owner_account,
+                                "username": r["username"],
+                            },
+                            max_pending=bounded_limit(
+                                f"{platform.upper()}_SHARED_SPIDER_MAX_PENDING",
+                                300,
+                                maximum=3000,
+                            ),
+                        )
+            except Exception:
+                logger.debug(
+                    "browser shared discovery write skipped platform=%s context=%s",
+                    platform,
+                    context_value,
+                    exc_info=True,
+                )
         if platform == "threads" and ctx != "foryou":
             cross_handles.extend(usernames)
         if cross_handles:
@@ -4073,7 +4142,14 @@ async def _posts_ingest_background(app, platform: str, body: dict) -> None:
             stored_count=n,
         )
         # post authors (threads/facebook carry author_username) count as seen users
-        authors = [{"username": p.get("author_username")} for p in posts if isinstance(p, dict) and p.get("author_username")]
+        authors = [
+            {
+                "username": p.get("author_username"),
+                "source_record_id": p.get("platform_post_id") or p.get("post_id") or p.get("id"),
+            }
+            for p in posts
+            if isinstance(p, dict) and p.get("author_username")
+        ]
         await _record_users(app["pool"], platform, authors, "author")
 
 
@@ -4092,7 +4168,15 @@ async def comments_handler(request):
         stored_count=n,
     )
     # every commenter is a user we've seen
-    authors = [{"username": c.get("author_username"), "user_id": c.get("author_platform_id")} for c in comments if c.get("author_username") or c.get("author_platform_id")]
+    authors = [
+        {
+            "username": c.get("author_username"),
+            "user_id": c.get("author_platform_id"),
+            "source_record_id": c.get("comment_id") or c.get("id"),
+        }
+        for c in comments
+        if c.get("author_username") or c.get("author_platform_id")
+    ]
     await _record_users(request.app["pool"], platform, authors, "comment")
     return _cors(web.json_response({"saved": n}))
 

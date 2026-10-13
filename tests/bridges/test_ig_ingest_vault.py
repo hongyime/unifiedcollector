@@ -1597,7 +1597,7 @@ def test_posts_background_ingest_keeps_archive_save_event_and_author_writes(monk
         ("archive", "x", "posts", "timeline"),
         ("save", "x", ["p1", "p2"]),
         ("event", "x", "posts", "timeline", 2, 2),
-        ("users", "x", [{"username": "alice"}], "author", None),
+        ("users", "x", [{"username": "alice", "source_record_id": "p1"}], "author", None),
     ]
 
 
@@ -1652,6 +1652,37 @@ def test_record_users_can_write_typed_browser_graph_edges_when_gated_on(monkeypa
         "browser_visible_follow", 0,
         '{"target_username": "visible_user"}',
     )]
+
+
+def test_threads_foryou_authors_enter_only_their_gated_account_queue(monkeypatch):
+    monkeypatch.setenv("THREADS_SHARED_SPIDER_ENABLED", "1")
+    pool = _FakePool()
+
+    recorded = asyncio.run(ig_ingest._record_users(
+        pool,
+        "threads",
+        [{"user_id": "thread-42", "username": "visible_user", "source_record_id": "post-9"}],
+        "For You",
+    ))
+
+    assert recorded == 1
+    evidence = next(
+        args for query, args in pool.conn.executes
+        if "INSERT INTO spider_discovery_evidence" in query
+    )
+    queue = next(
+        (query, args) for query, args in pool.conn.executes
+        if "INSERT INTO spider_queue" in query
+    )
+    assert evidence[2:7] == (
+        "account", "account:thread-42", "browser_foryou_author",
+        "threads_posts", "post-9",
+    )
+    assert queue[1][1] == "account:thread-42"
+    assert not any(
+        "instagram_spider_targets" in query or "instagram_spider_queue" in query
+        for query, _args in pool.conn.executes
+    )
 
 
 @pytest.mark.parametrize("platform,table", [

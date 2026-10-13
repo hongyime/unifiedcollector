@@ -71,6 +71,7 @@ import json
 import logging
 import os
 import re
+from uuid import uuid4
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Optional
@@ -168,14 +169,12 @@ class Lemon8EdgeFetcher:
 
     Lemon8 has no public follower/following endpoint — the toolkit instead
     discovers related creators via co-occurrence on profile pages, the FYP
-    feed, and topic/tag pages. We expose those discoveries as outbound
-    ``FOLLOWING``-style edges so the unified spider can BFS over them.
-    ``supported_edge_types`` is fixed to ``(FOLLOWING,)`` since that's the
-    only signal we can scrape without an authenticated session.
+    feed, and topic/tag pages. These remain ``RELATED_CREATOR`` evidence and
+    are never mislabeled as a follow relationship.
     """
 
     if EdgeType is not None:  # pragma: no branch — set at import time
-        supported_edge_types: tuple = (EdgeType.FOLLOWING,)
+        supported_edge_types: tuple = (EdgeType.RELATED_CREATOR,)
     else:  # SpiderDiscover not importable in this env
         supported_edge_types: tuple = ()
 
@@ -545,7 +544,13 @@ class Lemon8Collector(BaseCollector):
                     async with self.pool.acquire() as conn:
                         await conn.execute("UPDATE lemon8_spider_queue SET status = 'failed' WHERE platform_user_id = $1", row['platform_user_id'])
 
-    async def _enqueue_spider_user(self, username: str, source: str = "feed"):
+    async def _enqueue_spider_user(
+        self,
+        username: str,
+        source: str = "feed",
+        *,
+        discovery: dict | None = None,
+    ):
         """Add a discovered user to the spider queue (best-effort)."""
         if not username:
             return
@@ -556,6 +561,25 @@ class Lemon8Collector(BaseCollector):
                     VALUES ($1, $2, 5, 'pending', $3)
                     ON CONFLICT (platform_user_id) DO NOTHING
                 """, username, source, datetime.now(timezone.utc))
+                if discovery:
+                    from src.core.spider_discovery_store import persist_discovery_target
+                    from src.core.spider_graph_store import bounded_limit
+
+                    await persist_discovery_target(
+                        conn,
+                        "lemon8",
+                        username,
+                        target_type="account",
+                        discovery_type=discovery["discovery_type"],
+                        source_table=discovery["source_table"],
+                        source_record_id=discovery["source_record_id"],
+                        confidence=discovery["confidence"],
+                        priority=5,
+                        source_metadata=discovery.get("source_metadata"),
+                        max_pending=bounded_limit(
+                            "LEMON8_SHARED_SPIDER_MAX_PENDING", 300, maximum=3000
+                        ),
+                    )
         except Exception as e:
             logger.debug("spider enqueue skipped for %s: %s", username, e)
 
@@ -1245,9 +1269,25 @@ class Lemon8Collector(BaseCollector):
 
         logger.info("Feed scraped: %d media, %d users, %d tags", len(media_items), len(users), len(tags))
 
-        for u in users:
+        feed_capture_id = uuid4().hex
+        shared_cap = 0
+        if os.getenv("LEMON8_SHARED_SPIDER_ENABLED", "0").lower() in {"1", "true", "yes", "on"}:
+            from src.core.spider_graph_store import bounded_limit
+            shared_cap = bounded_limit(
+                "LEMON8_SHARED_DISCOVERY_MAX_PER_SOURCE", 20, maximum=50
+            )
+        for idx, u in enumerate(users):
             self._discovered_users.add(u)
-            await self._enqueue_spider_user(u, source="feed")
+            discovery = None
+            if idx < shared_cap:
+                discovery = {
+                    "discovery_type": "lemon8_foryou_creator",
+                    "source_table": "lemon8_feed_capture",
+                    "source_record_id": f"{feed_capture_id}:{u}",
+                    "confidence": 0.75,
+                    "source_metadata": {"surface": "foryou", "source": "feed"},
+                }
+            await self._enqueue_spider_user(u, source="feed", discovery=discovery)
 
         for t in tags:
             self._discovered_tags.add(t)
@@ -1359,8 +1399,25 @@ class Lemon8Collector(BaseCollector):
         users = self._extract_user_handles(html_content)
 
         logger.info("Tag %s: %d media, %d users", tag_id, len(media_items), len(users))
-        for u in users:
-            await self._enqueue_spider_user(u, source=f"tag:{tag_id}")
+        shared_cap = 0
+        if os.getenv("LEMON8_SHARED_SPIDER_ENABLED", "0").lower() in {"1", "true", "yes", "on"}:
+            from src.core.spider_graph_store import bounded_limit
+            shared_cap = bounded_limit(
+                "LEMON8_SHARED_DISCOVERY_MAX_PER_SOURCE", 20, maximum=50
+            )
+        for idx, u in enumerate(sorted(users)):
+            discovery = None
+            if idx < shared_cap:
+                discovery = {
+                    "discovery_type": "lemon8_topic_creator",
+                    "source_table": "lemon8_topic_page",
+                    "source_record_id": f"{tag_id}:{u}",
+                    "confidence": 0.7,
+                    "source_metadata": {"topic_id": tag_id, "source": "topic"},
+                }
+            await self._enqueue_spider_user(
+                u, source=f"tag:{tag_id}", discovery=discovery,
+            )
 
         for item in media_items[: max(50, self._tag_pages * 30)]:
             if self._stop.is_set(): break
@@ -2615,13 +2672,30 @@ class Lemon8Collector(BaseCollector):
             logger.debug("collect_following extract %s: %s", username, e)
             handles = set()
 
-        for handle in handles:
+        shared_cap = 0
+        if os.getenv("LEMON8_SHARED_SPIDER_ENABLED", "0").lower() in {"1", "true", "yes", "on"}:
+            from src.core.spider_graph_store import bounded_limit
+            shared_cap = bounded_limit(
+                "LEMON8_SHARED_DISCOVERY_MAX_PER_SOURCE", 20, maximum=50
+            )
+        for idx, handle in enumerate(sorted(handles)):
             if not handle or handle.lower() in seen:
                 continue
             seen.add(handle.lower())
             # Best-effort legacy spider-queue enqueue — does not block yield.
+            discovery = None
+            if idx < shared_cap:
+                discovery = {
+                    "discovery_type": "lemon8_profile_cooccurrence",
+                    "source_table": "lemon8_profiles",
+                    "source_record_id": username,
+                    "confidence": 0.4,
+                    "source_metadata": {"seed_username": username},
+                }
             try:
-                await self._enqueue_spider_user(handle, source=f"profile:{username}")
+                await self._enqueue_spider_user(
+                    handle, source=f"profile:{username}", discovery=discovery,
+                )
             except Exception:
                 pass
             yield handle

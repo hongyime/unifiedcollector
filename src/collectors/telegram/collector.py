@@ -989,6 +989,17 @@ class TelegramCollector(
         if self.pool is None:
             return 0
         cap = int(os.getenv("TELEGRAM_SPIDER_QUEUE_MAX", "2000"))
+        shared_enabled = False
+        shared_limit = 0
+        shared_count = 0
+        if self.pool is not None:
+            from src.core.spider_graph_store import shared_spider_enabled, bounded_limit
+
+            shared_enabled = shared_spider_enabled("telegram")
+            if shared_enabled:
+                shared_limit = bounded_limit(
+                    "TELEGRAM_SHARED_DISCOVERY_MAX_PER_CYCLE", 25, maximum=100
+                )
         async with self.pool.acquire() as conn:
             pending = await conn.fetchval(
                 "SELECT COUNT(*) FROM telegram_spider_queue WHERE status = 'pending'"
@@ -1021,6 +1032,34 @@ class TelegramCollector(
                     """,
                     pcid, d.get("title"), source_tag, priority,
                 )
+                if shared_enabled and shared_count < shared_limit:
+                    try:
+                        from src.core.spider_discovery_store import persist_discovery_target
+                        await persist_discovery_target(
+                            conn,
+                            "telegram",
+                            str(pcid),
+                            target_type="chat",
+                            discovery_type="telegram_dialog_chat",
+                            source_table="telegram_chats",
+                            source_record_id=str(pcid),
+                            confidence=0.9,
+                            priority=priority,
+                            source_metadata={
+                                "source_tag": source_tag,
+                                "title": d.get("title"),
+                            },
+                            max_pending=bounded_limit(
+                                "TELEGRAM_SHARED_SPIDER_MAX_PENDING", 500, maximum=5000
+                            ),
+                        )
+                        shared_count += 1
+                    except Exception:
+                        logger.debug(
+                            "telegram shared dialog shadow write skipped for %s",
+                            pcid,
+                            exc_info=True,
+                        )
             enqueued += 1
         return enqueued
 
@@ -1898,12 +1937,14 @@ class TelegramCollector(
         # Resolve the forward source to a platform chat/user ID string.
         from_id = getattr(fwd, "from_id", None)
         source_platform_id: str | None = None
+        target_type = "chat"
         if from_id is not None:
             # PeerChannel / PeerChat / PeerUser carry channel_id / chat_id / user_id.
             for attr in ("channel_id", "chat_id", "user_id"):
                 v = getattr(from_id, attr, None)
                 if v is not None:
                     source_platform_id = str(v)
+                    target_type = "member" if attr == "user_id" else "chat"
                     break
 
         # Don't enqueue self-forwards or empty sources.
@@ -1920,6 +1961,36 @@ class TelegramCollector(
                 """,
                 source_platform_id,
             )
+            try:
+                from src.core.spider_discovery_store import persist_discovery_target
+                from src.core.spider_graph_store import shared_spider_enabled, bounded_limit
+
+                if shared_spider_enabled("telegram"):
+                    message_id = getattr(message, "id", None)
+                    await persist_discovery_target(
+                        conn,
+                        "telegram",
+                        source_platform_id,
+                        target_type=target_type,
+                        discovery_type="telegram_forward_source",
+                        source_table="telegram_messages",
+                        source_record_id=(
+                            f"{parent_chat_platform_id}:{message_id}"
+                            if message_id is not None
+                            else f"{parent_chat_platform_id}:{source_platform_id}"
+                        ),
+                        confidence=0.6,
+                        priority=6,
+                        source_metadata={
+                            "parent_chat_id": str(parent_chat_platform_id),
+                            "target_type": target_type,
+                        },
+                        max_pending=bounded_limit(
+                            "TELEGRAM_SHARED_SPIDER_MAX_PENDING", 500, maximum=5000
+                        ),
+                    )
+            except Exception:
+                logger.debug("telegram forward discovery shadow write skipped", exc_info=True)
 
     async def _upsert_sender(self, worker: "TelegramWorker", platform_user_id) -> str | None:
         try:
@@ -2069,6 +2140,58 @@ class TelegramCollector(
                     "ingest_path": self.INGEST_PATH,
                 },
             )
+            try:
+                from src.core.spider_discovery_store import persist_discovery_target
+                from src.core.spider_graph_store import shared_spider_enabled, bounded_limit
+
+                if shared_spider_enabled("telegram"):
+                    link_cap = bounded_limit(
+                        "TELEGRAM_SHARED_LINKS_PER_MESSAGE", 10, maximum=25
+                    )
+                    link_rows = await conn.fetch(
+                        """
+                        SELECT id, url, domain
+                          FROM discovered_links
+                         WHERE source = 'telegram'
+                           AND source_table = 'telegram_messages'
+                           AND source_record_id = $1
+                           AND domain IN ('t.me', 'telegram.me', 'telegram.dog')
+                         ORDER BY id
+                         LIMIT $2
+                        """,
+                        platform_msg_id,
+                        link_cap,
+                    )
+                    for link_row in link_rows:
+                        parsed_link = self._parse_telegram_link_target(link_row["url"])
+                        if parsed_link is None:
+                            continue
+                        await persist_discovery_target(
+                            conn,
+                            "telegram",
+                            str(link_row["id"]),
+                            target_type="link",
+                            discovery_type=(
+                                "telegram_invite_link"
+                                if parsed_link.get("kind") == "invite"
+                                else "telegram_public_link"
+                            ),
+                            source_table="discovered_links",
+                            source_record_id=str(link_row["id"]),
+                            confidence=0.65,
+                            priority=6,
+                            source_metadata={
+                                "message_platform_id": platform_msg_id,
+                                "domain": link_row["domain"],
+                                "kind": parsed_link.get("kind"),
+                                "username": parsed_link.get("username"),
+                            },
+                            max_pending=bounded_limit(
+                                "TELEGRAM_SHARED_SPIDER_MAX_PENDING", 500, maximum=5000
+                            ),
+                        )
+            except Exception:
+                logger.debug("telegram message link discovery shadow write skipped", exc_info=True)
         if row is not None:
             self._progress_count += 1
         self._archive_raw_payload(
@@ -3594,6 +3717,37 @@ class TelegramCollector(
                     error="unsupported telegram link shape",
                 )
                 continue
+            try:
+                from src.core.spider_discovery_store import persist_discovery_target
+                from src.core.spider_graph_store import shared_spider_enabled, bounded_limit
+
+                if shared_spider_enabled("telegram"):
+                    async with self.pool.acquire() as conn:
+                        await persist_discovery_target(
+                            conn,
+                            "telegram",
+                            str(row["id"]),
+                            target_type="link",
+                            discovery_type=(
+                                "telegram_invite_link"
+                                if parsed.get("kind") == "invite"
+                                else "telegram_public_link"
+                            ),
+                            source_table="discovered_links",
+                            source_record_id=str(row["id"]),
+                            confidence=0.65,
+                            priority=6,
+                            source_metadata={
+                                "kind": parsed.get("kind"),
+                                "domain": urlparse(row["url"]).netloc.lower(),
+                                "username": parsed.get("username"),
+                            },
+                            max_pending=bounded_limit(
+                                "TELEGRAM_SHARED_SPIDER_MAX_PENDING", 500, maximum=5000
+                            ),
+                        )
+            except Exception:
+                logger.debug("telegram link discovery shadow write skipped", exc_info=True)
             worker = workers[processed % len(workers)]
             try:
                 await asyncio.wait_for(
@@ -3785,6 +3939,12 @@ class TelegramCollector(
             sender_key = str(sender_platform_id) if sender_platform_id else str(chat_platform_id)
             edge_targets: set[str] = set()
             written = 0
+            from src.core.spider_graph_store import shared_spider_enabled, bounded_limit
+            shared_enabled = shared_spider_enabled("telegram")
+            shared_limit = bounded_limit(
+                "TELEGRAM_SHARED_DISCOVERY_MAX_PER_MESSAGE", 20, maximum=50
+            ) if shared_enabled else 0
+            shared_count = 0
             for mention in mentions:
                 mentioned_user_uuid = None
                 target_key = mention.get("user_id") or mention.get("username")
@@ -3806,6 +3966,35 @@ class TelegramCollector(
                         mention["username"],
                         None,
                     )
+                if shared_enabled and shared_count < shared_limit:
+                    try:
+                        from src.core.spider_discovery_store import persist_discovery_target
+                        await persist_discovery_target(
+                            conn,
+                            "telegram",
+                            str(mention.get("user_id") or mention.get("username")),
+                            target_type="member",
+                            discovery_type="telegram_message_mention",
+                            source_table="telegram_messages",
+                            source_record_id=str(message_uuid),
+                            confidence=0.7,
+                            priority=6,
+                            source_metadata={
+                                "chat_id": str(chat_platform_id),
+                                "message_id": getattr(message, "id", None),
+                                "mention_source": mention.get("source"),
+                                "username": mention.get("username"),
+                            },
+                            max_pending=bounded_limit(
+                                "TELEGRAM_SHARED_SPIDER_MAX_PENDING", 500, maximum=5000
+                            ),
+                        )
+                        shared_count += 1
+                    except Exception:
+                        logger.debug(
+                            "telegram mention discovery shadow write skipped",
+                            exc_info=True,
+                        )
 
                 await conn.execute(
                     """

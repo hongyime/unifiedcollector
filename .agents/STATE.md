@@ -1,15 +1,12 @@
 # Agent State
-Current task: Execute the remaining Spider / For You plan phases (2–6) in order, with per-platform gates and bounded verification.
-Status: Phase 2 is implemented, verified, and pushed as `e2238c33`. `pytest` is unavailable on host and runtime, so in-container assertions and transaction-only Postgres checks were used. All four rollout flags are off.
+Current task: Execute Phases 2–6 of `docs/spider-foryou-plan.md` in order, with bounded checks and per-platform rollout gates.
+Status: Phase 2 is pushed as `e2238c33`. Phase 3 implementation and rollback-only live DB smoke are complete; commit/push is next. Discovery migration is unapplied, and all new platform gates default off. Pytest is unavailable in host and collector runtime.
 Progress:
-- Read `AGENTS.md`, `.agents/STATE.md`, the Phase 1 handoff, and `docs/spider-foryou-plan.md`; confirmed current branch and clean worktree.
-- Scope includes Strava relationships in Phase 2 and X/Threads/Facebook bounded target queues in Phase 3 per the full plan. Keep old queues active until reconciliation supports a gated cutover; do not touch Beeper.
-- Instagram and GitHub already have shared-spider wrappers; TikTok's wrapper is unwired; Strava currently discovers from authenticated rosters/clubs into its legacy queue. Graph fetchers must distinguish empty from inaccessible and preserve platform pacing/caps.
-- Phase 2 now has typed graph-edge storage, last-known fetch outcomes, disabled-by-default platform gates, explicit GitHub seed/item caps, visible-browser graph normalization for TikTok/Strava, and strict Instagram unavailable reporting. `compileall`, `git diff --check`, core outcome/cap assertions, GitHub adapter stubs, and transaction-only Postgres edge/outcome/timestamp checks passed; all temporary rows rolled back.
-- The observation upsert's ambiguous VARCHAR parameter was fixed after the first transaction smoke failed. The live ledger contains matching lifecycle and graph migration checksums; no migration command was run in this session. The service runtime may have applied the new additive migration; no further live schema writes are planned.
-- Live DB ledger records matching checksums for `spider_queue_lifecycle_20261013.sql` and `20261013_add_spider_graph_observability.sql`. It also contains a `spider_queue_lifecycle_20261014.sql` record without a matching migration file in this checkout; left untouched.
-- Detailed scope and safety constraints: `.agents/handoffs/20261013-spider-phases-2-6.json`.
-Next: Implement Phase 3 discovery-source adapters, run focused unit and bounded smoke checks, then commit/push Phase 3. Keep shared claims disabled until bounded shadow parity is measured; no platform traffic or credentials/tokens in durable state.
+- Phase 3 adds source-linked typed discovery for YouTube channel references, Lemon8 feed/topic/profile co-occurrences, Telegram chats/members/links, and bounded browser-observed X/Threads/Facebook accounts. Legacy queues remain active; no platform endpoints were contacted.
+- `compileall`, `git diff --check`, `scripts/verify_env_split.py`, helper assertions, and a transaction-only live PostgreSQL smoke passed. The smoke verified evidence idempotency and pending-cap behavior; all temporary rows were rolled back.
+- The first queue SQL smoke exposed ambiguous `$1` text/VARCHAR inference; explicit casts fixed it. No credentials or tokens were logged. The new evidence migration is not applied.
+- Do not touch Beeper. Preserve platform pacing and shared scrape controls. Keep claims gated until bounded shadow parity is measured.
+Next: finish Phase 3 commit/push and state update, then implement Phase 4 feed provenance/reporting, followed by Phases 5 and 6. See `.agents/handoffs/20261013-spider-phases-2-6.json`.
 
 Previous task: YouTube cookies were exported locally. The active collector yt-dlp `2026.03.17` hit a bot-related sign-in challenge; official yt-dlp `2026.08.19` returned no metadata on two public probes without a bot-related message (one age/unavailable, one generic failure). No media was downloaded; see the journal and never include cookie values.
 

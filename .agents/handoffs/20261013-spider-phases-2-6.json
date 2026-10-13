@@ -1,6 +1,6 @@
 {
   "date": "2026-10-13",
-  "task": "Execute Phases 2–6 of docs/spider-foryou-plan.md in order",
+  "task": "Execute Phases 2\u20136 of docs/spider-foryou-plan.md in order",
   "start_commit": "c8d127fd",
   "branch": "main",
   "phase_1": {
@@ -11,11 +11,38 @@
     "shadow_sweeps_complete": false
   },
   "scope": {
-    "phase_2": ["Instagram browser/headless", "GitHub legacy graph", "TikTok visible graph", "Strava athlete relationships"],
-    "phase_3": ["YouTube channel references", "Lemon8 feed/topic discovery", "Telegram chat/member/link discovery", "bounded X/Threads/Facebook target queues"],
-    "phase_4": ["normalized feed surface provenance", "per-surface reporting"],
-    "phase_5": ["TikTok", "X", "Threads", "Lemon8", "Strava", "Facebook", "Instagram capture paths", "bounded feasibility checks for Instagram recommendations and YouTube home"],
-    "phase_6": ["queue age and surface freshness", "error classifications", "per-platform pause/limits", "rollout notes"]
+    "phase_2": [
+      "Instagram browser/headless",
+      "GitHub legacy graph",
+      "TikTok visible graph",
+      "Strava athlete relationships"
+    ],
+    "phase_3": [
+      "YouTube channel references",
+      "Lemon8 feed/topic discovery",
+      "Telegram chat/member/link discovery",
+      "bounded X/Threads/Facebook target queues"
+    ],
+    "phase_4": [
+      "normalized feed surface provenance",
+      "per-surface reporting"
+    ],
+    "phase_5": [
+      "TikTok",
+      "X",
+      "Threads",
+      "Lemon8",
+      "Strava",
+      "Facebook",
+      "Instagram capture paths",
+      "bounded feasibility checks for Instagram recommendations and YouTube home"
+    ],
+    "phase_6": [
+      "queue age and surface freshness",
+      "error classifications",
+      "per-platform pause/limits",
+      "rollout notes"
+    ]
   },
   "constraints": [
     "Do not touch Beeper or inspect its session/data.",
@@ -47,8 +74,23 @@
     "commit_push": "pushed to main as e2238c33"
   },
   "next_steps": [
-    "Implement Phase 3 discovery-source adapters and bounded verification.",
-    "Update STATE.md and append JOURNAL.md after each meaningful milestone.",
+    "Commit and push Phase 3 implementation and state update.",
+    "Implement Phase 4 normalized collection-surface provenance and reporting, then bounded checks and commit/push.",
+    "Continue with Phases 5 and 6 in order; preserve per-platform default-off gates and do not touch Beeper.",
     "Before each commit touching .agents, replace any real hostname in staged state/journal blobs with dev-host-3.example and verify staged blobs."
-  ]
+  ],
+  "phase_3_status": {
+    "implementation": "complete; legacy platform queues remain active and per-platform shared gates default off",
+    "coverage": [
+      "YouTube channel references",
+      "Lemon8 feed/topic/profile discovery",
+      "Telegram chat/member/link evidence",
+      "bounded X/Threads/Facebook browser-observed account targets"
+    ],
+    "validation": "compileall, git diff --check, env split validation, helper assertions, and transaction-only live PostgreSQL smoke passed; pytest unavailable on host and runtime; no platform endpoints contacted",
+    "transaction_smoke": "passed evidence idempotency and per-platform pending cap using transaction-local temp tables; rolled back all writes",
+    "sql_debugging": "initial live smoke exposed ambiguous text/VARCHAR parameter inference in queue insert; explicit casts fixed it and rerun passed",
+    "migration": "20261013_add_spider_discovery_evidence.sql is not applied; gates remain off",
+    "commit_push": "pending"
+  }
 }

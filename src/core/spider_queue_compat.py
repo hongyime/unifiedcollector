@@ -59,6 +59,12 @@ LEGACY_QUEUE_SPECS: dict[str, LegacyQueueSpec] = {
     "youtube": LegacyQueueSpec(
         "youtube", "youtube_spider_queue", "platform_channel_id",
     ),
+    "x": LegacyQueueSpec(
+        "x", "x_profile_targets", "username",
+        record_id_is_uuid=False,
+        record_id_field="username",
+        metadata_fields=("source", "metadata"),
+    ),
     "telegram": LegacyQueueSpec(
         "telegram", "telegram_spider_queue", "platform_chat_id",
         metadata_fields=("source", "title"),
@@ -78,6 +84,7 @@ _STATUS_ALIASES = {
     "failed": "failed",
     "error": "failed",
     "unresolvable": "failed",
+    "unavailable": "failed",
 }
 
 

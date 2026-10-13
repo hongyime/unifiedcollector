@@ -102,6 +102,7 @@ class EdgeType(str, Enum):
     CONTRIBUTOR = "contributor"
     SUBSCRIBER = "subscriber"  # YouTube etc.
     CLUB_MEMBER = "club_member"  # membership evidence, not a follow edge
+    RELATED_CREATOR = "related_creator"  # co-occurrence/recommendation evidence
 
 
 class EdgeFetchUnavailable(RuntimeError):

@@ -8,8 +8,6 @@ import os
 from datetime import datetime
 from typing import Any
 
-from src.core.spider_discover import Edge, EdgeType
-
 logger = logging.getLogger(__name__)
 
 
@@ -60,7 +58,7 @@ async def shared_spider_schema_ready(pool) -> bool:
 async def persist_spider_edge(
     pool,
     platform: str,
-    edge: Edge,
+    edge: Any,
     hop_distance: int,
     *,
     discovery_type: str = "graph_edge",
@@ -89,7 +87,7 @@ async def persist_spider_edge(
             platform,
             edge.source,
             edge.target,
-            edge.edge_type.value,
+            str(getattr(edge.edge_type, "value", edge.edge_type)),
             discovery_type[:64],
             max(0, int(hop_distance)),
             json.dumps(source_metadata or edge.metadata or {}, default=str),
@@ -101,7 +99,7 @@ async def record_spider_fetch_observation(
     pool,
     platform: str,
     node_id: str,
-    edge_type: EdgeType,
+    edge_type: Any,
     outcome: str,
     edge_count: int,
     error_class: str | None,
@@ -133,7 +131,7 @@ async def record_spider_fetch_observation(
             """,
             platform,
             node_id,
-            edge_type.value,
+            str(getattr(edge_type, "value", edge_type)),
             outcome,
             max(0, int(edge_count)),
             error_class[:64] if error_class else None,
@@ -176,17 +174,14 @@ async def persist_visible_follow_edges(
         edge_rows = []
         for row in rows:
             direction = str(row["direction"] or "").lower()
-            edge_type = {
-                "following": EdgeType.FOLLOWING,
-                "follower": EdgeType.FOLLOWER,
-            }.get(direction)
+            edge_type = direction if direction in {"following", "follower"} else None
             target = str(row["target_uid"] or "").strip()
             if edge_type is None or not target:
                 continue
             metadata = {"target_username": row["target_username"]}
             observed_at = row["last_seen"]
             edge_rows.append((
-                platform, owner, target, edge_type.value, "visible_follow_list",
+                platform, owner, target, edge_type, "visible_follow_list",
                 0, json.dumps(metadata, default=str), observed_at,
             ))
             counts[direction] += 1

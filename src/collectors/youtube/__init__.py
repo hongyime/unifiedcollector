@@ -1173,15 +1173,25 @@ class YoutubeCollector(BaseCollector):
             discovered_from,
             meta,
         )
-        if self._spider_autotarget and channel_id:
-            await self._enqueue_discovered_channel(
-                conn,
-                channel_id,
-                source=source,
-                priority=priority,
-                discovered_from=discovered_from,
-                metadata=metadata,
-            )
+        if channel_id:
+            if self._spider_autotarget:
+                await self._enqueue_discovered_channel(
+                    conn,
+                    channel_id,
+                    source=source,
+                    priority=priority,
+                    discovered_from=discovered_from,
+                    metadata=metadata,
+                )
+            else:
+                await self._persist_shared_channel_discovery(
+                    conn,
+                    channel_id,
+                    source=source,
+                    priority=priority,
+                    discovered_from=discovered_from,
+                    metadata=metadata,
+                )
 
     async def _enqueue_discovered_channel(
         self,
@@ -1240,6 +1250,64 @@ class YoutubeCollector(BaseCollector):
             int(os.getenv("YOUTUBE_SPIDER_RETRY_FAILED_AFTER_HOURS", "24")),
             int(os.getenv("YOUTUBE_SPIDER_REFRESH_AFTER_HOURS", "168")),
         )
+        await self._persist_shared_channel_discovery(
+            conn,
+            channel_id,
+            source=source,
+            priority=priority,
+            discovered_from=discovered_from,
+            metadata=metadata,
+        )
+
+    async def _persist_shared_channel_discovery(
+        self,
+        conn,
+        channel_id: str,
+        *,
+        source: str,
+        priority: int,
+        discovered_from: str,
+        metadata: dict | None = None,
+    ) -> None:
+        try:
+            from src.core.spider_discovery_store import persist_discovery_target
+            from src.core.spider_graph_store import bounded_limit
+
+            source_meta = dict(metadata or {})
+            source_table = str(source_meta.get("source_table") or "youtube_profile_queue")
+            source_record_id = str(
+                source_meta.get("source_record_id") or discovered_from
+            )
+            discovery_type = (
+                "youtube_channel_reference"
+                if source in {"mention", "reference", "channel_reference"}
+                else "youtube_channel_discovery"
+            )
+            await persist_discovery_target(
+                conn,
+                "youtube",
+                channel_id,
+                target_type="channel",
+                discovery_type=discovery_type,
+                source_table=source_table,
+                source_record_id=source_record_id,
+                confidence=0.7 if discovery_type == "youtube_channel_reference" else 0.55,
+                priority=priority,
+                source_metadata={
+                    **source_meta,
+                    "source": source,
+                    "discovered_from": discovered_from,
+                },
+                max_pending=bounded_limit(
+                    "YOUTUBE_SHARED_SPIDER_MAX_PENDING", 300, maximum=3000
+                ),
+            )
+        except Exception:
+            logger.debug(
+                "youtube shared discovery shadow write skipped for %s",
+                channel_id,
+                exc_info=True,
+            )
 
     async def _record_youtube_edge(
         self,
