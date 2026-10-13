@@ -91,3 +91,41 @@ async def test_cookie_sync_rejects_unknown_platform(tmp_path, monkeypatch):
 
     assert _payload(response) == {"ok": False, "reason": "unsupported"}
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_cookie_sync_rejects_platform_directory_symlink_escape(tmp_path, monkeypatch):
+    monkeypatch.setattr(ig_ingest, "CREDENTIALS_ROOT", str(tmp_path / "credentials"))
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    credentials = tmp_path / "credentials"
+    credentials.mkdir()
+    (credentials / "instagram").symlink_to(outside, target_is_directory=True)
+
+    response = await cookies_handler(_FakeRequest({
+        "platform": "instagram",
+        "account": "attacker",
+        "cookies": [{"name": "sessionid", "value": "synthetic"}],
+    }))
+
+    assert response.status == 500
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_cookie_sync_rejects_cookie_target_symlink_escape(tmp_path, monkeypatch):
+    monkeypatch.setattr(ig_ingest, "CREDENTIALS_ROOT", str(tmp_path / "credentials"))
+    outside = tmp_path / "outside.txt"
+    outside.write_text("keep this file\n")
+    instagram = tmp_path / "credentials" / "instagram"
+    instagram.mkdir(parents=True)
+    (instagram / "attacker.txt").symlink_to(outside)
+
+    response = await cookies_handler(_FakeRequest({
+        "platform": "instagram",
+        "account": "attacker",
+        "cookies": [{"name": "sessionid", "value": "synthetic"}],
+    }))
+
+    assert response.status == 500
+    assert outside.read_text() == "keep this file\n"

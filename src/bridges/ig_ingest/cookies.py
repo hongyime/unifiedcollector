@@ -11,6 +11,7 @@ up 401s that look bot-like.
 import logging
 import os
 import re
+import tempfile
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -50,20 +51,50 @@ def _write_cookie_jar(
     cookies: Iterable[Any],
     default_domain: str,
 ) -> None:
-    # Defense in depth against path traversal: the filename is derived from
-    # request-supplied account names, so pin it to a single safe component
-    # inside the fixed base directory.
-    safe_name = os.path.basename(filename)
-    if not safe_name or safe_name in (".", ".."):
+    # Both the platform directory and filename are constrained independently:
+    # the directory must remain the expected child of the credentials root,
+    # and the request-derived filename must be one allowlisted path component.
+    root = directory.parent.resolve()
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", directory.name):
+        raise ValueError(f"refusing unsafe cookie directory: {directory!s}")
+    intended_directory = root / directory.name
+    intended_directory.mkdir(parents=True, exist_ok=True)
+    base = intended_directory.resolve()
+    if base != intended_directory:
+        raise ValueError(f"cookie directory escapes credentials root: {directory!s}")
+
+    safe_name = str(filename)
+    if (
+        not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", safe_name)
+        or safe_name in (".", "..")
+    ):
         raise ValueError(f"refusing unsafe cookie filename: {filename!r}")
-    base = directory.resolve()
-    base.mkdir(parents=True, exist_ok=True)
-    target = base / safe_name
-    if target.parent != base:
+
+    candidate = base / safe_name
+    target = candidate.resolve()
+    try:
+        target.relative_to(base)
+    except ValueError as exc:
+        raise ValueError(f"cookie filename escapes base directory: {filename!r}") from exc
+    if candidate.is_symlink():
         raise ValueError(f"cookie filename escapes base directory: {filename!r}")
-    tmp = base / (safe_name + ".tmp")
-    tmp.write_text("\n".join(_netscape_cookie_lines(cookies, default_domain)) + "\n")
-    os.replace(tmp, target)
+
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=base,
+            prefix=f".{safe_name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary_file:
+            temporary_path = Path(temporary_file.name)
+            temporary_file.write("\n".join(_netscape_cookie_lines(cookies, default_domain)) + "\n")
+        os.replace(temporary_path, target)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
 
 
 async def cookies_handler(request):
