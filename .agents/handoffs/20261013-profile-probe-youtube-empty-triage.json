@@ -1,7 +1,7 @@
 {
   "date": "2026-10-13",
   "task": "Profile-probe queue feeder, YouTube download verification, and empty-table triage",
-  "status": "implementation_complete_publication_pending_youtube_cookie_followup",
+  "status": "implementation_pushed_youtube_cookie_followup_pending",
   "base_commit": "810ffa5a",
   "constraints": [
     "Do not touch Beeper",
@@ -23,7 +23,7 @@
   "next_steps": [
     "Implement a scheduler handler that seeds direct target-platform spider URLs and bounded same-handle candidates from social_users.",
     "Add cadence and per-source batch settings to the common environment example; maintain unique-key idempotency.",
-    "Publish the implemented feeder and triage changes after staged hostname checks.",
+    "Implementation and triage changes are published as commit 292c8160.",
     "For YouTube success, retry after receiving an exported cookie file that can be used without browser access.",
     "Keep the 16 non-probe empty-table gaps as follow-up work; none shares the profile-probe feeder cause."
   ],
