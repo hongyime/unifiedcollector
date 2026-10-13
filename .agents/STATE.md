@@ -1,6 +1,6 @@
 # Agent State
 Current task: Fix YouTube yt-dlp bot checks by adding request pacing and applicable Palladium settings.
-Status: YouTube pacing and Palladium settings implemented; syntax and yt-dlp option checks pass; all public-video probes still hit a bot check; commit/push pending.
+Status: YouTube pacing and Palladium settings are committed and pushed as `64ba0f1f`; all public-video probes still hit a bot check under the active container's stale yt-dlp `2026.03.17`.
 Diagnosis (2026-10-13):
 - Expected: public YouTube extraction/download succeeds without cookies.
 - Observed: the previously tried cookie-less `player_client=web,mweb` path still hits bot checks (user-provided verified context).
@@ -8,9 +8,9 @@ Diagnosis (2026-10-13):
 - Palladium source review: its yt-dlp invocation explicitly enables `ejs:github` and can enable bundled QuickJS; it does not hard-code request sleeps, retries, player clients, impersonation, or headers. Its default video preset prefers H.264/AAC and MP4; it supports user-specified extra args. Source: https://github.com/tfourj/Palladium/blob/main/Palladium/Services/Python/palladium_ytdlp/ytdlp.py and `args.py`.
 - Suspected cause: the old delay did not pace requests within an extraction; three cookie-less probes (forced `web,mweb`, yt-dlp default client selection, and `ios`) still hit the bot check, so IP/environment blocking may also be involved.
 - Implementation: `_youtube_request_args()` applies 2-second request/subtitle sleeps, randomized 2–5-second download sleeps, exponential HTTP/extractor retry backoff, and `--remote-components ejs:github` to video, thumbnail, transcript, comment, and playlist yt-dlp paths. Client selection and impersonation now match Palladium's unset defaults; Node runtime and comment-specific extractor args remain.
-- Verification: all three metadata-only probes against public `jNQXAC9IVRw` failed with YouTube's bot-check response; no media was downloaded. Probe used `--ignore-config` and no cookie options. Container yt-dlp warns that its `2026.03.17` version is over 90 days old.
-- Concurrent worktree note: spider queue changes are in progress in separate files and must remain unstaged for this YouTube commit.
-- Next: commit and push only the YouTube code and this task's state/journal records; leave the spider queue work unstaged.
+- Verification: all three metadata-only probes against public `jNQXAC9IVRw` failed with YouTube's bot-check response; no media was downloaded. Probe used `--ignore-config` and no cookie options. The active container runs `2026.03.17`, below the declared `yt-dlp>=2026.7.4` requirement.
+- Concurrent worktree note: spider queue changes are in progress in separate files and were excluded from commit `64ba0f1f`.
+- Next: rerun a single metadata probe after the active collector image runs the declared yt-dlp dependency; no code changes pending from the pacing pass.
 
 ## Prior handoff history
 
