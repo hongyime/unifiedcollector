@@ -1,6 +1,6 @@
 {
   "date": "2026-10-13",
-  "task": "Execute Phases 2–6 of docs/spider-foryou-plan.md in order",
+  "task": "Execute Phases 2\u20136 of docs/spider-foryou-plan.md in order",
   "start_commit": "c8d127fd",
   "branch": "main",
   "phase_1": {
@@ -73,10 +73,7 @@
     "validation": "compileall, focused assertions, adapter stubs, and rollback-only live database checks passed; pytest unavailable",
     "commit_push": "pushed to main as e2238c33"
   },
-  "next_steps": [
-    "Implement Phase 6 queue-age/surface-freshness operations, error classifications, per-platform pause/limit controls, and rollout notes; validate and commit/push.",
-    "Before the Phase 6 state commit, replace any real hostname in staged state/journal blobs with dev-host-3.example and verify staged blobs."
-  ],
+  "next_steps": "Phases 2\u20136 are complete and pushed to main. No follow-up implementation steps remain.",
   "phase_3_status": {
     "implementation": "complete; legacy platform queues remain active and per-platform shared gates default off",
     "coverage": [
@@ -115,5 +112,6 @@
     ],
     "validation": "Python compileall, eight bounded-limit assertions, extension 1.23.107 build, git diff --check, and read-only live Postgres schema/ledger check passed. Pytest unavailable; direct collector import blocked by missing asyncpg. No platform endpoints contacted.",
     "commit_push": "pushed to main as 8be2796a"
-  }
+  },
+  "phase_6_status": "Implemented, reviewed, committed, and pushed as 8233b274. Coverage reports shared queue age, categorized browser/graph/headless DLQ errors with source availability, surface freshness, and operator pause/cadence controls (1\u2013720 hours). Fake assertions cover stale surfaces, DLQ classification, unavailable query states, and Beeper exclusion. Dashboard build and Vitest (2 tests) passed; Python compilation passed; pytest unavailable. Read-only live route returned queue age, graph/DLQ errors, and no Beeper controls. The live DB exceeded the bounded all-time freshness lookup and browser error query bound; API/UI expose incomplete status. No schedules or platforms were touched."
 }
