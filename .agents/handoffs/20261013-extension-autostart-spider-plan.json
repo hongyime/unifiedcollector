@@ -8,11 +8,14 @@
     "The existing Beeper XDG autostart entry lacks DISPLAY=:10, and no Chrome autostart entry exists.",
     "The browser security policy blocked the internal extension diagnostics page; do not retry through another browser-control path."
   ],
+  "published": {
+    "extension_commit": "319a5870",
+    "plan_commit": "8212560f",
+    "pushed_to": "origin/main",
+    "extension_bundle_version": "1.23.105",
+    "live_browser_version": "1.23.104"
+  },
   "next_steps": [
-    "Fix status freshness using recent worker activity and refresh bridge success timestamps from periodic heartbeat summaries.",
-    "Build the extension and verify bridge telemetry without changing Beeper data.",
-    "Write the requested platform-by-platform implementation plan without implementing it.",
-    "Create Chrome autostart and update Beeper autostart with DISPLAY=:10; verify desktop-file contents only.",
-    "Scrub any real hostname from staged agent-state blobs, commit the requested changes to main, and push."
+    "If the new extension status is needed live, reload UnifiedCollector Bridge through an allowed browser UI and confirm the diagnostics. The internal extension diagnostics page was blocked by browser security policy; do not use another route to reach it."
   ]
 }

@@ -1,16 +1,14 @@
 # Agent State
-Current task: Diagnose the extension heartbeat/injection report, configure Chrome and Beeper XDG autostart, and write the Spider / For You / Feeds implementation plan.
-Status: Extension fix is committed as `319a5870`; plan/state publication and push remain.
+Current task: Diagnose extension heartbeat/injection status, configure Chrome and Beeper XDG autostart, and plan Spider / For You / Feeds work.
+Status: Code and plan are pushed; autostart is configured. The live Chrome session remains on `1.23.104` pending an extension reload through the browser UI.
 Progress:
-- Read repository guidance, state, and architecture documentation. The repository was clean on `main` at start.
-- The bridge health endpoint returns 200. Read-only Collector DB telemetry for the last 15 minutes shows extension `1.23.104` heartbeats, real-page post writes, and media ingests; no Beeper tables or records were queried.
-- `swStartedAt` is set when the MV3 worker bundle starts, but the status badge incorrectly uses that lifecycle timestamp as a 10-minute liveness check. Periodic scraper heartbeats are fresh; normal heartbeat summaries POST to the bridge but do not refresh the popup's local `lastBridgeHeartbeatOkAt` field.
-- Updated `extension/src/tabs.ts` to report current worker activity from recent scraper/loop/bridge timestamps, and `extension/src/background.ts` to refresh bridge success/failure status from periodic heartbeat summaries. Chrome error-document injection rejections now log as expected skips when Chromium exposes `chrome-error://` / `chromewebdata` in the error.
-- Chrome-generated error documents cannot accept script injection. Recent real-page post writes and media ingests confirm extension capture is live; the main-world hook is registered for supported hosts, but its runtime marker could not be inspected because browser security policy blocked the internal extension diagnostics page. No alternate browser-control route will be used.
-- Updated Beeper autostart to set `DISPLAY=:10` and added a Google Chrome XDG autostart entry; desktop-file validation and executable-target checks pass. No application was launched.
-- Added `docs/spider-foryou-plan.md` with per-platform current state, gaps, phased order, and 34–53 engineering-day estimates. The repository-wide `docs/` ignore rule requires force-adding this specifically requested file.
-- `npm run build`, syntax checks on built background/tabs bundles, `git diff --check`, bridge `/health`, and read-only recent heartbeat/post/media telemetry checks pass. Live telemetry is from the running `1.23.104` extension; the new `1.23.105` build was not hot-loaded because browser security policy blocked internal diagnostics access.
-Next steps: Commit the plan and agent-state files, then push both commits to `origin/main`.
+- `swStartedAt` was incorrectly used as a 10-minute liveness signal although it records the MV3 worker instance start. The status now uses recent worker activity; periodic summary posts update bridge success/failure status. Identifiable Chrome error-document injection failures are logged as expected skips. Commit `319a5870`.
+- Read-only telemetry showed current `1.23.104` bridge heartbeats, real-page post writes and media ingests. Bridge `/health` returns 200. Chromium error documents cannot accept extension injection; the main-world hook is registered for supported hosts, but its runtime marker could not be inspected because browser security policy blocked the internal diagnostics page.
+- Built extension `1.23.105`; bundle syntax and `git diff --check` pass. The new bundle was not confirmed loaded in Chrome.
+- Chrome and Beeper XDG autostart entries validate; Beeper uses `DISPLAY=:10`. No app was launched and no reboot occurred. No Beeper data was accessed.
+- `docs/spider-foryou-plan.md` records per-platform state/gaps and a phased 34–53 engineering-day estimate. Plan commit `8212560f`.
+- Commits `319a5870` and `8212560f` are pushed to `origin/main`; worktree is clean.
+Next step: To activate the published extension fix in the desktop session, reload UnifiedCollector Bridge through an allowed browser UI and confirm the updated diagnostics.
 
 ## Prior handoff history
 
