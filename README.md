@@ -5,20 +5,25 @@
 Read-only ingestion service that scrapes 14 social platforms
 (github, youtube, strava, search, website, tiktok, lemon8, whatsapp,
 telegram, instagram, beeper/matrix, threads, facebook, x) and writes
-into one shared Postgres database. Runs as a 29-service Docker Compose
-stack on a single Windows host. Feeds a downstream `unifiedanalyzer`
-(separate repository) that does identity resolution and timelines.
+into one shared Postgres database. Runs as a 28-service default Docker
+Compose stack on a Docker host; opt-in profiles add services. Feeds a downstream
+`unifiedanalyzer` (separate repository) that does identity resolution and
+timelines.
 
 The stack observes and archives; it never writes back to any source
 platform. That is enforced at three layers: a static tripwire test, a
 runtime `ReadOnlyTelegramClient` wrapper, and the general absence of
 send/reply/react primitives in the codebase.
 
+For the code-backed platform map, current collection boundaries, and database
+ownership, see [the architecture review](docs/architecture.md).
+
 ## Prerequisites
 
-- **Operating system**: Windows 10 or 11 with WSL2 + Docker Desktop 4.30+.
-  Alternatively Linux with Docker Engine 24+ (untested by the
-  maintainer, path-mapping in compose assumes Windows drive letters).
+- **Operating system**: Windows 10 or 11 with WSL2 + Docker Desktop 4.30+,
+  or Linux with Docker Engine 24+. Set `UNIFIEDCOLLECTOR_HOST_ROOT` to a
+  path available to the Docker daemon when the `.env.example` Windows default
+  does not match the host.
 - **Runtime**: Docker Compose v2. Python 3.12 for host-side scripts.
   Node.js 20 for the Chrome extension bundler (auto-installed inside
   the wa-bridge image via the setup_20.x deb).
@@ -37,15 +42,13 @@ send/reply/react primitives in the codebase.
   - Search: Serper or DuckDuckGo (via Tor SOCKS5).
   - Beeper (optional): Beeper Desktop Local API token.
   - GHunt (optional recon): burner Google account.
-- **Host storage**: Z-drive (or another external volume) mounted for
-  the media vault at `z:/unifiedcollector`. Compose bind-mounts
-  `z:/unifiedcollector/media` and `z:/unifiedcollector` into most
-  collector containers.
-- **Chrome (host-side)**: Chrome for Testing or Playwright Chromium at
-  `%LOCALAPPDATA%\Google\Chrome for Testing\Application\chrome.exe`
-  (auto-detected by `scripts/start-scraper-chrome-cdp.ps1`). The
-  UnifiedCollector Bridge extension is loaded manually into this Chrome
-  profile.
+- **Host storage**: an external volume mounted for the media vault. The
+  `.env.example` default is `Z:/unifiedcollector`; set
+  `UNIFIEDCOLLECTOR_HOST_ROOT` to the actual host path. Compose mounts its
+  `media/` subdirectory and vault root into collector containers.
+- **Chrome (host-side)**: Chrome or Chromium configured for the CDP URL in
+  `CHROME_CDP_URL`. Use a dedicated automation profile and load the Bridge
+  extension from `extension/`; see [Chrome/CDP setup](docs/chrome-setup.md).
 
 ## Installation
 
@@ -119,7 +122,7 @@ The full variable catalogue (names, purposes) lives in the tracked
 | `POSTGRES_USER`, `POSTGRES_PASSWORD` | Yes | none | Postgres credentials |
 | `POSTGRES_HOST_PORT` | No | `5433` | Host-side port for Postgres |
 | `DATABASE_URL` | Yes | none | Full DSN for asyncpg (services reconstruct from POSTGRES_*) |
-| `COLLECTOR_VAULT_ROOT` | Yes | `z:/unifiedcollector` | Media / sidecar mount root |
+| `UNIFIEDCOLLECTOR_HOST_ROOT` | No | `Z:/unifiedcollector` in `.env.example` | Override when the Docker host uses another media/vault path |
 | `RABBITMQ_USER`, `RABBITMQ_PASSWORD` | Yes | none | RabbitMQ credentials for WhatsApp bridge queues |
 | `REDIS_PASSWORD` | Yes | none | Redis auth for realtime feed |
 | `DASHBOARD_ADMIN_USERNAME` | Yes | none | Dashboard login user |
@@ -281,7 +284,7 @@ unifiedcollector/
 ├── SECURITY.md                      Reporting + Dependabot policy
 ├── .env.example                     Monolithic template with all env names
 ├── docker/                          Compose stack + Dockerfiles
-│   ├── docker-compose.yml           29 services
+│   ├── docker-compose.yml           28 default services
 │   ├── Dockerfile*                  5 build targets (collector, dashboard, spiderfoot, backup, whatsapp-bridge)
 │   ├── env/                         Per-service env templates (SEC-003)
 │   ├── patches/                     Runtime patches for GHunt + SpiderFoot
@@ -306,8 +309,8 @@ unifiedcollector/
 │   ├── db/
 │   │   ├── connection.py            asyncpg pool factory (with IIT timeout)
 │   │   ├── migrate.py               Ledger-tracked migration runner
-│   │   ├── schemas/                 14 base schema files
-│   │   └── migrations/              124 migration files (+ _archive/ subdir)
+│   │   ├── schemas/                 13 base schema files
+│   │   └── migrations/              133 migration files (+ _archive/ subdir)
 │   ├── bots/onboard_bot.py          Telegram onboarding bot
 │   ├── tools/browser_cookie_vault.py CDP snapshot loop
 │   └── worker/__init__.py           WorkerService supervisor

@@ -1,71 +1,46 @@
-# Chrome/CDP Setup for UnifiedCollector
+# Chrome/CDP setup for UnifiedCollector
 
-## Overview
+The `browser_cookie_vault` service connects to a host-side Chrome-compatible
+browser through the Chrome DevTools Protocol (CDP). Configure Chrome with a
+dedicated automation profile and a remote-debugging port; do not point the
+collector at a personal browser profile.
 
-The `browser_cookie_vault` service snapshots cookies from a long-lived Chrome instance via CDP (Chrome DevTools Protocol). This document describes the required Chrome setup.
+## Endpoint and profile
 
-## Required Configuration
+The Compose stack sets `CHROME_CDP_URL` to
+`http://host.docker.internal:9336` by default. The standalone Python module's
+fallback is port 9222, so configure the URL explicitly when running outside
+Compose. Keep the URL and Chrome's `--remote-debugging-port` in sync.
 
-### Chrome Launch Command
+Example launch shape (choose a private profile directory on the host):
 
-```bash
+```sh
 google-chrome \
-  --headless \
-  --remote-debugging-port=9222 \
-  --user-data-dir=/home/bryan/.config/chrome-collector \
-  --no-sandbox
+  --remote-debugging-port=9336 \
+  --user-data-dir="<dedicated-collector-profile>"
 ```
 
-### Key Requirements
+## Extension
 
-| Setting | Value | Why |
-|---------|-------|-----|
-| Profile | `/home/bryan/.config/chrome-collector` | Dedicated profile — do NOT use the main browser profile |
-| CDP Port | `9222` | The vault connects to `http://localhost:9222` |
-| Headless | Yes | No UI needed; runs in background |
-| Extension | Auto-loaded from `~/Projects/unifiedcollector/extension/dist/` | Provides cookie access for Meta/X/TikTok domains |
+Load the UnifiedCollector Bridge from the repository's `extension/` directory,
+which contains `manifest.json` and the built scripts under `dist/`:
 
-### Extension Setup
+1. Open `chrome://extensions/` in the automation profile.
+2. Enable Developer mode.
+3. Select **Load unpacked** and choose `extension/`.
 
-The UnifiedCollector Bridge extension (v1.23.104) must be loaded:
+The tracked manifest currently declares extension version `1.23.104`.
 
-**Manual (one-time):**
-1. Open `chrome://extensions/` in the collector Chrome profile
-2. Enable Developer Mode
-3. Load unpacked: `/home/bryan/Projects/unifiedcollector/extension/dist/`
+## Verification and recovery
 
-**Note:** Enterprise policy install via `/etc/opt/chrome/policies/managed/` does NOT work for local `file://` CRX files. Use manual load.
+Check the configured CDP endpoint from the host:
 
-## What Happens If Chrome Is Not Running
-
-The `browser_cookie_vault` will:
-1. Attempt CDP connection for up to 30 seconds on startup
-2. If unreachable, log: `Chrome not reachable — launch with: google-chrome --headless --remote-debugging-port=9222 --user-data-dir=/home/bryan/.config/chrome-collector`
-3. **Exit with error** (fail-fast) — it will NOT retry 70 times
-
-This is intentional (Fudan pattern): fail fast with a clear message rather than retrying indefinitely against a missing dependency.
-
-## Verification
-
-```bash
-# Check CDP is responding
-curl -s http://localhost:9222/json/version | head -c 100
-
-# Check vault logs
-docker logs unifiedcollector_browser_cookie_vault --tail 20
+```sh
+curl -s http://localhost:9336/json/version
 ```
 
-## Troubleshooting
-
-| Symptom | Cause | Fix |
-|---------|-------|-----|
-| "Chrome not reachable" on startup | Chrome not running | Launch with the command above |
-| "Chrome unreachable, attempt=N" in logs | Chrome died or port blocked | Restart Chrome, check port 9222 |
-| Extension not loading | Wrong profile | Ensure `--user-data-dir` points to chrome-collector |
-
-## Architecture Notes
-
-- The vault runs in Docker and connects via `host.docker.internal:9222`
-- Chrome ≥128 enforces DNS-rebinding protection: the vault sends `Host: localhost:9222` header
-- Cookie snapshots are stored in `credentials/browser_cookies/latest.json`
-- Restore is explicit only (`python -m src.tools.browser_cookie_vault restore`)
+The Compose service exposes its health endpoint on port 8790. Cookie snapshots
+are stored under `credentials/browser_cookies/`; restoration is an explicit
+operator action through `python -m src.tools.browser_cookie_vault restore`.
+If CDP is unreachable, confirm Chrome is running with the configured port and
+that the container can reach the host through `host.docker.internal`.

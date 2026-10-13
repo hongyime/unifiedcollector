@@ -71,7 +71,7 @@ from src.collectors.tiktok.parse import safe_int as _parse_safe_int, to_dt as _p
 from src.core.file_naming import sanitize_name
 from src.core.proximity import refresh_account_proximity_cache
 from src.core.rate_limit_events import record_rate_limit_event
-from src.core.vault import VAULT_ROOT, write_atomic_artifact
+from src.core.vault import VAULT_ROOT, write_atomic_artifact, write_atomic_artifact_from_path
 from src.core.user_change_tracker import (
     UserChangeTracker,
     TIKTOK_TRACKED_FIELDS,
@@ -2028,7 +2028,7 @@ class TiktokCollector(BaseCollector):
             # all media files are duplicates. Let the worker watchdog see that.
             self._progress_count += max(1, post_count)
 
-        # Pass 2: copy media files into our store (existing behavior).
+        # Pass 2: stream media files from the temp directory into the vault.
         for f in Path(tmpdir).rglob("*"):
             if self._stop.is_set(): break
             if not f.is_file(): continue
@@ -2041,7 +2041,6 @@ class TiktokCollector(BaseCollector):
             cid = cid.split()[0][:100] if cid else cid
             if self.is_known(cid): continue
 
-            data = f.read_bytes()
             content_type = "video" if ext in ("mp4", "webm") else "post"
 
             await self.download_media({
@@ -2049,7 +2048,7 @@ class TiktokCollector(BaseCollector):
                 "entity_name": username,
                 "content_type": content_type,
                 "content_id": cid,
-                "data": data,
+                "source_path": f,
                 "extension": ext if ext != "jpeg" else "jpg",
             })
             await asyncio.sleep(random.uniform(self._min_sleep, self._max_sleep))
@@ -2288,7 +2287,10 @@ class TiktokCollector(BaseCollector):
         )
 
         try:
-            if "data" in item:
+            source_path = item.get("source_path")
+            if source_path:
+                data = None
+            elif "data" in item:
                 data = item["data"]
             elif "url" in item:
                 await self.wait_rate_limit("tiktok.com")
@@ -2298,7 +2300,7 @@ class TiktokCollector(BaseCollector):
                     data = resp.content
             else: return
 
-            sha = (
+            sha = None if source_path else (
                 _dedupe_sha256_bytes(data) if _dedupe_sha256_bytes is not None
                 else self.sha256_bytes(data)
             )
@@ -2312,21 +2314,33 @@ class TiktokCollector(BaseCollector):
                 "raw": item.get("raw", {}),
                 "rebuild_target_tables": ["media_items", "tiktok_posts", "tiktok_profiles"],
             }
-            artifact = write_atomic_artifact(
-                source=self.SOURCE_NAME,
-                artifact_id=cid,
-                artifact_kind="media_blob",
-                data=data,
-                extension=item.get("extension", "mp4"),
-                expected_sha256=sha,
-                metadata={
-                    **metadata,
-                    "filename": filename,
-                    "source_url": source_url,
-                    "request_url": item.get("url"),
-                },
-                root=VAULT_ROOT,
-            )
+            artifact_metadata = {
+                **metadata,
+                "filename": filename,
+                "source_url": source_url,
+                "request_url": item.get("url"),
+            }
+            if source_path:
+                artifact = write_atomic_artifact_from_path(
+                    source=self.SOURCE_NAME,
+                    artifact_id=cid,
+                    artifact_kind="media_blob",
+                    source_path=source_path,
+                    extension=item.get("extension", "mp4"),
+                    metadata=artifact_metadata,
+                    root=VAULT_ROOT,
+                )
+            else:
+                artifact = write_atomic_artifact(
+                    source=self.SOURCE_NAME,
+                    artifact_id=cid,
+                    artifact_kind="media_blob",
+                    data=data,
+                    extension=item.get("extension", "mp4"),
+                    expected_sha256=sha,
+                    metadata=artifact_metadata,
+                    root=VAULT_ROOT,
+                )
             if not artifact.path:
                 raise RuntimeError(f"vault artifact write failed: {artifact.error}")
             metadata["vault_artifact"] = {

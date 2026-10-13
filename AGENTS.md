@@ -140,7 +140,7 @@ not assume one shared MCP config is read by every agent.
 - **Secondary**: 目标仓库保留仓库特定覆盖（需在 sync 后自行维护）
 
 ### Sync Workflows
-- **仓库设置与通用配置**：[`sync-repo-settings.yml`](<kfile name="sync-repo-settings.yml" path=".github/workflows/sync-repo-settings.yml">.github/workflows/sync-repo-settings.yml</kfile>) 负责传播 GitHub Actions、Dependabot、labels、`AGENTS.md` 等
+- **仓库设置与通用配置**：sourcerepo 中的 `sync-repo-settings.yml` 负责传播 GitHub Actions、Dependabot、labels、`AGENTS.md` 等；该源仓库 workflow 不存在于目标仓库的工作树中。
 
 ### Sync Process
 1. 在 sourcerepo 中修改通用配置

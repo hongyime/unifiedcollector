@@ -1,14 +1,13 @@
 # UnifiedCollector Bridge (Chrome MV3 extension)
 
-Collects social media using **your logged-in Chrome session** and forwards it to
-the local collector. Because the content script runs *on* the social site, its API
-calls are **same-origin** and carry your real session cookies + browser
-fingerprint — so it bypasses the login wall / rate-limiting that the headless
-collectors hit, with a much lower ban profile (it looks like genuine browsing).
+Collects browser-visible social content using the logged-in browser session and
+forwards it to the local collector. Requests run in the site's page context;
+source rate limits, login walls and challenges still apply.
 
-**Multi-platform:** scrapers live in a `PLATFORMS` registry in `content.js`.
-**Instagram** is implemented; others (TikTok, Twitter/X, …) can be added without
-touching the rest — see "Adding a platform" below.
+**Multi-platform:** the scraper registry is in `extension/src/content.ts`.
+Current page scrapers are Instagram, Threads, TikTok, X, Facebook and Strava.
+Lemon8 is available as a no-login browser tab, while broader Lemon8 collection
+uses the headless collector.
 
 **Observability (popup):** dark-mode popup with a live **Status** panel (worker
 alive, social tab open, ingest connected, cycle cadence + next wake, last-cycle
@@ -18,47 +17,43 @@ A branded icon ships in `icons/`.
 **Social tab launcher (`tabs.html`):** a dark page (popup → "🗂 Manage social
 tabs", or right-click the icon → Options) that lists every platform with live
 status — **tab open?** and **logged in?** (detected via each platform's auth
-cookie) — plus **Open / Open all** buttons. Open them once, log in, and the
-bridge scrapes from those pinned tabs. Platforms come from `platforms.js`
-(Instagram = scraper active; TikTok/Lemon8/X/Facebook/Threads = login-ready).
+cookie) — plus **Open / Open all** buttons. Open the platforms you want to
+collect and sign in where required. Tab/login requirements are listed in
+`extension/src/shared/platforms.ts`.
 
 ## Architecture
 
 ```
-[instagram.com tab]  content.js  --(scrape via IG api/v1, session cookies)-->  IG
+[platform tab]  content script  --(page/session capture)-->  browser evidence
         |  (chrome.runtime messages)
         v
-   background.js (service worker)  --(HTTP)-->  instagram_ingest.py (collector)  -->  media drive + media_items
-        ^
-        |  chrome.alarms every N min triggers a scrape cycle
+   background service worker  --(HTTP)-->  ig_ingest bridge (:8765)
+                                      --> Collector database + media vault
 ```
 
 Same consumer pattern as the WhatsApp/Beeper bridges: an external local service
 feeds the collector over a local HTTP endpoint.
 
-## Setup (zero-config — install + leave a tab open)
+## Setup
 
-1. **Ingest server**: runs automatically as the `instagram_ingest` docker service
-   (auto-restart, publishes `127.0.0.1:8765`). It comes up with the stack:
+1. **Ingest server**: runs as the `instagram_ingest` service in
+   `docker/docker-compose.yml` and listens on port 8765. Start it with:
    ```
-   docker compose up -d instagram_ingest
+   docker compose -f docker/docker-compose.yml up -d instagram_ingest
    ```
-   No manual host process. Code edits apply with `docker restart
-   unifiedcollector_instagram_ingest` (live `../src` mount, no image rebuild).
+   The service uses the bind-mounted `src/bridges/ig_ingest/` package.
 
 2. **Load the extension** (once): `chrome://extensions` → **Developer mode** →
    **Load unpacked** → select this `extension/` folder.
 
-3. **Keep one instagram.com tab open/pinned, logged in.** That's it — **no popup
-   configuration needed.** Defaults already point at `http://127.0.0.1:8765` and
-   auto-run a scrape cycle every 30 min via `chrome.alarms`. (The popup is only
-   there if you ever want to change the endpoint/interval or hit "Scrape now".)
+3. **Open a tab for each platform you want to collect.** Sign in where the
+   platform requires it. The extension uses its configured local endpoint,
+   defaulting to `http://127.0.0.1:8765`.
 
-Targets come from `collection_targets` (your seeds) plus spider-discovered
-profiles; scraped media lands in `media_items` + the media drive like every other
-source.
+Instagram and other platform targets come from their source queues and
+discovery paths. Captured media lands in `media_items` and the shared vault.
 
-## 2-hop spider (friends-of-friends)
+## Instagram two-hop spider (friends-of-friends)
 
 The extension doesn't just scrape your fixed seed list — for any profile at
 **hop < 2** it also harvests that profile's followers + following and POSTs them
@@ -74,10 +69,10 @@ skipped** — we crawl your network, not celebrities. Tune via env on the
 
 - **Service worker is ephemeral** → scraping is driven from the content script on
   a live IG tab, nudged by `chrome.alarms` (not a persistent background loop).
-- **Endpoints drift**: IG rotates internal API params periodically. If
+- **Endpoints drift**: Instagram rotates internal API params periodically. If
   `web_profile_info` / `feed/user` stop returning data, open DevTools → Network →
   Fetch/XHR while scrolling a profile, copy the current request, and update the
-  URLs in `content.js`.
+  URLs in `extension/src/content.ts`.
 - **Pace it**: there are randomized delays between pages/profiles. Don't crank
   them down — behavioural detection can still action even a real session.
 - **One account = one point of failure.** Use a throwaway/secondary IG login.
@@ -111,20 +106,17 @@ chrome.storage.local.set({
 Do not shorten Instagram aggressively. The 45-minute default is deliberate: repeated
 early probes extend the IP/account throttle window and raise ban risk.
 
-## Adding a platform
-1. Add an object to the `PLATFORMS` registry in `content.js` with a `host`
-   matcher, a `label`, and an `async runCycle()` returning `{targets, saved,
-   discovered}` (use `clog(level, msg, label)` to surface progress in the popup).
-2. Add the site to `content_scripts.matches` + `host_permissions` in
-   `manifest.json`, and to `SOCIAL_URLS` in `background.js`.
-3. Add the matching collector-side ingest endpoints (mirror `/ig/targets`,
-   `/ig/ingest`, `/ig/discover`).
+## Platform registry and files
 
-## Files
-- `manifest.json` — MV3 manifest (host_permissions for instagram.com + localhost)
-- `content.js` — scrapes a profile's media via IG's session API
-- `background.js` — service worker: alarms + relays to the ingest endpoint
-- `popup.html` / `popup.js` — config + "Scrape now"
-- `../src/bridges/instagram_ingest.py` — collector-side ingest server
+Platform metadata and login detection live in `src/shared/platforms.ts`; page
+capture lives in `src/content.ts`. The extension build emits the scripts loaded
+by `manifest.json` under `dist/`.
+
+- `manifest.json` — MV3 manifest and content-script permissions
+- `src/content.ts` — platform page capture and scrape cycles
+- `src/background.ts` — service worker and local bridge delivery
+- `src/shared/` — platform metadata, cooldowns, logging and ingest client
+- `src/popup.ts`, `src/tabs.ts` — popup and platform-tab management
+- `../src/bridges/ig_ingest/` — collector-side aiohttp ingest package
 
 <!-- extension version is auto-bumped by scripts/hooks/pre-commit on any extension change. -->

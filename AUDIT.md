@@ -1,5 +1,10 @@
 # Codebase Audit
 
+> This is a point-in-time audit of the commit and live probe recorded below.
+> Runtime counts, database measurements and issue statuses are historical, not
+> a current health report. For the current source map, see
+> [docs/architecture.md](docs/architecture.md).
+
 ## 0. Run Metadata
 
 | Field | Value |

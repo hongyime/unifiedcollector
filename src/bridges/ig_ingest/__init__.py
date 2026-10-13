@@ -1012,8 +1012,59 @@ def _browser_revisit_priority(platform: str, item: dict | None, outcome: str) ->
     return 60
 
 
-async def _record_tiktok_browser_candidate(
-    pool,
+_TIKTOK_BROWSER_MEDIA_CANDIDATE_UPSERT_SQL = """
+INSERT INTO tiktok_browser_media_candidates
+  (content_id, username, source_url, url_hash, asset_role,
+   content_type, width, height, file_size, mime_type,
+   extension_version, ingest_mode, outcome, reason,
+   needs_revisit, metadata)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb)
+ON CONFLICT (content_id, url_hash, ingest_mode) DO UPDATE SET
+  username = COALESCE(EXCLUDED.username, tiktok_browser_media_candidates.username),
+  source_url = EXCLUDED.source_url,
+  asset_role = COALESCE(EXCLUDED.asset_role, tiktok_browser_media_candidates.asset_role),
+  content_type = COALESCE(EXCLUDED.content_type, tiktok_browser_media_candidates.content_type),
+  width = COALESCE(EXCLUDED.width, tiktok_browser_media_candidates.width),
+  height = COALESCE(EXCLUDED.height, tiktok_browser_media_candidates.height),
+  file_size = COALESCE(EXCLUDED.file_size, tiktok_browser_media_candidates.file_size),
+  mime_type = COALESCE(EXCLUDED.mime_type, tiktok_browser_media_candidates.mime_type),
+  extension_version = COALESCE(EXCLUDED.extension_version, tiktok_browser_media_candidates.extension_version),
+  outcome = EXCLUDED.outcome,
+  reason = EXCLUDED.reason,
+  needs_revisit = EXCLUDED.needs_revisit,
+  metadata = tiktok_browser_media_candidates.metadata || EXCLUDED.metadata,
+  attempts = tiktok_browser_media_candidates.attempts + 1,
+  last_seen = now()
+WHERE tiktok_browser_media_candidates.outcome IS DISTINCT FROM 'stored'
+   OR EXCLUDED.outcome = 'stored'
+"""
+
+_TIKTOK_BROWSER_REVISIT_UPSERT_SQL = """
+INSERT INTO tiktok_browser_revisit_queue
+  (content_id, username, post_url, source_url, reason, priority, metadata)
+VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)
+ON CONFLICT (content_id) DO UPDATE SET
+  username = COALESCE(EXCLUDED.username, tiktok_browser_revisit_queue.username),
+  post_url = COALESCE(EXCLUDED.post_url, tiktok_browser_revisit_queue.post_url),
+  source_url = COALESCE(EXCLUDED.source_url, tiktok_browser_revisit_queue.source_url),
+  reason = EXCLUDED.reason,
+  priority = GREATEST(tiktok_browser_revisit_queue.priority, EXCLUDED.priority),
+  status = CASE
+    WHEN tiktok_browser_revisit_queue.status = 'completed'
+      THEN tiktok_browser_revisit_queue.status
+    ELSE 'pending'
+  END,
+  next_visit_at = CASE
+    WHEN tiktok_browser_revisit_queue.status = 'completed'
+      THEN tiktok_browser_revisit_queue.next_visit_at
+    ELSE LEAST(tiktok_browser_revisit_queue.next_visit_at, now())
+  END,
+  metadata = tiktok_browser_revisit_queue.metadata || EXCLUDED.metadata,
+  updated_at = now()
+"""
+
+
+def _prepare_tiktok_browser_candidate(
     username: str | None,
     item: dict | None,
     *,
@@ -1022,12 +1073,12 @@ async def _record_tiktok_browser_candidate(
     reject_stats: dict | None = None,
     extension_version: str | None = None,
     browser_result: dict | None = None,
-) -> None:
+) -> tuple[tuple, tuple | None] | None:
     if not isinstance(item, dict):
-        return
+        return None
     url = str(item.get("url") or "").strip()
     if not url:
-        return
+        return None
     content_id = str(item.get("content_id") or _url_hash(url)[:32])[:300]
     meta = _item_meta(item)
     ext_version = extension_version or str(meta.get("extension_version") or "") or None
@@ -1052,98 +1103,40 @@ async def _record_tiktok_browser_candidate(
         metadata["reject_stats"] = reject_stats
     if browser_result:
         metadata["browser_result"] = browser_result
-    try:
-        async with pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO tiktok_browser_media_candidates
-                  (content_id, username, source_url, url_hash, asset_role,
-                   content_type, width, height, file_size, mime_type,
-                   extension_version, ingest_mode, outcome, reason,
-                   needs_revisit, metadata)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb)
-                ON CONFLICT (content_id, url_hash, ingest_mode) DO UPDATE SET
-                  username = COALESCE(EXCLUDED.username, tiktok_browser_media_candidates.username),
-                  source_url = EXCLUDED.source_url,
-                  asset_role = COALESCE(EXCLUDED.asset_role, tiktok_browser_media_candidates.asset_role),
-                  content_type = COALESCE(EXCLUDED.content_type, tiktok_browser_media_candidates.content_type),
-                  width = COALESCE(EXCLUDED.width, tiktok_browser_media_candidates.width),
-                  height = COALESCE(EXCLUDED.height, tiktok_browser_media_candidates.height),
-                  file_size = COALESCE(EXCLUDED.file_size, tiktok_browser_media_candidates.file_size),
-                  mime_type = COALESCE(EXCLUDED.mime_type, tiktok_browser_media_candidates.mime_type),
-                  extension_version = COALESCE(EXCLUDED.extension_version, tiktok_browser_media_candidates.extension_version),
-                  outcome = EXCLUDED.outcome,
-                  reason = EXCLUDED.reason,
-                  needs_revisit = EXCLUDED.needs_revisit,
-                  metadata = tiktok_browser_media_candidates.metadata || EXCLUDED.metadata,
-                  attempts = tiktok_browser_media_candidates.attempts + 1,
-                  last_seen = now()
-                WHERE tiktok_browser_media_candidates.outcome IS DISTINCT FROM 'stored'
-                   OR EXCLUDED.outcome = 'stored'
-                """,
-                content_id,
-                username,
-                url[:2000],
-                _url_hash(url),
-                _tiktok_asset_role(item),
-                str(item.get("content_type") or "")[:40] or None,
-                width,
-                height,
-                file_size,
-                str(mime_type)[:120] if mime_type else None,
-                ext_version,
-                ingest_mode,
-                outcome,
-                reason,
-                needs_revisit,
-                json.dumps(metadata, default=str),
-            )
-            if needs_revisit:
-                await conn.execute(
-                    """
-                    INSERT INTO tiktok_browser_revisit_queue
-                      (content_id, username, post_url, source_url, reason,
-                       priority, metadata)
-                    VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)
-                    ON CONFLICT (content_id) DO UPDATE SET
-                      username = COALESCE(EXCLUDED.username, tiktok_browser_revisit_queue.username),
-                      post_url = COALESCE(EXCLUDED.post_url, tiktok_browser_revisit_queue.post_url),
-                      source_url = COALESCE(EXCLUDED.source_url, tiktok_browser_revisit_queue.source_url),
-                      reason = EXCLUDED.reason,
-                      priority = GREATEST(tiktok_browser_revisit_queue.priority, EXCLUDED.priority),
-                      status = CASE
-                        WHEN tiktok_browser_revisit_queue.status = 'completed'
-                          THEN tiktok_browser_revisit_queue.status
-                        ELSE 'pending'
-                      END,
-                      next_visit_at = CASE
-                        WHEN tiktok_browser_revisit_queue.status = 'completed'
-                          THEN tiktok_browser_revisit_queue.next_visit_at
-                        ELSE LEAST(tiktok_browser_revisit_queue.next_visit_at, now())
-                      END,
-                      metadata = tiktok_browser_revisit_queue.metadata || EXCLUDED.metadata,
-                      updated_at = now()
-                    """,
-                    content_id,
-                    username,
-                    post_url,
-                    url[:2000],
-                    reason or outcome,
-                    priority,
-                    json.dumps(metadata, default=str),
-                )
-    except Exception:
-        logger.debug(
-            "tiktok browser media candidate record failed content_id=%s mode=%s",
+    candidate_args = (
+        content_id,
+        username,
+        url[:2000],
+        _url_hash(url),
+        _tiktok_asset_role(item),
+        str(item.get("content_type") or "")[:40] or None,
+        width,
+        height,
+        file_size,
+        str(mime_type)[:120] if mime_type else None,
+        ext_version,
+        ingest_mode,
+        outcome,
+        reason,
+        needs_revisit,
+        json.dumps(metadata, default=str),
+    )
+    revisit_args = None
+    if needs_revisit:
+        revisit_args = (
             content_id,
-            ingest_mode,
-            exc_info=True,
+            username,
+            post_url,
+            url[:2000],
+            reason or outcome,
+            priority,
+            json.dumps(metadata, default=str),
         )
+    return candidate_args, revisit_args
 
 
-async def _record_browser_media_candidate(
+async def _record_tiktok_browser_candidate(
     pool,
-    platform: str,
     username: str | None,
     item: dict | None,
     *,
@@ -1153,11 +1146,102 @@ async def _record_browser_media_candidate(
     extension_version: str | None = None,
     browser_result: dict | None = None,
 ) -> None:
-    if platform not in KNOWN_PLATFORMS or not isinstance(item, dict):
+    prepared = _prepare_tiktok_browser_candidate(
+        username,
+        item,
+        ingest_mode=ingest_mode,
+        saved=saved,
+        reject_stats=reject_stats,
+        extension_version=extension_version,
+        browser_result=browser_result,
+    )
+    if prepared is None:
         return
+    candidate_args, revisit_args = prepared
+    content_id = candidate_args[0]
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(_TIKTOK_BROWSER_MEDIA_CANDIDATE_UPSERT_SQL, *candidate_args)
+            if revisit_args is not None:
+                await conn.execute(_TIKTOK_BROWSER_REVISIT_UPSERT_SQL, *revisit_args)
+    except Exception:
+        logger.debug(
+            "tiktok browser media candidate record failed content_id=%s mode=%s",
+            content_id,
+            ingest_mode,
+            exc_info=True,
+        )
+
+
+_BROWSER_MEDIA_CANDIDATE_UPSERT_SQL = """
+INSERT INTO browser_media_candidates
+  (platform, content_id, username, source_url, url_hash, asset_role,
+   content_type, width, height, file_size, mime_type,
+   extension_version, ingest_mode, outcome, reason,
+   needs_revisit, metadata)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17::jsonb)
+ON CONFLICT (platform, content_id, url_hash, ingest_mode) DO UPDATE SET
+  username = COALESCE(EXCLUDED.username, browser_media_candidates.username),
+  source_url = EXCLUDED.source_url,
+  asset_role = COALESCE(EXCLUDED.asset_role, browser_media_candidates.asset_role),
+  content_type = COALESCE(EXCLUDED.content_type, browser_media_candidates.content_type),
+  width = COALESCE(EXCLUDED.width, browser_media_candidates.width),
+  height = COALESCE(EXCLUDED.height, browser_media_candidates.height),
+  file_size = COALESCE(EXCLUDED.file_size, browser_media_candidates.file_size),
+  mime_type = COALESCE(EXCLUDED.mime_type, browser_media_candidates.mime_type),
+  extension_version = COALESCE(EXCLUDED.extension_version, browser_media_candidates.extension_version),
+  outcome = EXCLUDED.outcome,
+  reason = EXCLUDED.reason,
+  needs_revisit = EXCLUDED.needs_revisit,
+  metadata = browser_media_candidates.metadata || EXCLUDED.metadata,
+  attempts = browser_media_candidates.attempts + 1,
+  last_seen = now()
+WHERE browser_media_candidates.outcome IS DISTINCT FROM 'stored'
+   OR EXCLUDED.outcome = 'stored'
+"""
+
+_BROWSER_MEDIA_REVISIT_UPSERT_SQL = """
+INSERT INTO browser_media_revisit_queue
+  (platform, content_id, username, post_url, source_url, reason,
+   priority, metadata)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb)
+ON CONFLICT (platform, content_id) DO UPDATE SET
+  username = COALESCE(EXCLUDED.username, browser_media_revisit_queue.username),
+  post_url = COALESCE(EXCLUDED.post_url, browser_media_revisit_queue.post_url),
+  source_url = COALESCE(EXCLUDED.source_url, browser_media_revisit_queue.source_url),
+  reason = EXCLUDED.reason,
+  priority = GREATEST(browser_media_revisit_queue.priority, EXCLUDED.priority),
+  status = CASE
+    WHEN browser_media_revisit_queue.status = 'completed'
+      THEN browser_media_revisit_queue.status
+    ELSE 'pending'
+  END,
+  next_visit_at = CASE
+    WHEN browser_media_revisit_queue.status = 'completed'
+      THEN browser_media_revisit_queue.next_visit_at
+    ELSE LEAST(browser_media_revisit_queue.next_visit_at, now())
+  END,
+  metadata = browser_media_revisit_queue.metadata || EXCLUDED.metadata,
+  updated_at = now()
+"""
+
+
+def _prepare_browser_media_candidate(
+    platform: str,
+    username: str | None,
+    item: dict | None,
+    *,
+    ingest_mode: str,
+    saved: bool = False,
+    reject_stats: dict | None = None,
+    extension_version: str | None = None,
+    browser_result: dict | None = None,
+) -> tuple[tuple, tuple | None] | None:
+    if platform not in KNOWN_PLATFORMS or not isinstance(item, dict):
+        return None
     url = str(item.get("url") or "").strip()
     if not url:
-        return
+        return None
     content_id = str(item.get("content_id") or _url_hash(url)[:32])[:300]
     meta = _item_meta(item)
     ext_version = extension_version or str(meta.get("extension_version") or "") or None
@@ -1181,110 +1265,98 @@ async def _record_browser_media_candidate(
         metadata["reject_stats"] = reject_stats
     if browser_result:
         metadata["browser_result"] = browser_result
-    try:
-        async with pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO browser_media_candidates
-                  (platform, content_id, username, source_url, url_hash, asset_role,
-                   content_type, width, height, file_size, mime_type,
-                   extension_version, ingest_mode, outcome, reason,
-                   needs_revisit, metadata)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17::jsonb)
-                ON CONFLICT (platform, content_id, url_hash, ingest_mode) DO UPDATE SET
-                  username = COALESCE(EXCLUDED.username, browser_media_candidates.username),
-                  source_url = EXCLUDED.source_url,
-                  asset_role = COALESCE(EXCLUDED.asset_role, browser_media_candidates.asset_role),
-                  content_type = COALESCE(EXCLUDED.content_type, browser_media_candidates.content_type),
-                  width = COALESCE(EXCLUDED.width, browser_media_candidates.width),
-                  height = COALESCE(EXCLUDED.height, browser_media_candidates.height),
-                  file_size = COALESCE(EXCLUDED.file_size, browser_media_candidates.file_size),
-                  mime_type = COALESCE(EXCLUDED.mime_type, browser_media_candidates.mime_type),
-                  extension_version = COALESCE(EXCLUDED.extension_version, browser_media_candidates.extension_version),
-                  outcome = EXCLUDED.outcome,
-                  reason = EXCLUDED.reason,
-                  needs_revisit = EXCLUDED.needs_revisit,
-                  metadata = browser_media_candidates.metadata || EXCLUDED.metadata,
-                  attempts = browser_media_candidates.attempts + 1,
-                  last_seen = now()
-                WHERE browser_media_candidates.outcome IS DISTINCT FROM 'stored'
-                   OR EXCLUDED.outcome = 'stored'
-                """,
+    candidate_args = (
+        platform,
+        content_id,
+        username,
+        url[:2000],
+        _url_hash(url),
+        _candidate_asset_role(item, platform),
+        str(item.get("content_type") or "")[:40] or None,
+        width,
+        height,
+        file_size,
+        str(mime_type)[:120] if mime_type else None,
+        ext_version,
+        ingest_mode,
+        outcome,
+        reason,
+        needs_revisit,
+        json.dumps(metadata, default=str),
+    )
+    revisit_args = None
+    if needs_revisit and platform != "tiktok":
+        post_url = _browser_candidate_post_url(platform, item, username)
+        if post_url:
+            revisit_args = (
                 platform,
                 content_id,
                 username,
+                post_url,
                 url[:2000],
-                _url_hash(url),
-                _candidate_asset_role(item, platform),
-                str(item.get("content_type") or "")[:40] or None,
-                width,
-                height,
-                file_size,
-                str(mime_type)[:120] if mime_type else None,
-                ext_version,
-                ingest_mode,
-                outcome,
-                reason,
-                needs_revisit,
+                reason or outcome,
+                _browser_revisit_priority(platform, item, outcome),
                 json.dumps(metadata, default=str),
             )
+    return candidate_args, revisit_args
+
+
+async def _record_browser_media_candidate(
+    pool,
+    platform: str,
+    username: str | None,
+    item: dict | None,
+    *,
+    ingest_mode: str,
+    saved: bool = False,
+    reject_stats: dict | None = None,
+    extension_version: str | None = None,
+    browser_result: dict | None = None,
+) -> None:
+    prepared = _prepare_browser_media_candidate(
+        platform,
+        username,
+        item,
+        ingest_mode=ingest_mode,
+        saved=saved,
+        reject_stats=reject_stats,
+        extension_version=extension_version,
+        browser_result=browser_result,
+    )
+    if prepared is None:
+        return
+    candidate_args, revisit_args = prepared
+    content_id = candidate_args[1]
+    try:
+        async with pool.acquire() as conn:
+            try:
+                await conn.execute(_BROWSER_MEDIA_CANDIDATE_UPSERT_SQL, *candidate_args)
+            except Exception:
+                logger.debug(
+                    "browser media candidate record failed platform=%s content_id=%s mode=%s",
+                    platform,
+                    content_id,
+                    ingest_mode,
+                    exc_info=True,
+                )
+            if revisit_args is not None:
+                try:
+                    await conn.execute(_BROWSER_MEDIA_REVISIT_UPSERT_SQL, *revisit_args)
+                except Exception:
+                    logger.debug(
+                        "browser media revisit queue insert failed platform=%s content_id=%s",
+                        platform,
+                        content_id,
+                        exc_info=True,
+                    )
     except Exception:
         logger.debug(
-            "browser media candidate record failed platform=%s content_id=%s mode=%s",
+            "browser media candidate pool acquire failed platform=%s content_id=%s mode=%s",
             platform,
             content_id,
             ingest_mode,
             exc_info=True,
         )
-
-    if needs_revisit and platform != "tiktok":
-        post_url = _browser_candidate_post_url(platform, item, username)
-        if not post_url:
-            return
-        priority = _browser_revisit_priority(platform, item, outcome)
-        try:
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    """
-                    INSERT INTO browser_media_revisit_queue
-                      (platform, content_id, username, post_url, source_url, reason,
-                       priority, metadata)
-                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb)
-                    ON CONFLICT (platform, content_id) DO UPDATE SET
-                      username = COALESCE(EXCLUDED.username, browser_media_revisit_queue.username),
-                      post_url = COALESCE(EXCLUDED.post_url, browser_media_revisit_queue.post_url),
-                      source_url = COALESCE(EXCLUDED.source_url, browser_media_revisit_queue.source_url),
-                      reason = EXCLUDED.reason,
-                      priority = GREATEST(browser_media_revisit_queue.priority, EXCLUDED.priority),
-                      status = CASE
-                        WHEN browser_media_revisit_queue.status = 'completed'
-                          THEN browser_media_revisit_queue.status
-                        ELSE 'pending'
-                      END,
-                      next_visit_at = CASE
-                        WHEN browser_media_revisit_queue.status = 'completed'
-                          THEN browser_media_revisit_queue.next_visit_at
-                        ELSE LEAST(browser_media_revisit_queue.next_visit_at, now())
-                      END,
-                      metadata = browser_media_revisit_queue.metadata || EXCLUDED.metadata,
-                      updated_at = now()
-                    """,
-                    platform,
-                    content_id,
-                    username,
-                    post_url,
-                    url[:2000],
-                    reason or outcome,
-                    priority,
-                    json.dumps(metadata, default=str),
-                )
-        except Exception:
-            logger.debug(
-                "browser media revisit queue insert failed platform=%s content_id=%s",
-                platform,
-                content_id,
-                exc_info=True,
-            )
 
     if platform == "tiktok":
         await _record_tiktok_browser_candidate(
@@ -1935,6 +2007,10 @@ def _queued_browser_upload_response(platform: str, body: dict) -> dict:
 
 async def _record_browser_media_candidate_batch(app, platform, username, raw_items, extension_version):
     recorded = 0
+    candidate_rows = []
+    revisit_rows = []
+    tiktok_candidate_rows = []
+    tiktok_revisit_rows = []
     for entry in raw_items[:500]:
         if not isinstance(entry, dict):
             continue
@@ -1942,18 +2018,80 @@ async def _record_browser_media_candidate_batch(app, platform, username, raw_ite
         result = entry.get("result") if isinstance(entry.get("result"), dict) else {}
         if not isinstance(item, dict):
             continue
-        await _record_browser_media_candidate(
-            app["pool"],
+        ingest_mode = str(entry.get("ingest_mode") or "browser_upload")[:40]
+        saved = bool(result.get("saved") or result.get("stored"))
+        reject_stats = result.get("reject_stats") if isinstance(result.get("reject_stats"), dict) else None
+        prepared = _prepare_browser_media_candidate(
             platform,
             username,
             item,
-            ingest_mode=str(entry.get("ingest_mode") or "browser_upload")[:40],
-            saved=bool(result.get("saved") or result.get("stored")),
-            reject_stats=result.get("reject_stats") if isinstance(result.get("reject_stats"), dict) else None,
+            ingest_mode=ingest_mode,
+            saved=saved,
+            reject_stats=reject_stats,
             extension_version=extension_version,
             browser_result=result,
         )
         recorded += 1
+        if prepared is not None:
+            candidate_args, revisit_args = prepared
+            candidate_rows.append(candidate_args)
+            if revisit_args is not None:
+                revisit_rows.append(revisit_args)
+        if platform == "tiktok":
+            tiktok_prepared = _prepare_tiktok_browser_candidate(
+                username,
+                item,
+                ingest_mode=ingest_mode,
+                saved=saved,
+                reject_stats=reject_stats,
+                extension_version=extension_version,
+                browser_result=result,
+            )
+            if tiktok_prepared is not None:
+                tiktok_candidate_args, tiktok_revisit_args = tiktok_prepared
+                tiktok_candidate_rows.append(tiktok_candidate_args)
+                if tiktok_revisit_args is not None:
+                    tiktok_revisit_rows.append(tiktok_revisit_args)
+
+    if candidate_rows or revisit_rows or tiktok_candidate_rows or tiktok_revisit_rows:
+        try:
+            async with app["pool"].acquire() as conn:
+                if candidate_rows:
+                    try:
+                        await conn.executemany(_BROWSER_MEDIA_CANDIDATE_UPSERT_SQL, candidate_rows)
+                    except Exception:
+                        logger.debug("browser media candidate batch failed platform=%s count=%d", platform, len(candidate_rows), exc_info=True)
+                        for args in candidate_rows:
+                            try:
+                                await conn.execute(_BROWSER_MEDIA_CANDIDATE_UPSERT_SQL, *args)
+                            except Exception:
+                                logger.debug("browser media candidate record failed platform=%s content_id=%s", platform, args[1], exc_info=True)
+                if revisit_rows:
+                    try:
+                        await conn.executemany(_BROWSER_MEDIA_REVISIT_UPSERT_SQL, revisit_rows)
+                    except Exception:
+                        logger.debug("browser media revisit batch failed platform=%s count=%d", platform, len(revisit_rows), exc_info=True)
+                        for args in revisit_rows:
+                            try:
+                                await conn.execute(_BROWSER_MEDIA_REVISIT_UPSERT_SQL, *args)
+                            except Exception:
+                                logger.debug("browser media revisit record failed platform=%s content_id=%s", platform, args[1], exc_info=True)
+                if tiktok_candidate_rows:
+                    await _executemany_with_fallback(
+                        conn,
+                        _TIKTOK_BROWSER_MEDIA_CANDIDATE_UPSERT_SQL,
+                        tiktok_candidate_rows,
+                        "enqueue TikTok browser media candidates",
+                    )
+                if tiktok_revisit_rows:
+                    await _executemany_with_fallback(
+                        conn,
+                        _TIKTOK_BROWSER_REVISIT_UPSERT_SQL,
+                        tiktok_revisit_rows,
+                        "enqueue TikTok browser revisits",
+                    )
+        except Exception:
+            logger.debug("browser media candidate batch acquire failed platform=%s", platform, exc_info=True)
     if recorded:
         logger.info("browser media candidate ledger[%s] %s: recorded=%d", platform, username, recorded)
 
@@ -2045,6 +2183,24 @@ def _owner_account_for_follow(platform, context, owner):
     return owner_account, direction
 
 
+async def _executemany_with_fallback(conn, query: str, rows: list[tuple], label: str) -> int:
+    if not rows:
+        return 0
+    try:
+        await conn.executemany(query, rows)
+        return len(rows)
+    except Exception:
+        logger.debug("%s batch failed count=%d; retrying rows", label, len(rows), exc_info=True)
+    written = 0
+    for args in rows:
+        try:
+            await conn.execute(query, *args)
+            written += 1
+        except Exception:
+            logger.debug("%s row failed key=%s", label, args[0], exc_info=True)
+    return written
+
+
 async def _enqueue_tiktok_profile_targets(
     conn,
     handles,
@@ -2054,46 +2210,34 @@ async def _enqueue_tiktok_profile_targets(
 ) -> int:
     if not handles:
         return 0
-    added = 0
-    for raw in handles:
-        handle = _tiktok_handle(raw)
-        if not handle:
-            continue
-        try:
-            res = await conn.execute(
-                """
-                INSERT INTO tiktok_spider_queue
-                    (platform_user_id, username, source, priority, status, collected_at)
-                VALUES ($1, $1, $2, $3, 'pending', now())
-                ON CONFLICT (platform_user_id) DO UPDATE SET
-                    username = COALESCE(tiktok_spider_queue.username, EXCLUDED.username),
-                    source = CASE
-                        WHEN tiktok_spider_queue.source = 'manual'
-                            THEN tiktok_spider_queue.source
-                        ELSE EXCLUDED.source
-                    END,
-                    priority = LEAST(
-                        COALESCE(tiktok_spider_queue.priority, EXCLUDED.priority),
-                        EXCLUDED.priority
-                    ),
-                    status = CASE
-                        WHEN tiktok_spider_queue.status IN ('completed', 'failed')
-                            THEN 'pending'
-                        ELSE tiktok_spider_queue.status
-                    END,
-                    collected_at = now()
-                """,
-                handle, source[:50], int(priority),
-            )
-            if res.endswith("1"):
-                added += 1
-        except Exception:
-            logger.debug(
-                "enqueue tiktok profile target failed %s metadata=%s",
-                handle, metadata,
-                exc_info=True,
-            )
-    return added
+    rows = [
+        (handle, source[:50], int(priority))
+        for raw in handles
+        if (handle := _tiktok_handle(raw))
+    ]
+    query = """
+    INSERT INTO tiktok_spider_queue
+        (platform_user_id, username, source, priority, status, collected_at)
+    VALUES ($1, $1, $2, $3, 'pending', now())
+    ON CONFLICT (platform_user_id) DO UPDATE SET
+        username = COALESCE(tiktok_spider_queue.username, EXCLUDED.username),
+        source = CASE
+            WHEN tiktok_spider_queue.source = 'manual'
+                THEN tiktok_spider_queue.source
+            ELSE EXCLUDED.source
+        END,
+        priority = LEAST(
+            COALESCE(tiktok_spider_queue.priority, EXCLUDED.priority),
+            EXCLUDED.priority
+        ),
+        status = CASE
+            WHEN tiktok_spider_queue.status IN ('completed', 'failed')
+                THEN 'pending'
+            ELSE tiktok_spider_queue.status
+        END,
+        collected_at = now()
+    """
+    return await _executemany_with_fallback(conn, query, rows, "enqueue tiktok profile targets")
 
 
 def _lemon8_handle(value) -> str | None:
@@ -2115,45 +2259,33 @@ async def _enqueue_lemon8_profile_targets(
 ) -> int:
     if not handles:
         return 0
-    added = 0
-    for raw in handles:
-        handle = _lemon8_handle(raw)
-        if not handle:
-            continue
-        try:
-            res = await conn.execute(
-                """
-                INSERT INTO lemon8_spider_queue
-                    (platform_user_id, source, priority, status, collected_at)
-                VALUES ($1, $2, $3, 'pending', now())
-                ON CONFLICT (platform_user_id) DO UPDATE SET
-                    source = CASE
-                        WHEN lemon8_spider_queue.source = 'manual'
-                            THEN lemon8_spider_queue.source
-                        ELSE EXCLUDED.source
-                    END,
-                    priority = LEAST(
-                        COALESCE(lemon8_spider_queue.priority, EXCLUDED.priority),
-                        EXCLUDED.priority
-                    ),
-                    status = CASE
-                        WHEN lemon8_spider_queue.status IN ('completed', 'failed')
-                            THEN 'pending'
-                        ELSE lemon8_spider_queue.status
-                    END,
-                    collected_at = now()
-                """,
-                handle, source[:50], int(priority),
-            )
-            if res.endswith("1"):
-                added += 1
-        except Exception:
-            logger.debug(
-                "enqueue lemon8 profile target failed %s metadata=%s",
-                handle, metadata,
-                exc_info=True,
-            )
-    return added
+    rows = [
+        (handle, source[:50], int(priority))
+        for raw in handles
+        if (handle := _lemon8_handle(raw))
+    ]
+    query = """
+    INSERT INTO lemon8_spider_queue
+        (platform_user_id, source, priority, status, collected_at)
+    VALUES ($1, $2, $3, 'pending', now())
+    ON CONFLICT (platform_user_id) DO UPDATE SET
+        source = CASE
+            WHEN lemon8_spider_queue.source = 'manual'
+                THEN lemon8_spider_queue.source
+            ELSE EXCLUDED.source
+        END,
+        priority = LEAST(
+            COALESCE(lemon8_spider_queue.priority, EXCLUDED.priority),
+            EXCLUDED.priority
+        ),
+        status = CASE
+            WHEN lemon8_spider_queue.status IN ('completed', 'failed')
+                THEN 'pending'
+            ELSE lemon8_spider_queue.status
+        END,
+        collected_at = now()
+    """
+    return await _executemany_with_fallback(conn, query, rows, "enqueue lemon8 profile targets")
 
 
 def _x_post_url(author: str | None, post_id: str | None, metadata: dict | None = None) -> str | None:
@@ -2171,38 +2303,30 @@ def _x_post_url(author: str | None, post_id: str | None, metadata: dict | None =
 async def _enqueue_x_profile_targets(conn, handles, source: str, priority: int, metadata: dict | None = None) -> int:
     if not handles:
         return 0
-    added = 0
     meta_json = json.dumps(metadata or {})
-    for raw in handles:
-        handle = _x_handle(raw)
-        if not handle:
-            continue
-        try:
-            res = await conn.execute(
-                """
-                INSERT INTO x_profile_targets (username, source, priority, status, metadata)
-                VALUES ($1, $2, $3, 'pending', $4::jsonb)
-                ON CONFLICT (username) DO UPDATE SET
-                    priority = GREATEST(x_profile_targets.priority, EXCLUDED.priority),
-                    source = CASE
-                        WHEN x_profile_targets.source = 'manual' THEN x_profile_targets.source
-                        ELSE EXCLUDED.source
-                    END,
-                    status = CASE
-                        WHEN x_profile_targets.status IN ('unavailable', 'failed') THEN 'pending'
-                        ELSE x_profile_targets.status
-                    END,
-                    next_visit_at = LEAST(x_profile_targets.next_visit_at, now()),
-                    metadata = x_profile_targets.metadata || EXCLUDED.metadata,
-                    updated_at = now()
-                """,
-                handle, source[:64], int(priority), meta_json,
-            )
-            if res.endswith("1"):
-                added += 1
-        except Exception:
-            logger.debug("enqueue x profile target failed %s", handle, exc_info=True)
-    return added
+    rows = [
+        (handle, source[:64], int(priority), meta_json)
+        for raw in handles
+        if (handle := _x_handle(raw))
+    ]
+    query = """
+    INSERT INTO x_profile_targets (username, source, priority, status, metadata)
+    VALUES ($1, $2, $3, 'pending', $4::jsonb)
+    ON CONFLICT (username) DO UPDATE SET
+        priority = GREATEST(x_profile_targets.priority, EXCLUDED.priority),
+        source = CASE
+            WHEN x_profile_targets.source = 'manual' THEN x_profile_targets.source
+            ELSE EXCLUDED.source
+        END,
+        status = CASE
+            WHEN x_profile_targets.status IN ('unavailable', 'failed') THEN 'pending'
+            ELSE x_profile_targets.status
+        END,
+        next_visit_at = LEAST(x_profile_targets.next_visit_at, now()),
+        metadata = x_profile_targets.metadata || EXCLUDED.metadata,
+        updated_at = now()
+    """
+    return await _executemany_with_fallback(conn, query, rows, "enqueue x profile targets")
 
 
 async def _record_x_edge(
@@ -2658,76 +2782,48 @@ async def _record_users(pool, platform, users, context, owner=None) -> int:
                         await conn.execute(_FOLLOW_EDGES_UPSERT_SQL, *args)
                     except Exception:
                         logger.debug("record follow edge failed %s", args[2], exc_info=True)
-        for r in successful_rows:
-            username = r["username"]
-            try:
-                if platform == "x" and username:
-                    ctx = context_value.lower()
-                    if ctx == "follow":
-                        source, priority = "following", 95
-                    elif ctx == "follower":
-                        source, priority = "follower", 85
-                    elif ctx == "author":
-                        source, priority = "author", 75
-                    else:
-                        source, priority = ctx[:64], 60
-                    await _enqueue_x_profile_targets(
-                        conn,
-                        [username],
-                        source,
-                        priority,
-                        {
-                            "source": "social_users",
-                            "context": context_value,
-                            "owner_account": owner_account,
-                        },
-                    )
-                if platform == "tiktok" and username:
-                    ctx = context_value.lower()
-                    if ctx in {"follow", "following"}:
-                        source, priority = "following", 2
-                    elif ctx == "follower":
-                        source, priority = "follower", 3
-                    elif ctx in {"author", "profile", "post"}:
-                        source, priority = ctx, 3
-                    else:
-                        source, priority = ctx[:50], 4
-                    await _enqueue_tiktok_profile_targets(
-                        conn,
-                        [username],
-                        source,
-                        priority,
-                        {
-                            "source": "social_users",
-                            "context": context_value,
-                            "owner_account": owner_account,
-                        },
-                    )
-                if platform == "lemon8" and username:
-                    ctx = context_value.lower()
-                    if ctx in {"author", "profile", "post"}:
-                        source, priority = ctx, 2
-                    elif ctx in {"follow", "following"}:
-                        source, priority = "following", 2
-                    elif ctx == "follower":
-                        source, priority = "follower", 3
-                    else:
-                        source, priority = ctx[:50], 4
-                    await _enqueue_lemon8_profile_targets(
-                        conn,
-                        [username],
-                        source,
-                        priority,
-                        {
-                            "source": "social_users",
-                            "context": context_value,
-                            "owner_account": owner_account,
-                        },
-                    )
-                if platform == "threads" and username and context_value.lower() != "foryou":
-                    cross_handles.append(username)
-            except Exception:
-                logger.debug("post-user enqueue failed %s", r["uid"], exc_info=True)
+        usernames = [r["username"] for r in successful_rows if r["username"]]
+        ctx = context_value.lower()
+        target_metadata = {
+            "source": "social_users",
+            "context": context_value,
+            "owner_account": owner_account,
+        }
+        try:
+            if platform == "x" and usernames:
+                if ctx == "follow":
+                    source, priority = "following", 95
+                elif ctx == "follower":
+                    source, priority = "follower", 85
+                elif ctx == "author":
+                    source, priority = "author", 75
+                else:
+                    source, priority = ctx[:64], 60
+                await _enqueue_x_profile_targets(conn, usernames, source, priority, target_metadata)
+            elif platform == "tiktok" and usernames:
+                if ctx in {"follow", "following"}:
+                    source, priority = "following", 2
+                elif ctx == "follower":
+                    source, priority = "follower", 3
+                elif ctx in {"author", "profile", "post"}:
+                    source, priority = ctx, 3
+                else:
+                    source, priority = ctx[:50], 4
+                await _enqueue_tiktok_profile_targets(conn, usernames, source, priority, target_metadata)
+            elif platform == "lemon8" and usernames:
+                if ctx in {"author", "profile", "post"}:
+                    source, priority = ctx, 2
+                elif ctx in {"follow", "following"}:
+                    source, priority = "following", 2
+                elif ctx == "follower":
+                    source, priority = "follower", 3
+                else:
+                    source, priority = ctx[:50], 4
+                await _enqueue_lemon8_profile_targets(conn, usernames, source, priority, target_metadata)
+        except Exception:
+            logger.debug("post-user enqueue failed platform=%s context=%s", platform, context_value, exc_info=True)
+        if platform == "threads" and ctx != "foryou":
+            cross_handles.extend(usernames)
         if cross_handles:
             await _cross_seed_instagram(conn, cross_handles, "threads:" + (context_value or "feed"))
     return n

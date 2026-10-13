@@ -27,3 +27,9 @@ def test_startup_delay_ignores_malformed_env_value(monkeypatch):
 
     assert service._source_startup_delay(0) == 0.0
     assert service._source_startup_delay(1) == 3.0
+
+
+def test_instagram_shares_the_social_scrape_mutex():
+    groups = WorkerService.SOURCE_MUTEX_GROUPS
+
+    assert groups["instagram"] == groups["tiktok"] == groups["lemon8"]

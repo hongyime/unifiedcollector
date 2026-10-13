@@ -1,10 +1,24 @@
 # backup-slow-reintroduction.md
 
-Author: agent handoff, 2026-09-19, updated 2026-09-22. Status: Phase A shipped;
-Phase B's first live attempt is CONFIRMED CORRUPT (not merely unverified);
-Phase C gated on a fresh trial. Scheduling is Phase C.
+Author: agent handoff, 2026-09-19, updated 2026-10-13. Status: the recovery
+plan is complete; the older failed attempts and their original status are kept
+below as history.
+
+## Current status — 2026-10-13
+
+- A fresh custom-format archive, `20261012T1602.dump`, completed at
+  7,915,963,290 bytes. The backup runner reported `pg_restore --list` success;
+  a separate PostgreSQL 18 check reported 1,069 table-of-contents entries.
+- The manifest is present. The backup schedule is installed for daily 03:15
+  SGT. The runner and schedule changes were published in commit `0a978f18`.
+- This completes the fresh-trial and scheduling work described in the plan.
+  The failed September artifact remains corrupt and must not be treated as a
+  backup.
 
 ## Current status — 2026-09-22 update (supersedes the 2026-09-19 notes below)
+
+The details in this section record the state before the successful October
+trial; the 2026-10-13 status above supersedes its Phase B and C conclusions.
 
 - **Phase A:** script committed in `a8da528f`; dry-run demonstrates command
   construction only, not throughput or collector impact.

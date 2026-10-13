@@ -1,5 +1,10 @@
 # Repository Map
 
+> Historical point-in-time map: counts, paths and runtime details below describe
+> the commit recorded in Provenance. For the current code-backed architecture,
+> platform coverage and collection boundaries, see
+> [docs/architecture.md](docs/architecture.md).
+
 ## 1. Provenance
 - Repository name / remote: `hongyime/unifiedcollector` — `https://github.com/hongyime/unifiedcollector.git`
 - Commit analyzed: `a0f5ee56960ab4e07c52902bb37cd1e21cf3baf8`

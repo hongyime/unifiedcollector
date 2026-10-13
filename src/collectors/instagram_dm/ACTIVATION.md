@@ -36,10 +36,10 @@ mobile-API implementation lands + a dedicated throwaway account is provisioned.
   from the main IG container.
 - Feature flag (`INSTAGRAM_DM_COLLECTOR_ENABLED`) default false — a boot
   with the flag off is a clean no-op log line.
-- Not registered in `src/collectors/__init__.py::COLLECTORS`; the scheduler
-  cannot schedule it. Runs only when the compose service directly invokes
-  `python -m src.main worker --source instagram_dm` (which is what the
-  compose service `command:` will do once implemented).
+- Registered in `src/collectors/__init__.py::COLLECTORS`; the dedicated
+  Compose service is opt-in under the `instagram-dm` profile and invokes
+  `python -m src.main worker --source instagram_dm`. The feature flag remains
+  false by default, and the mobile-API implementation is still scaffolding.
 
 ## What "activation" means
 

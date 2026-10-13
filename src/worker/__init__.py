@@ -236,9 +236,11 @@ class WorkerService:
     # escalation: a realtime source with no messages arriving is legitimately
     # idle, not wedged.
     REALTIME_SOURCES = frozenset({"whatsapp", "beeper", "telegram"})
+    # These scrapers share public egress and must not overlap platform requests.
     SOURCE_MUTEX_GROUPS = {
-        "lemon8": "bytedance",
-        "tiktok": "bytedance",
+        "lemon8": "shared_social",
+        "tiktok": "shared_social",
+        "instagram": "shared_social",
     }
 
     def __init__(self):

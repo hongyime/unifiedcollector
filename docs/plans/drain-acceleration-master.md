@@ -9,8 +9,9 @@ fsync, so the synchronous-commit tuning branch was skipped. Sprint 5 staging
 also shipped (`b27355c1`, `fe455827`), despite the older "reserve" wording below.
 Scheduler concurrency followed in `bf4a0f55`; the journal records historical
 staging drain from 10,684 to 186 rows. These observations do not certify the
-proposed multi-day soak or every projected throughput target. The current
-operational plan is [backup slow reintroduction](backup-slow-reintroduction.md).
+proposed multi-day soak or every projected throughput target. The separate
+[backup slow reintroduction](backup-slow-reintroduction.md) plan is also
+complete; its earlier failed trials remain documented as history.
 
 Synthesis of 4 parallel research plans. Ordered by build sequence.
 

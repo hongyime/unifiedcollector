@@ -1,10 +1,11 @@
 # Product Requirements Document
 
-Reflects the repository state as of commit `1c1d532c` on branch `main`,
-after the drain-acceleration sprint. All statements below are grounded in
-tracked code, docker-compose service definitions, or live-database
-observations. Anything the maintainer could not verify is prefixed
-`[unverified]`.
+> Historical product and implementation snapshot for commit `1c1d532c` on
+> `main`, after the drain-acceleration sprint. Its service counts, deployment
+> topology and live-database observations do not describe the current stack.
+> For the current code-backed architecture and operational boundaries, see
+> [docs/architecture.md](docs/architecture.md). Within this snapshot, anything
+> the maintainer could not verify is prefixed `[unverified]`.
 
 ## 1. Executive Summary
 

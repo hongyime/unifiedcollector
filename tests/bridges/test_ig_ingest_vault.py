@@ -1627,6 +1627,105 @@ def test_record_users_batches_user_and_follow_edge_upserts():
     ]
 
 
+@pytest.mark.parametrize("platform,table", [
+    ("x", "x_profile_targets"),
+    ("tiktok", "tiktok_spider_queue"),
+    ("lemon8", "lemon8_spider_queue"),
+])
+def test_record_users_batches_profile_target_enqueues(platform, table):
+    pool = _FakePool()
+
+    recorded = asyncio.run(ig_ingest._record_users(
+        pool,
+        platform,
+        [{"username": "alpha"}, {"username": "beta"}],
+        "author",
+    ))
+
+    assert recorded == 2
+    target_calls = [
+        (query, args)
+        for query, args in pool.conn.executemany_calls
+        if f"INSERT INTO {table}" in query
+    ]
+    assert len(target_calls) == 1
+    assert [args[0] for args in target_calls[0][1]] == ["alpha", "beta"]
+    assert not any(f"INSERT INTO {table}" in query for query, _args in pool.conn.executes)
+
+
+def test_browser_media_candidate_batch_uses_batched_candidate_and_revisit_writes():
+    pool = _FakePool()
+    raw_items = [
+        {
+            "item": {
+                "content_id": f"ig_{idx}",
+                "content_type": "video",
+                "url": f"https://instagram.com/p/{idx}/",
+            },
+            "result": {"reason": "http_403"},
+        }
+        for idx in (1, 2)
+    ]
+
+    asyncio.run(ig_ingest._record_browser_media_candidate_batch(
+        {"pool": pool}, "instagram", "alice", raw_items, "1.23.72",
+    ))
+
+    candidate_calls = [
+        (query, args)
+        for query, args in pool.conn.executemany_calls
+        if "INSERT INTO browser_media_candidates" in query
+    ]
+    revisit_calls = [
+        (query, args)
+        for query, args in pool.conn.executemany_calls
+        if "INSERT INTO browser_media_revisit_queue" in query
+    ]
+    assert len(candidate_calls) == 1
+    assert len(candidate_calls[0][1]) == 2
+    assert len(revisit_calls) == 1
+    assert len(revisit_calls[0][1]) == 2
+
+
+def test_tiktok_browser_media_candidate_batch_uses_batched_specialized_writes():
+    pool = _FakePool()
+    raw_items = [
+        {
+            "item": {
+                "content_id": f"tt_{idx}",
+                "content_type": "video",
+                "url": f"https://www.tiktok.com/@alice/video/{idx}",
+            },
+            "result": {"reason": "http_403"},
+        }
+        for idx in (1, 2)
+    ]
+
+    asyncio.run(ig_ingest._record_browser_media_candidate_batch(
+        {"pool": pool}, "tiktok", "alice", raw_items, "1.23.72",
+    ))
+
+    candidate_calls = [
+        (query, args)
+        for query, args in pool.conn.executemany_calls
+        if "INSERT INTO tiktok_browser_media_candidates" in query
+    ]
+    revisit_calls = [
+        (query, args)
+        for query, args in pool.conn.executemany_calls
+        if "INSERT INTO tiktok_browser_revisit_queue" in query
+    ]
+    assert len(candidate_calls) == 1
+    assert len(candidate_calls[0][1]) == 2
+    assert len(revisit_calls) == 1
+    assert len(revisit_calls[0][1]) == 2
+    assert not any(
+        "INSERT INTO tiktok_browser_media_candidates" in query
+        or "INSERT INTO tiktok_browser_revisit_queue" in query
+        for query, _args in pool.conn.executes
+    )
+
+
 def test_targets_refresh_side_caches_once_per_ttl(monkeypatch):
     calls = []
 

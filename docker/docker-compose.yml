@@ -922,7 +922,7 @@ services:
     restart: unless-stopped
 
   # ⚠️ BAN-RISK COLLECTOR — DO NOT ENABLE WITHOUT READING THE ACTIVATION RUNBOOK ⚠️
-  # docs/handoff/INSTAGRAM_DM_ACTIVATION.md explains the 3-step activation
+  # src/collectors/instagram_dm/ACTIVATION.md explains the activation sequence
   # (implement code / set flag+creds / start container) and the isolation
   # invariants this service preserves.
   #

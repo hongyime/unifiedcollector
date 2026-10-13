@@ -1,8 +1,8 @@
 # Agent State
-Current task: Document the implemented UnifiedCollector architecture and review collection efficiency.
-Status: Complete. `docs/architecture.md` records the code-backed system map, per-platform metadata/quirks, collection-layer gaps, and static efficiency review. Documentation commit `7c8cd60b` is pushed to `main`; the post-push worktree check was clean.
-Findings: Base collection and spidering exist with uneven per-platform coverage; recommendation-feed collection is partial; only Telegram, WhatsApp, and Beeper are persistent realtime worker sources. UnifiedAnalyzer is external; no Supabase exporter exists in this repository.
-Next steps: None.
+Current task: Apply Bryan-approved collection efficiency fixes and sweep repository Markdown documentation.
+Status: Approved fixes and the documentation sweep are complete. TikTok gallery-dl files use the path-based vault writer; Instagram shares the TikTok/Lemon8 advisory-lock group; generic and TikTok candidate/revisit writes and X/TikTok/Lemon8 target enqueues are batched with row fallback. The checksum-matched migration is recorded in live Postgres; both indexes are present and EXPLAIN confirms their use. Thirty-four tracked Markdown files were link-checked with no broken relative links. The profile-probe change remains excluded.
+Verification: Python AST syntax checks, runtime imports, TikTok path-writer smoke, bridge batch smoke, Compose config, environment-split checker, `git diff --check`, live migration/index/checksum checks and query plans passed. Targeted pytest could not run because pytest is not installed in the host or running test environment.
+Next steps: Stage, hostname-scrub-check, commit the reviewed changes on `main`, and push to `origin`.
 
 ## Prior handoff history
 

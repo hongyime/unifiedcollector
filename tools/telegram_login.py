@@ -13,15 +13,17 @@ Why this exists separately from ``tools/telegram_relogin.py``:
     interactively, manually drive ``send_code_request`` → ``sign_in``, and
     write the session to the location the collector reads.
 
-Usage (from C:\\unifiedcollector):
+Usage (from the repository root):
     python tools/telegram_login.py
     python tools/telegram_login.py --session-name myaccount
     python tools/telegram_login.py --phone +6591234567
 
-Reads TELEGRAM_API_ID + TELEGRAM_API_HASH from .env (or environment).
-Writes the session to ``sessions/<session-name>.session`` — the same dir
-the collector loads from (see src/collectors/telegram.py: session_dir =
-Path("sessions")).
+Reads TELEGRAM_API_ID + TELEGRAM_API_HASH from the project-root .env (or
+environment). Writes ``sessions/<session-name>.session`` on the host. The
+production collector reads ``/app/sessions`` from the shared ``sessions_data``
+Docker volume; copy the new file into that volume before restarting the
+Telegram service. The collector's relative session directory is configured in
+``src/collectors/telegram/session.py``.
 
 Idempotent: if the target session already exists and is authorised, prints
 'already authenticated' and exits 0.

@@ -1020,6 +1020,46 @@ async def test_download_media_writes_vault_blob(monkeypatch, tmp_path):
     c.send_to_dlq.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_download_media_streams_source_path_into_vault(monkeypatch, tmp_path):
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    monkeypatch.setattr(tiktok_mod, "VAULT_ROOT", vault_root)
+    with patch.object(TiktokCollector, "_check_tool", staticmethod(lambda *_: False)):
+        c = TiktokCollector()
+    c.insert_media_item = AsyncMock(return_value=True)
+    c.send_to_dlq = AsyncMock()
+
+    source_path = tmp_path / "gallery-dl-video.mp4"
+    data = b"streamed tiktok video bytes"
+    source_path.write_bytes(data)
+    source_read_bytes = Path.read_bytes
+
+    def fail_source_read_bytes(path):
+        if path == source_path:
+            raise AssertionError("TikTok source media must not be loaded into Python bytes")
+        return source_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", fail_source_read_bytes)
+
+    await c.download_media({
+        "entity_id": "alice",
+        "entity_name": "alice",
+        "content_type": "video",
+        "content_id": "7000000000000000002",
+        "extension": "mp4",
+        "source_path": source_path,
+    })
+
+    kwargs = c.insert_media_item.await_args.kwargs
+    stored_path = Path(kwargs["file_path"])
+    assert stored_path.open("rb").read() == data
+    assert kwargs["sha256"] == hashlib.sha256(data).hexdigest()
+    assert kwargs["file_size"] == len(data)
+    assert source_path.exists()
+    c.send_to_dlq.assert_not_awaited()
+
+
 # ── _collect_via_playwright (browser fallback) ────────────────────────────
 
 

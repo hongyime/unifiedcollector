@@ -1,69 +1,37 @@
-# UnifiedCollector Network Architecture
+# UnifiedCollector network architecture
 
-## Overview
+UnifiedCollector and UnifiedAnalyzer run as separate Compose stacks. Where the
+Analyzer joins the Collector network, use explicit database hostnames so the
+two `postgres` services cannot be confused by Docker's embedded DNS.
 
-UnifiedCollector and UnifiedAnalyzer run as separate Docker Compose stacks that share a Docker network for cross-stack data access.
+## Networks and database hosts
 
-## Networks
+- Collector network: `unifiedcollector_default`
+- Analyzer network: `unifiedanalyzer_default`
+- Collector database: `unifiedcollector_postgres:5432/unifiedcollector`
+- Analyzer database: `unifiedanalyzer_postgres:5432/unifiedanalyzer`
 
-| Network | Purpose | Created By |
-|---------|---------|------------|
-| `unifiedcollector_default` | Collector internal + shared with analyzer | unifiedcollector compose |
-| `unifiedanalyzer_default` | Analyzer internal | unifiedanalyzer compose |
+Do not use the short hostname `postgres` in a connection string when both
+stacks share a network. A 2026-10-11 DNS incident showed it could resolve to
+either stack's database. The repository Compose configuration uses the explicit
+Collector container name.
 
-**Important:** The analyzer intentionally joins the collector's network to read collector data. This is by design.
+## Service endpoints
 
-## Container Hostnames
+- Dashboard: host ports 8700 and 8001.
+- Browser ingest bridge: port 8765.
+- Browser cookie vault health endpoint: port 8790.
+- Host Chrome CDP: `CHROME_CDP_URL` defaults to
+  `http://host.docker.internal:9336` in Compose.
+- Beeper Desktop API: `host.docker.internal:23373` by default.
 
-### Critical: Use Full Hostnames, Not Short Names
-
-**The 2026-10-11 DNS Incident:** Both stacks defined a service named `postgres`. Docker's embedded DNS round-robined the hostname `postgres` between:
-- `172.20.0.2` = `unifiedcollector_postgres` (correct for collector)
-- `172.20.0.3` = `unifiedanalyzer_postgres` (wrong for collector)
-
-The collector scheduler intermittently connected to the analyzer's database, getting "database unifiedcollector does not exist" errors.
-
-**Fix Applied:** All connection strings now use full container names:
-- Collector: `@unifiedcollector_postgres:5432/unifiedcollector`
-- Analyzer: `@unifiedanalyzer_postgres:5432/unifiedanalyzer`
-
-**Rule:** NEVER use the short hostname `postgres` in connection strings. Always use the full container name.
-
-## Container Map
-
-### UnifiedCollector Stack
-
-| Container | Hostname | Network | Purpose |
-|-----------|----------|---------|---------|
-| unifiedcollector_postgres | unifiedcollector_postgres | unifiedcollector_default | Main database (146 tables) |
-| unifiedcollector_redis | unifiedcollector_redis | unifiedcollector_default | Cache/queues |
-| unifiedcollector_rabbitmq | unifiedcollector_rabbitmq | unifiedcollector_default | Message broker |
-| unifiedcollector_scheduler | unifiedcollector_scheduler | unifiedcollector_default | Job scheduler |
-| unifiedcollector_dashboard | unifiedcollector_dashboard | unifiedcollector_default | Web UI (:8700) |
-| unifiedcollector_browser_cookie_vault | unifiedcollector_browser_cookie_vault | unifiedcollector_default | Chrome cookie sync |
-| unifiedcollector_collector_* | various | unifiedcollector_default | Individual collectors |
-
-### UnifiedAnalyzer Stack
-
-| Container | Hostname | Network | Purpose |
-|-----------|----------|---------|---------|
-| unifiedanalyzer_postgres | unifiedanalyzer_postgres | unifiedanalyzer_default + unifiedcollector_default | Analysis DB (425 tables) |
-| unifiedanalyzer_scheduler | unifiedanalyzer_scheduler | unifiedanalyzer_default | Pipeline scheduler |
-| unifiedanalyzer_analyzer | unifiedanalyzer_analyzer | unifiedanalyzer_default | Analysis workers |
-| unifiedanalyzer_face_worker | unifiedanalyzer_face_worker | unifiedanalyzer_default | Face recognition |
-
-## External Connections
-
-| From | To | How |
-|------|----|-----|
-| browser_cookie_vault (container) | Chrome (host) | `host.docker.internal:9222` via CDP |
-| Dashboard (container) | User browser | Port 8700 published to host |
-| Collectors (containers) | Seagate drive | `/media/seagate-expansion` bind mount |
+Media and vault bind mounts use `UNIFIEDCOLLECTOR_HOST_ROOT`. Set it in the
+project `.env` to a directory visible to the Docker daemon on that host.
 
 ## Troubleshooting
 
-| Symptom | Likely Cause | Check |
-|---------|--------------|-------|
-| "database does not exist" | Wrong postgres via DNS | `docker exec <container> getent hosts postgres` — should return ONE IP |
-| Connection refused to postgres | Container not on network | `docker network inspect unifiedcollector_default` |
-| CDP timeout | Chrome not running | `curl http://localhost:9222/json/version` on host |
+| Symptom | Likely cause | Check |
+|---|---|---|
+| `database does not exist` | Connection points at the other stack | Check the full database hostname and database name in the container environment. |
+| Connection refused to Postgres | Service is unavailable or network membership is missing | `docker network inspect unifiedcollector_default` |
+| CDP timeout | Chrome is stopped, using another port, or unreachable from Docker | `curl http://localhost:9336/json/version` on the host and check `CHROME_CDP_URL`. |

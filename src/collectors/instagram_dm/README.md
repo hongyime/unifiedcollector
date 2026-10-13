@@ -1,9 +1,8 @@
 # Instagram DM collector — mobile-API path (Option A of issue #39)
 
-**Status:** SCAFFOLDING ONLY — not registered in `src/collectors/__init__.py`,
-feature flag off by default, all network-touching methods raise
-`NotImplementedError`. This directory exists so a future implementer has a
-pre-approved home for the code without needing to negotiate scope again.
+**Status:** SCAFFOLDING ONLY — registered in `src/collectors/__init__.py`,
+but the feature flag is off by default and the mobile-API network methods are
+not implemented. The dedicated Compose service is opt-in.
 
 ## Why this is separate from `src/collectors/instagram/`
 

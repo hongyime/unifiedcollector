@@ -44,5 +44,5 @@ If they are cleared or corrupted, the bridge logs a QR code to re-pair.
 
 ## Build / run
 
-Built and run via the repo `docker-compose.yml` (services `wa-bridge-1/2`),
+Built and run via `docker/docker-compose.yml` (services `wa-bridge-1/2`),
 build context `./src/bridges/whatsapp`. Local dev: `npm install && npm run build && node build/index.js`.

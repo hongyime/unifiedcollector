@@ -17,7 +17,7 @@ collector).
 1. Python 3.11+ on the host with `telethon` installed (`pip install telethon`).
 2. `TELEGRAM_API_ID` + `TELEGRAM_API_HASH` available either:
    - in your shell environment, OR
-   - in `C:\unifiedcollector\.env` as `TELEGRAM_API_ID=...` / `TELEGRAM_API_HASH=...`, OR
+   - in the project-root `.env` as `TELEGRAM_API_ID=...` / `TELEGRAM_API_HASH=...`, OR
    - as `TELEGRAM_ACCOUNT_1_API_ID` / `TELEGRAM_ACCOUNT_1_API_HASH` (fallback —
      pick from any existing account row).
 
@@ -26,7 +26,7 @@ for the SMS code prompt.
 
 ## Usage
 
-From `C:\unifiedcollector`:
+From the repository root:
 
     # Fully interactive — prompts for phone, then code, then 2FA if enabled.
     python tools/telegram_login.py
@@ -39,11 +39,19 @@ From `C:\unifiedcollector`:
 
 The tool writes:
 
-    C:\unifiedcollector\sessions\<stem>.session
+    sessions/<stem>.session
 
-…which is the exact path the unified collector reads on startup
-(`session_dir = Path("sessions")` in `src/collectors/telegram.py`). No rebuild
-is needed — the directory is bind-mounted into the collector container.
+The production collector reads sessions from `/app/sessions`, backed by the
+shared `sessions_data` Docker volume. The host `sessions/` directory is not
+bind-mounted into that volume, so copy a newly-created session into the
+running Telegram container before restarting it:
+
+```sh
+docker cp sessions/<stem>.session unifiedcollector_collector_telegram:/app/sessions/<stem>.session
+```
+
+The collector's relative `sessions/` path is defined in
+`src/collectors/telegram/session.py`.
 
 ## Flow
 
@@ -61,17 +69,17 @@ is needed — the directory is bind-mounted into the collector container.
 
 ## After login
 
-Add (or update) the account block in `.env`:
+Add (or update) the account block in `docker/env/telegram.env`:
 
     TELEGRAM_ACCOUNT_2_NAME=observer1
     TELEGRAM_ACCOUNT_2_API_ID=12345678
     TELEGRAM_ACCOUNT_2_API_HASH=abcdef0123...
     TELEGRAM_ACCOUNT_2_PHONE=+6591234567
-    TELEGRAM_ACCOUNT_2_SESSION=sessions/6591234567.session
+    TELEGRAM_ACCOUNT_2_SESSION=sessions/observer1.session
 
 …then:
 
-    docker compose -f docker/docker-compose.yml restart collector
+    docker compose -f docker/docker-compose.yml restart collector_telegram
 
 The collector picks up the new session automatically via `AccountPool`.
 
