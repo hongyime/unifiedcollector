@@ -347,8 +347,9 @@ def test_browser_media_candidates_records_non_tiktok_platform():
     payload = json.loads(response.text)
 
     assert payload == {"ok": True, "queued": 1, "platform": "facebook"}
-    assert any("browser_media_candidates" in query for query, _args in pool.conn.executes)
-    assert not any("tiktok_browser_media_candidates" in query for query, _args in pool.conn.executes)
+    queries = [query for query, _rows in pool.conn.executemany_calls]
+    assert any("browser_media_candidates" in query for query in queries)
+    assert not any("tiktok_browser_media_candidates" in query for query in queries)
 
 
 def test_browser_media_candidate_duplicate_refreshes_non_stored_attempts():
@@ -376,7 +377,7 @@ def test_browser_media_candidate_duplicate_refreshes_non_stored_attempts():
         )
     )
 
-    query = next(query for query, _args in pool.conn.executes if "browser_media_candidates" in query)
+    query = next(query for query, _rows in pool.conn.executemany_calls if "browser_media_candidates" in query)
     assert "attempts = browser_media_candidates.attempts + 1" in query
     assert "WHERE browser_media_candidates.outcome IS DISTINCT FROM 'stored'" in query
     assert "OR EXCLUDED.outcome = 'stored'" in query
@@ -408,7 +409,7 @@ def test_tiktok_browser_media_candidate_duplicate_refreshes_non_stored_attempts(
         )
     )
 
-    query = next(query for query, _args in pool.conn.executes if "tiktok_browser_media_candidates" in query)
+    query = next(query for query, _rows in pool.conn.executemany_calls if "tiktok_browser_media_candidates" in query)
     assert "attempts = tiktok_browser_media_candidates.attempts + 1" in query
     assert "WHERE tiktok_browser_media_candidates.outcome IS DISTINCT FROM 'stored'" in query
     assert "OR EXCLUDED.outcome = 'stored'" in query
@@ -448,10 +449,10 @@ def test_browser_media_candidates_queues_x_video_revisit():
     payload = json.loads(response.text)
 
     assert payload == {"ok": True, "queued": 1, "platform": "x"}
-    queries = [query for query, _args in pool.conn.executes]
+    queries = [query for query, _rows in pool.conn.executemany_calls]
     assert any("browser_media_candidates" in query for query in queries)
     assert any("browser_media_revisit_queue" in query for query in queries)
-    queue_args = next(args for query, args in pool.conn.executes if "browser_media_revisit_queue" in query)
+    queue_args = next(rows[0] for query, rows in pool.conn.executemany_calls if "browser_media_revisit_queue" in query)
     assert queue_args[:7] == (
         "x",
         "x_video_1",
@@ -495,10 +496,10 @@ def test_browser_media_candidates_queues_instagram_video_revisit():
     payload = json.loads(response.text)
 
     assert payload == {"ok": True, "queued": 1, "platform": "instagram"}
-    queries = [query for query, _args in pool.conn.executes]
+    queries = [query for query, _rows in pool.conn.executemany_calls]
     assert any("browser_media_candidates" in query for query in queries)
     assert any("browser_media_revisit_queue" in query for query in queries)
-    queue_args = next(args for query, args in pool.conn.executes if "browser_media_revisit_queue" in query)
+    queue_args = next(rows[0] for query, rows in pool.conn.executemany_calls if "browser_media_revisit_queue" in query)
     assert queue_args[:7] == (
         "instagram",
         "ig_reel_video_1",
@@ -539,7 +540,7 @@ def test_browser_media_candidates_synthesizes_instagram_revisit_url_from_media_i
     payload = json.loads(response.text)
 
     assert payload == {"ok": True, "queued": 1, "platform": "instagram"}
-    queue_args = next(args for query, args in pool.conn.executes if "browser_media_revisit_queue" in query)
+    queue_args = next(rows[0] for query, rows in pool.conn.executemany_calls if "browser_media_revisit_queue" in query)
     assert queue_args[0] == "instagram"
     assert queue_args[1] == "3953923014190275071"
     assert queue_args[3].startswith("https://instagram.com/p/")
@@ -574,8 +575,9 @@ def test_browser_media_candidates_skips_unopenable_instagram_revisit():
     payload = json.loads(response.text)
 
     assert payload == {"ok": True, "queued": 1, "platform": "instagram"}
-    assert any("browser_media_candidates" in query for query, _args in pool.conn.executes)
-    assert not any("browser_media_revisit_queue" in query for query, _args in pool.conn.executes)
+    queries = [query for query, _rows in pool.conn.executemany_calls]
+    assert any("browser_media_candidates" in query for query in queries)
+    assert not any("browser_media_revisit_queue" in query for query in queries)
 
 
 def test_browser_revisit_target_reclaims_stale_claimed(monkeypatch):
