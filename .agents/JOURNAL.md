@@ -273,3 +273,5 @@ Machine-specific values in this document use privacy placeholders.
 2026-10-13: Committed and pushed the partial Phase 1 queue lifecycle foundation as `eb6ad9bd` (`feat(spider): add queue lifecycle parity`). The additive migration is not yet applied; full bounded shadow sweeps and consumer rollout gates remain.
 
 2026-10-13: Exported 22 cookies restricted to `youtube.com` domains from local Chrome CDP (Chrome 155, port 9223) into the Git-ignored `credentials/youtube/cookies.txt` Netscape file with mode `0600`; cookie values and tokens were not logged. Metadata-only probes for one public video using the active collector container yt-dlp `2026.03.17` returned a bot-related/sign-in response. No media was downloaded and the verification gate remains unresolved.
+
+2026-10-13: Follow-up verification used the official yt-dlp `2026.08.19` executable in memory (no installation or cache write) with the ignored cookie file for two public metadata-only probes. Neither returned metadata or a bot-related response; the first was categorized as age/unavailable, and the second failed generically. No media was downloaded; successful extraction remains unverified.
