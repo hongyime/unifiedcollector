@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import os
 from typing import AsyncIterator
+from uuid import uuid4
 
 import pytest
 import pytest_asyncio
@@ -84,6 +85,70 @@ async def test_in_memory_visited_concurrent():
     assert results.count(False) == 19
 
 
+class _ExecuteOnlyConnection:
+    async def execute(self, *_args):
+        return "UPDATE 1"
+
+
+class _AcquireConnection:
+    async def __aenter__(self):
+        return _ExecuteOnlyConnection()
+
+    async def __aexit__(self, *_args):
+        return False
+
+
+class _ExecuteOnlyPool:
+    def acquire(self):
+        return _AcquireConnection()
+
+
+@pytest.mark.asyncio
+async def test_stale_visited_marker_does_not_suppress_reclaimed_queue_work():
+    visited = _InMemoryVisited()
+    await visited.add_if_absent("stale-node")
+    fetcher = StubFetcher({"stale-node": []})
+    spider = SpiderDiscover(
+        platform="test_stale_visited",
+        fetcher=fetcher,
+        pool=_ExecuteOnlyPool(),
+        visited=visited,
+    )
+
+    await spider._process_node({
+        "node_id": "stale-node",
+        "hop_distance": 0,
+        "priority": 5,
+        "attempts": 2,
+        "max_attempts": 5,
+        "claim_token": uuid4(),
+    })
+
+    assert fetcher.fetch_calls == [("stale-node", EdgeType.FOLLOWING)]
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_cancels_worker_before_unrenewed_lease_expires(monkeypatch):
+    spider = SpiderDiscover(
+        platform="test_heartbeat", fetcher=StubFetcher({}), pool=None,
+    )
+    spider.lease_seconds = 0.08
+    spider.heartbeat_seconds = 0.01
+
+    async def failed_renewal(*_args):
+        raise RuntimeError("synthetic database outage")
+
+    monkeypatch.setattr(spider, "_renew_claim", failed_renewal)
+    worker = asyncio.create_task(asyncio.sleep(10))
+    heartbeat = asyncio.create_task(
+        spider._heartbeat_claim("node", uuid4(), worker)
+    )
+
+    await heartbeat
+    with pytest.raises(asyncio.CancelledError):
+        await worker
+
+
 # ── parameter validation ─────────────────────────────────────────────────────
 
 
@@ -102,6 +167,38 @@ def test_zero_concurrency_rejected():
             pool=None,
             max_hops=1,
             concurrency=0,
+        )
+
+
+def test_retry_delay_uses_capped_exponential_backoff():
+    spider = SpiderDiscover(
+        platform="x",
+        fetcher=StubFetcher({}),
+        pool=None,
+        retry_base_seconds=10,
+        retry_max_seconds=25,
+    )
+
+    assert spider._retry_delay_seconds(1) == 10
+    assert spider._retry_delay_seconds(2) == 20
+    assert spider._retry_delay_seconds(3) == 25
+    assert spider._retry_delay_seconds(10) == 25
+
+
+def test_invalid_retry_and_lease_configuration_rejected():
+    with pytest.raises(ValueError, match="max_attempts"):
+        SpiderDiscover(
+            platform="x", fetcher=StubFetcher({}), pool=None, max_attempts=0
+        )
+    with pytest.raises(ValueError, match="retry delays"):
+        SpiderDiscover(
+            platform="x", fetcher=StubFetcher({}), pool=None,
+            retry_base_seconds=10, retry_max_seconds=5,
+        )
+    with pytest.raises(ValueError, match="heartbeat_seconds"):
+        SpiderDiscover(
+            platform="x", fetcher=StubFetcher({}), pool=None,
+            lease_seconds=30, heartbeat_seconds=30,
         )
 
 
@@ -193,9 +290,11 @@ async def test_resume_from_in_progress(db_pool):
     async with db_pool.acquire() as conn:
         await conn.execute(
             """INSERT INTO spider_queue (platform, node_id, hop_distance,
-               priority, status) VALUES ($1, $2, 0, 5, 'in_progress')""",
+               priority, status, idempotency_key)
+               VALUES ($1, $2, 0, 5, 'in_progress', $3)""",
             "test_resume",
             "stuck_node",
+            "test_resume:stuck_node",
         )
     fetcher = StubFetcher({"stuck_node": []})
     spider = SpiderDiscover(

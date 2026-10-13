@@ -3,7 +3,7 @@
 Drives BFS traversal of social/code-graph relationships across 6 platforms
 (github, instagram, tiktok, strava, lemon8, +others). Each platform plugs in
 its own ``EdgeFetcher`` implementing the read-only edge enumeration API; this
-module owns the queue, hop-distance accounting, cycle detection, and concurrency.
+module owns the queue, hop-distance accounting, claim leases, and concurrency.
 
 Design summary
 --------------
@@ -16,13 +16,11 @@ Design summary
   enqueued_at ASC) order. ``max_hops`` (default 2) caps depth — children of
   a node at the boundary are recorded as edges but NOT enqueued.
 * **Persistent queue** — backed by Postgres ``spider_queue`` (composite PK
-  platform+node_id). Resumable across restarts: on init, any ``in_progress``
-  rows are reset to ``pending`` so a crashed worker doesn't leave a node
-  permanently stuck.
-* **Cycle detection** — Postgres PK already enforces "node visited once per
-  platform". For cross-restart safety with EXTERNAL services that assume a
-  single run id (e.g. dedupe within a research session), a Redis-backed
-  ``VisitedSet`` is provided as an opt-in supplement.
+  platform+node_id). Claims carry renewable leases; startup requeues only
+  expired claims so an active worker is not displaced.
+* **Node deduplication** — the Postgres key prevents duplicate queue rows.
+  Optional in-memory or Redis completion sets are informational and never
+  suppress pending work or retries.
 * **Rate-aware** — caller passes any awaitable ``rate_waiter`` that's awaited
   before each fetch. Compatible with src/core/rate_limit.AdaptiveRateLimiter
   (``await rl.wait(key)``).
@@ -73,8 +71,10 @@ Usage
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
+import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import Enum
@@ -146,8 +146,7 @@ class EdgeFetcher(Protocol):
 
 
 class _InMemoryVisited:
-    """Default visited-set backend — process-local set. Adequate when the
-    Postgres PK on (platform, node_id) is your only cycle-detection need."""
+    """Default process-local record of successfully completed nodes."""
 
     def __init__(self) -> None:
         self._seen: set[str] = set()
@@ -164,18 +163,23 @@ class _InMemoryVisited:
         async with self._lock:
             return node_id in self._seen
 
+    async def discard(self, node_id: str) -> None:
+        async with self._lock:
+            self._seen.discard(node_id)
+
     async def size(self) -> int:
         async with self._lock:
             return len(self._seen)
 
 
 class RedisVisited:
-    """Redis-backed visited set. Use when multiple worker processes share
-    a spider run, or when you want the visited bitmap to survive restarts.
+    """Redis-backed completion set. Queue state remains authoritative; this set
+    is informational and never suppresses pending or retried queue work.
 
     Key shape: ``spider:visited:<platform>:<run_id>``. TTL configurable
     (default 7 days). ``add_if_absent`` is implemented via SADD return value
-    (1 = inserted/new, 0 = already present)."""
+    (1 = inserted/new, 0 = already present). Existing markers never suppress
+    work; the database queue owns completion and retry state."""
 
     def __init__(
         self,
@@ -198,6 +202,9 @@ class RedisVisited:
 
     async def contains(self, node_id: str) -> bool:
         return bool(await self._r.sismember(self._key, node_id))
+
+    async def discard(self, node_id: str) -> None:
+        await self._r.srem(self._key, node_id)
 
     async def size(self) -> int:
         return int(await self._r.scard(self._key))
@@ -258,7 +265,7 @@ class SpiderDiscover:
     edge_sink : EdgeSink | None
         Optional callback for every edge produced.
     visited : visited-set adaptor | None
-        Default: in-memory. Pass a ``RedisVisited`` for cross-restart safety.
+        Optional completion record. Queue state remains authoritative.
     breaker : CircuitBreaker | None
         Wraps each fetch call. Default: per-spider new breaker with
         threshold=10, recovery=60s.
@@ -276,11 +283,26 @@ class SpiderDiscover:
         edge_sink: Optional[EdgeSink] = None,
         visited=None,
         breaker: Optional[CircuitBreaker] = None,
+        max_attempts: int = 5,
+        retry_base_seconds: float = 30.0,
+        retry_max_seconds: float = 1800.0,
+        lease_seconds: int = 300,
+        heartbeat_seconds: int = 60,
     ) -> None:
         if max_hops < 0:
             raise ValueError(f"max_hops must be >=0, got {max_hops}")
         if concurrency < 1:
             raise ValueError(f"concurrency must be >=1, got {concurrency}")
+        if max_attempts < 1:
+            raise ValueError(f"max_attempts must be >=1, got {max_attempts}")
+        if retry_base_seconds < 0 or retry_max_seconds < retry_base_seconds:
+            raise ValueError("retry delays must satisfy 0 <= base <= max")
+        if lease_seconds < 3:
+            raise ValueError(f"lease_seconds must be >=3, got {lease_seconds}")
+        if heartbeat_seconds < 1 or heartbeat_seconds >= lease_seconds:
+            raise ValueError(
+                "heartbeat_seconds must be >=1 and less than lease_seconds"
+            )
         if not isinstance(fetcher, EdgeFetcher):
             # Protocol check — duck-typed; raise if it lacks the required attrs.
             raise TypeError(
@@ -293,6 +315,11 @@ class SpiderDiscover:
         self.pool = pool
         self.max_hops = max_hops
         self.concurrency = concurrency
+        self.max_attempts = max_attempts
+        self.retry_base_seconds = retry_base_seconds
+        self.retry_max_seconds = retry_max_seconds
+        self.lease_seconds = lease_seconds
+        self.heartbeat_seconds = heartbeat_seconds
         self._rate_waiter = rate_waiter
         self._edge_sink = edge_sink
         self._visited = visited or _InMemoryVisited()
@@ -308,7 +335,7 @@ class SpiderDiscover:
     # -- queue ops ----------------------------------------------------------
 
     async def reset_stuck_in_progress(self) -> int:
-        """Reset any rows left in ``in_progress`` from a prior crashed run.
+        """Requeue only expired claims; active work owned by another worker stays claimed.
 
         Called automatically by ``run()``. Returns the number of rows reset.
         Safe to call repeatedly.
@@ -317,9 +344,17 @@ class SpiderDiscover:
             result = await conn.execute(
                 """
                 UPDATE spider_queue
-                   SET status = 'pending',
-                       last_attempted_at = NULL
-                 WHERE platform = $1 AND status = 'in_progress'
+                   SET status = CASE WHEN attempts >= max_attempts
+                                     THEN 'failed' ELSE 'pending' END,
+                       terminal_reason = CASE WHEN attempts >= max_attempts
+                                              THEN 'max_attempts_exceeded'
+                                              ELSE terminal_reason END,
+                       claim_token = NULL,
+                       claimed_at = NULL,
+                       lease_expires_at = NULL
+                 WHERE platform = $1
+                   AND status = 'in_progress'
+                   AND (lease_expires_at IS NULL OR lease_expires_at <= NOW())
                 """,
                 self.platform,
             )
@@ -340,6 +375,12 @@ class SpiderDiscover:
         *,
         priority: int = 5,
         edge_type: Optional[EdgeType] = None,
+        discovery_type: Optional[str] = None,
+        source_table: Optional[str] = None,
+        source_record_id: Optional[str] = None,
+        source_metadata: Optional[dict[str, Any]] = None,
+        idempotency_key: Optional[str] = None,
+        max_attempts: Optional[int] = None,
     ) -> bool:
         """Seed the queue at hop 0. Returns True if newly inserted, False
         if already present (already-seeded or already-completed runs are
@@ -349,13 +390,22 @@ class SpiderDiscover:
                 """
                 INSERT INTO spider_queue (
                     platform, node_id, hop_distance, priority, status,
-                    parent_node_id, edge_type, enqueued_at
-                ) VALUES ($1, $2, 0, $3, 'pending', NULL, $4, NOW())
-                ON CONFLICT (platform, node_id) DO NOTHING
+                    parent_node_id, edge_type, discovery_type, source_table,
+                    source_record_id, source_metadata, idempotency_key,
+                    max_attempts, enqueued_at
+                ) VALUES ($1, $2, 0, $3, 'pending', NULL, $4, $5, $6,
+                          $7, $8::jsonb, $9, $10, NOW())
+                ON CONFLICT DO NOTHING
                 RETURNING node_id
                 """,
                 self.platform, node_id, priority,
                 edge_type.value if edge_type else None,
+                discovery_type,
+                source_table,
+                source_record_id,
+                json.dumps(source_metadata or {}, default=str),
+                idempotency_key or f"{self.platform}:{node_id}",
+                self._resolve_max_attempts(max_attempts),
             )
         return row is not None
 
@@ -372,13 +422,17 @@ class SpiderDiscover:
             """
             INSERT INTO spider_queue (
                 platform, node_id, hop_distance, priority, status,
-                parent_node_id, edge_type, enqueued_at
-            ) VALUES ($1, $2, $3, $4, 'pending', $5, $6, NOW())
-            ON CONFLICT (platform, node_id) DO NOTHING
+                parent_node_id, edge_type, discovery_type, source_metadata,
+                idempotency_key, max_attempts, enqueued_at
+            ) VALUES ($1, $2, $3, $4, 'pending', $5, $6, 'graph_edge',
+                      $7::jsonb, $8, $9, NOW())
+            ON CONFLICT DO NOTHING
             RETURNING node_id
             """,
             self.platform, target, hop_distance, priority,
             parent_node_id, edge_type.value,
+            json.dumps({}, default=str), f"{self.platform}:{target}",
+            self.max_attempts,
         )
         return row is not None
 
@@ -386,12 +440,16 @@ class SpiderDiscover:
         """Atomically claim the next pending row using SELECT ... FOR UPDATE
         SKIP LOCKED to prevent two workers from claiming the same node."""
         await refresh_account_proximity_cache(self.pool)
+        claim_token = str(uuid.uuid4())
         async with self.pool.acquire() as conn:
             async with conn.transaction():
                 row = await conn.fetchrow(
                     """
                     SELECT sq.platform, sq.node_id, sq.hop_distance, sq.priority,
-                           sq.parent_node_id, sq.edge_type, sq.attempts
+                           sq.parent_node_id, sq.edge_type, sq.attempts,
+                           sq.max_attempts, sq.discovery_type, sq.source_table,
+                           sq.source_record_id, sq.source_metadata,
+                           sq.idempotency_key
                       FROM spider_queue sq
                       LEFT JOIN LATERAL (
                         SELECT MIN(ap.tier) AS proximity_tier
@@ -399,7 +457,9 @@ class SpiderDiscover:
                         WHERE ap.platform = sq.platform
                           AND ap.account_id = lower(sq.node_id)
                       ) prox ON TRUE
-                     WHERE sq.platform = $1 AND sq.status = 'pending'
+                     WHERE sq.platform = $1
+                       AND sq.status = 'pending'
+                       AND (sq.next_attempt_at IS NULL OR sq.next_attempt_at <= NOW())
                      ORDER BY
                         CASE
                             WHEN prox.proximity_tier IN (1, 2) THEN 2
@@ -414,59 +474,177 @@ class SpiderDiscover:
                 )
                 if row is None:
                     return None
-                await conn.execute(
+                claimed = await conn.fetchrow(
                     """
                     UPDATE spider_queue
                        SET status = 'in_progress',
                            last_attempted_at = NOW(),
-                           attempts = attempts + 1
+                           attempts = attempts + 1,
+                           claimed_at = NOW(),
+                           lease_expires_at = NOW() + make_interval(secs => $4::int),
+                           claim_token = $3,
+                           next_attempt_at = NULL
                      WHERE platform = $1 AND node_id = $2
+                    RETURNING attempts, claim_token
                     """,
-                    self.platform, row["node_id"],
+                    self.platform, row["node_id"], claim_token,
+                    self.lease_seconds,
                 )
-                return dict(row)
+                claim = dict(row)
+                if claimed is None:
+                    return None
+                claim.update(dict(claimed))
+                return claim
 
-    async def _mark_completed(self, node_id: str) -> None:
+    async def _mark_completed(self, node_id: str, claim_token: uuid.UUID) -> bool:
         async with self.pool.acquire() as conn:
-            await conn.execute(
+            result = await conn.execute(
                 """
                 UPDATE spider_queue
-                   SET status = 'completed', completed_at = NOW(), error = NULL
+                   SET status = 'completed', completed_at = NOW(), error = NULL,
+                       terminal_reason = NULL, next_attempt_at = NULL,
+                       claim_token = NULL, claimed_at = NULL, lease_expires_at = NULL
                  WHERE platform = $1 AND node_id = $2
+                   AND status = 'in_progress' AND claim_token = $3
                 """,
-                self.platform, node_id,
+                self.platform, node_id, claim_token,
             )
+        return result.endswith(" 1")
 
-    async def _mark_failed(self, node_id: str, err: str) -> None:
+    async def _mark_failed(
+        self, node_id: str, err: str, claim: dict[str, Any]
+    ) -> str | None:
+        attempts = int(claim["attempts"])
+        max_attempts = int(claim["max_attempts"])
+        terminal = attempts >= max_attempts
+        delay = self._retry_delay_seconds(attempts)
         async with self.pool.acquire() as conn:
-            await conn.execute(
+            row = await conn.fetchrow(
                 """
                 UPDATE spider_queue
-                   SET status = 'failed', error = $3
+                   SET status = $4::varchar(20),
+                       error = $3,
+                       terminal_reason = $5,
+                       next_attempt_at = CASE
+                           WHEN $4::varchar(20) = 'pending'::varchar(20)
+                           THEN NOW() + make_interval(secs => $6::double precision)
+                           ELSE NULL END,
+                       claim_token = NULL,
+                       claimed_at = NULL,
+                       lease_expires_at = NULL
                  WHERE platform = $1 AND node_id = $2
+                   AND status = 'in_progress' AND claim_token = $7
+                RETURNING status
                 """,
                 self.platform, node_id, err[:1000],
+                "failed" if terminal else "pending",
+                "max_attempts_exceeded" if terminal else None,
+                delay,
+                claim["claim_token"],
             )
+        return row["status"] if row else None
+
+    def _retry_delay_seconds(self, attempt: int) -> float:
+        """Exponential retry delay with a configured cap."""
+        delay = self.retry_base_seconds
+        for _ in range(max(0, attempt - 1)):
+            delay = min(delay * 2, self.retry_max_seconds)
+            if delay >= self.retry_max_seconds:
+                break
+        return delay
+
+    def _resolve_max_attempts(self, max_attempts: Optional[int]) -> int:
+        value = self.max_attempts if max_attempts is None else max_attempts
+        if value < 1:
+            raise ValueError(f"max_attempts must be >=1, got {value}")
+        return value
+
+    async def _renew_claim(self, node_id: str, claim_token: uuid.UUID) -> bool:
+        async with self.pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                UPDATE spider_queue
+                   SET lease_expires_at = NOW() + make_interval(secs => $4::int)
+                 WHERE platform = $1 AND node_id = $2
+                   AND status = 'in_progress' AND claim_token = $3
+                """,
+                self.platform, node_id, claim_token, self.lease_seconds,
+            )
+        return result.endswith(" 1")
+
+    async def _heartbeat_claim(
+        self,
+        node_id: str,
+        claim_token: uuid.UUID,
+        worker_task: asyncio.Task[None],
+    ) -> None:
+        interval = min(self.heartbeat_seconds, self.lease_seconds / 3)
+        lease_deadline = time.monotonic() + self.lease_seconds
+        retry_interval = min(2.0, interval)
+        safety_margin = min(interval, max(1.0, self.lease_seconds / 3))
+        retry_cutoff = lease_deadline - safety_margin
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                renewed = await self._renew_claim(node_id, claim_token)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "spider[%s] lease renewal failed for node=%s",
+                    self.platform, node_id,
+                )
+                while time.monotonic() < retry_cutoff:
+                    await asyncio.sleep(
+                        min(retry_interval, retry_cutoff - time.monotonic())
+                    )
+                    try:
+                        renewed = await self._renew_claim(node_id, claim_token)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        logger.debug(
+                            "spider[%s] lease renewal retry failed for node=%s",
+                            self.platform, node_id, exc_info=True,
+                        )
+                        retry_interval = min(retry_interval * 2, 10.0, interval)
+                        continue
+                    break
+                else:
+                    logger.error(
+                        "spider[%s] could not renew lease for node=%s before expiry; "
+                        "cancelling worker",
+                        self.platform, node_id,
+                    )
+                    worker_task.cancel()
+                    return
+
+            if not renewed:
+                logger.warning(
+                    "spider[%s] lost claim lease for node=%s",
+                    self.platform, node_id,
+                )
+                worker_task.cancel()
+                return
+            lease_deadline = time.monotonic() + self.lease_seconds
+            retry_cutoff = lease_deadline - safety_margin
+            retry_interval = min(2.0, interval)
 
     # -- worker -------------------------------------------------------------
 
     async def _process_node(self, claim: dict[str, Any]) -> None:
         node_id = claim["node_id"]
         hop = claim["hop_distance"]
+        claim_token = claim["claim_token"]
+        worker_task = asyncio.current_task()
+        if worker_task is None:
+            raise RuntimeError("spider worker must run inside an asyncio task")
+        heartbeat = asyncio.create_task(
+            self._heartbeat_claim(node_id, claim_token, worker_task),
+            name=f"spider-lease-{self.platform}-{node_id}",
+        )
 
         try:
-            # Cycle detection: VISIT-once. Postgres PK already prevents
-            # double-enqueue, but the visited adaptor lets us skip a node
-            # whose row was re-pended (e.g. by an operator).
-            new = await self._visited.add_if_absent(node_id)
-            if not new:
-                logger.debug(
-                    "spider[%s] node=%s already in visited set; skipping",
-                    self.platform, node_id,
-                )
-                await self._mark_completed(node_id)
-                return
-
             self.stats.nodes_visited += 1
 
             for et in self.fetcher.supported_edge_types:
@@ -497,7 +675,15 @@ class SpiderDiscover:
                         if inserted:
                             self.stats.edges_enqueued += 1
 
-            await self._mark_completed(node_id)
+            completed = await self._mark_completed(node_id, claim_token)
+            if completed:
+                try:
+                    await self._visited.add_if_absent(node_id)
+                except Exception:
+                    logger.exception(
+                        "spider[%s] could not record completed node=%s",
+                        self.platform, node_id,
+                    )
 
         except Exception as exc:
             self.stats.nodes_failed += 1
@@ -505,7 +691,16 @@ class SpiderDiscover:
                 "spider[%s] node=%s failed: %s",
                 self.platform, node_id, exc,
             )
-            await self._mark_failed(node_id, repr(exc))
+            result = await self._mark_failed(node_id, repr(exc), claim)
+            if result:
+                logger.info(
+                    "spider[%s] node=%s failure recorded as %s (attempt %s/%s)",
+                    self.platform, node_id, result,
+                    claim["attempts"], claim["max_attempts"],
+                )
+        finally:
+            heartbeat.cancel()
+            await asyncio.gather(heartbeat, return_exceptions=True)
 
     async def _iter_edges_with_breaker(
         self, node_id: str, edge_type: EdgeType

@@ -1,0 +1,30 @@
+{
+  "date": "2026-10-13",
+  "task": "Execute Phase 1 queue lifecycle parity from docs/spider-foryou-plan.md",
+  "start_commit": "27919493",
+  "branch": "main",
+  "findings": [
+    "The shared SpiderDiscover queue uses FOR UPDATE SKIP LOCKED and a platform/node key; lifecycle behavior is now extended with retries, terminal reasons, source provenance, idempotency, claim tokens, and leases.",
+    "Startup reclaims expired leases only; heartbeat renews active claims and cancels work if renewal cannot recover before lease expiry. Queue state is authoritative over informational visited markers, so stale markers cannot suppress retries.",
+    "A bounded keyset shadow mirror and generation-based reconciliation cover Instagram, Instagram bridge targets, TikTok, GitHub, Strava, Lemon8, YouTube, and Telegram. Full generations validate row IDs and source statuses before retiring stale shadow rows. No legacy consumer was cut over.",
+    "Read-only baseline captured GitHub queue counts and all legacy source status distributions. Large queues require repeated bounded mirror pages before parity can be evaluated."
+  ],
+  "constraints": [
+    "Do not touch Beeper.",
+    "Keep all work in this repository.",
+    "Preserve shared rate limiting, bounded work, and platform pacing.",
+    "Do not print credentials or tokens.",
+    "Keep legacy consumers active until parity is measured."
+  ],
+  "verification": [
+    "Compileall and git diff --check passed.",
+    "Transaction-scoped live PostgreSQL smoke passed retries, terminal failure, active/expired leases, stale visited markers, heartbeat failure fencing, edge traversal/provenance, two bounded TikTok shadow pages, exact ID/status reconciliation, and stale-row retirement. Temporary DDL and test rows rolled back; persistent checks confirmed no migration or smoke rows.",
+    "Pytest is unavailable in the host and active collector container. The additive migration has not been applied to the live database."
+  ],
+  "next_steps": [
+    "Commit and push after staging only intended files and verifying staged agent-state blobs contain no real hostname.",
+    "When operationally scheduled, run bounded shadow pages per queue over a complete interval and compare row/status counts before proposing any consumer cutover.",
+    "Before staging agent state, replace the real hostname with dev-host-3.example and verify the staged STATE.md and JOURNAL.md blobs.",
+    "Commit on main and push; continue the remaining Phase 1 parity work afterward."
+  ]
+}

@@ -1,16 +1,13 @@
 # Agent State
-Current task: Fix YouTube yt-dlp bot checks by adding request pacing and applicable Palladium settings.
-Status: YouTube pacing and Palladium settings are committed and pushed as `64ba0f1f`; all public-video probes still hit a bot check under the active container's stale yt-dlp `2026.03.17`.
-Diagnosis (2026-10-13):
-- Expected: public YouTube extraction/download succeeds without cookies.
-- Observed: the previously tried cookie-less `player_client=web,mweb` path still hits bot checks (user-provided verified context).
-- Evidence before change: the collector forced `player_client=web,mweb` and Chrome impersonation, and only waited 4 seconds between download jobs; the subprocess wrapper had no `--sleep-*` or retry-sleep args. Transcript, comment, and playlist calls used 2 retries but no request pacing. Container yt-dlp is `2026.03.17` with Node `v20.20.2`.
-- Palladium source review: its yt-dlp invocation explicitly enables `ejs:github` and can enable bundled QuickJS; it does not hard-code request sleeps, retries, player clients, impersonation, or headers. Its default video preset prefers H.264/AAC and MP4; it supports user-specified extra args. Source: https://github.com/tfourj/Palladium/blob/main/Palladium/Services/Python/palladium_ytdlp/ytdlp.py and `args.py`.
-- Suspected cause: the old delay did not pace requests within an extraction; three cookie-less probes (forced `web,mweb`, yt-dlp default client selection, and `ios`) still hit the bot check, so IP/environment blocking may also be involved.
-- Implementation: `_youtube_request_args()` applies 2-second request/subtitle sleeps, randomized 2–5-second download sleeps, exponential HTTP/extractor retry backoff, and `--remote-components ejs:github` to video, thumbnail, transcript, comment, and playlist yt-dlp paths. Client selection and impersonation now match Palladium's unset defaults; Node runtime and comment-specific extractor args remain.
-- Verification: all three metadata-only probes against public `jNQXAC9IVRw` failed with YouTube's bot-check response; no media was downloaded. Probe used `--ignore-config` and no cookie options. The active container runs `2026.03.17`, below the declared `yt-dlp>=2026.7.4` requirement.
-- Concurrent worktree note: spider queue changes are in progress in separate files and were excluded from commit `64ba0f1f`.
-- Next: rerun a single metadata probe after the active collector image runs the declared yt-dlp dependency; no code changes pending from the pacing pass.
+Current task: Execute Phase 1 of `docs/spider-foryou-plan.md`: queue lifecycle parity.
+Status: Shared lifecycle foundation, additive migration, and generation-based shadow reconciliation are implemented; verification is complete and commit/push are pending. Legacy consumers remain unchanged.
+Progress:
+- Shared queue retries now persist `next_attempt_at`, `max_attempts`, and terminal reasons; claims use ownership tokens and renewable leases, and startup only reclaims expired claims. Queue state is authoritative over the informational visited cache, so stale markers cannot skip reclaimed work. Heartbeat database failures retry and cancel the worker before its lease expires.
+- Added migration `spider_queue_lifecycle_20261013.sql` and bounded read/mirror/status-compare helpers for Instagram (including bridge targets), TikTok, GitHub, Strava, Lemon8, YouTube, and Telegram. Full shadow generations validate source IDs and statuses before old rows are retired; legacy queues stay authoritative and no live migration was performed.
+- Captured a read-only live baseline. GitHub has 1,722,517 pending, 1,086 processing, 12,891 done, and 12,453 failed rows; TikTok's `delayed` and `unavailable` states remain unmapped as `unknown` in the shadow view.
+- `compileall` and `git diff --check` pass. Transaction-scoped live PostgreSQL smoke passed retry/backoff, terminal state, active/expired lease handling, traversal provenance despite a stale visited marker, heartbeat failure fencing, two bounded shadow pages, exact row/status parity, and stale-row retirement. Temporary schema/data rolled back with no persistent migration or smoke rows.
+- Focused pytest was attempted on the host and collector container but is unavailable because pytest is not installed.
+Next: scrub and verify staged agent-state blobs, then commit and push. Full shadow sweeps across the large legacy queues and rollout gates remain Phase 1 follow-up work.
 
 ## Prior handoff history
 

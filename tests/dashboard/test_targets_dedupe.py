@@ -55,9 +55,9 @@ def _seed_sync():
                 SEEDED_USER, f"pid_{SEEDED_USER}",
             )
             await conn.execute(
-                "INSERT INTO spider_queue (platform, node_id, parent_node_id, status) "
-                "VALUES ($1, $2, $3, 'completed') ON CONFLICT DO NOTHING",
-                "instagram", SEEDED_USER, PARENT_USER,
+                "INSERT INTO spider_queue (platform, node_id, parent_node_id, status, idempotency_key) "
+                "VALUES ($1, $2, $3, 'completed', $4) ON CONFLICT DO NOTHING",
+                "instagram", SEEDED_USER, PARENT_USER, f"instagram:{SEEDED_USER}",
             )
         finally:
             await conn.close()

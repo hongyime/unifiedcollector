@@ -30,6 +30,7 @@ EXPECTED_TABLES = {
     "collection_schedules", "collection_runs", "dead_letter_queue", "account_state",
     "dashboard_users", "profile_access_attempts", "profile_access_summary",
     "search_queries", "search_results", "account_quota_usage", "spider_queue",
+    "spider_queue_legacy_shadow",
     # telegram (4 base + 7 migration)
     "telegram_chats", "telegram_messages", "telegram_users", "telegram_spider_queue",
     "telegram_chat_members", "telegram_reactions", "telegram_reaction_counts",
