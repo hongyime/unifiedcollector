@@ -107,9 +107,26 @@ _YOUTUBE_PROGRESSIVE_FORMAT = (
 
 
 def _youtube_extractor_args(*options: str) -> list[str]:
-    """Build shared unauthenticated YouTube extractor args plus call-specific options."""
-    extractor_args = ["player_client=web,mweb", *options]
+    """Build per-call extractor options; leave player-client selection to yt-dlp."""
+    if not options:
+        return []
+    extractor_args = list(options)
     return ["--extractor-args", f"youtube:{';'.join(extractor_args)}"]
+
+
+def _youtube_request_args(*, subtitles: bool = False) -> list[str]:
+    """Add YouTube pacing, retry backoff, and Palladium's EJS component setting."""
+    args = [
+        "--remote-components", "ejs:github",
+        "--sleep-requests", "2",
+        "--sleep-interval", "2",
+        "--max-sleep-interval", "5",
+        "--retry-sleep", "http:exp=5:60",
+        "--retry-sleep", "extractor:exp=5:60",
+    ]
+    if subtitles:
+        args.extend(["--sleep-subtitles", "2"])
+    return args
 
 
 _YOUTUBE_EXPECTED_YTDLP_STATES: tuple[tuple[re.Pattern[str], str], ...] = (
@@ -2324,6 +2341,7 @@ class YoutubeCollector(BaseCollector):
                     logger.info("youtube yt-dlp starting %s", url)
                     extra = self._yt_dlp_extra_args()
                     extra.extend(_youtube_extractor_args())
+                    extra.extend(_youtube_request_args())
                     if self._max_duration:
                         extra.extend(["--match-filter", f"duration<={self._max_duration * 60}"])
                     if self._cookie_browser:
@@ -2336,7 +2354,7 @@ class YoutubeCollector(BaseCollector):
                         output_template=os.path.join(tmpdir, "%(id)s.%(ext)s"),
                         max_downloads=None,  # respect playlist-end / per-video
                         retries=3,
-                        impersonate="chrome",
+                        impersonate=None,
                         write_thumbnail=True,
                         no_overwrites=True,
                         extra_args=extra,
@@ -2533,6 +2551,7 @@ class YoutubeCollector(BaseCollector):
         async with managed_tempdir("yt_thumb_") as tmpdir:
             extra: list[str] = ["--skip-download", "--playlist-end", "50"]
             extra.extend(_youtube_extractor_args())
+            extra.extend(_youtube_request_args())
             if self._cookie_browser:
                 extra.extend(["--cookies-from-browser", self._cookie_browser])
             result = await yt_dlp_download(
@@ -2541,7 +2560,7 @@ class YoutubeCollector(BaseCollector):
                 output_template=os.path.join(tmpdir, "%(id)s.%(ext)s"),
                 max_downloads=None,
                 retries=3,
-                impersonate="chrome",
+                impersonate=None,
                 write_thumbnail=True,
                 no_overwrites=True,
                 extra_args=extra,
@@ -2626,12 +2645,13 @@ class YoutubeCollector(BaseCollector):
         with tempfile.TemporaryDirectory() as tmpdir:
             output_tmpl = os.path.join(tmpdir, "%(id)s.%(ext)s")
             cmd = [
-                "yt-dlp", "--js-runtime", "node", "--impersonate", "chrome",
+                "yt-dlp", "--js-runtime", "node",
                 *_youtube_extractor_args(),
                 "--write-subs", "--write-auto-subs",
                 "--sub-lang", self._transcript_lang,
                 "--sub-format", "vtt",
                 "--skip-download", "--no-warnings",
+                *_youtube_request_args(subtitles=True),
                 "-o", output_tmpl,
                 "--retries", "2", "--socket-timeout", "30",
             ]
@@ -2723,13 +2743,14 @@ class YoutubeCollector(BaseCollector):
         with tempfile.TemporaryDirectory() as tmpdir:
             output_tmpl = os.path.join(tmpdir, "%(id)s.%(ext)s")
             cmd = [
-                "yt-dlp", "--js-runtime", "node", "--impersonate", "chrome",
+                "yt-dlp", "--js-runtime", "node",
                 "--write-comments", "--write-info-json",
                 "--skip-download", "--no-warnings",
                 *_youtube_extractor_args(
                     f"max_comments={self._max_comments},all,all,all",
                     "comment_sort=top",
                 ),
+                *_youtube_request_args(),
                 "-o", output_tmpl,
                 "--retries", "2", "--socket-timeout", "60",
             ]
@@ -3587,6 +3608,7 @@ class YoutubeCollector(BaseCollector):
         cmd = [
             "yt-dlp", "--js-runtime", "node", "--flat-playlist", "--dump-single-json",
             *_youtube_extractor_args(),
+            *_youtube_request_args(),
             "--quiet", "--no-warnings", "--ignore-errors",
             "--socket-timeout", "30", "--retries", "2",
         ]

@@ -1,14 +1,16 @@
 # Agent State
-Current task: Diagnose extension heartbeat/injection status, configure Chrome and Beeper XDG autostart, and plan Spider / For You / Feeds work.
-Status: Code and plan are pushed; autostart is configured. The live Chrome session remains on `1.23.104` pending an extension reload through the browser UI.
-Progress:
-- `swStartedAt` was incorrectly used as a 10-minute liveness signal although it records the MV3 worker instance start. The status now uses recent worker activity; periodic summary posts update bridge success/failure status. Identifiable Chrome error-document injection failures are logged as expected skips. Commit `319a5870`.
-- Read-only telemetry showed current `1.23.104` bridge heartbeats, real-page post writes and media ingests. Bridge `/health` returns 200. Chromium error documents cannot accept extension injection; the main-world hook is registered for supported hosts, but its runtime marker could not be inspected because browser security policy blocked the internal diagnostics page.
-- Built extension `1.23.105`; bundle syntax and `git diff --check` pass. The new bundle was not confirmed loaded in Chrome.
-- Chrome and Beeper XDG autostart entries validate; Beeper uses `DISPLAY=:10`. No app was launched and no reboot occurred. No Beeper data was accessed.
-- `docs/spider-foryou-plan.md` records per-platform state/gaps and a phased 34–53 engineering-day estimate. Plan commit `8212560f`.
-- Commits `319a5870` and `8212560f` are pushed to `origin/main`; worktree is clean.
-Next step: To activate the published extension fix in the desktop session, reload UnifiedCollector Bridge through an allowed browser UI and confirm the updated diagnostics.
+Current task: Fix YouTube yt-dlp bot checks by adding request pacing and applicable Palladium settings.
+Status: YouTube pacing and Palladium settings implemented; syntax and yt-dlp option checks pass; all public-video probes still hit a bot check; commit/push pending.
+Diagnosis (2026-10-13):
+- Expected: public YouTube extraction/download succeeds without cookies.
+- Observed: the previously tried cookie-less `player_client=web,mweb` path still hits bot checks (user-provided verified context).
+- Evidence before change: the collector forced `player_client=web,mweb` and Chrome impersonation, and only waited 4 seconds between download jobs; the subprocess wrapper had no `--sleep-*` or retry-sleep args. Transcript, comment, and playlist calls used 2 retries but no request pacing. Container yt-dlp is `2026.03.17` with Node `v20.20.2`.
+- Palladium source review: its yt-dlp invocation explicitly enables `ejs:github` and can enable bundled QuickJS; it does not hard-code request sleeps, retries, player clients, impersonation, or headers. Its default video preset prefers H.264/AAC and MP4; it supports user-specified extra args. Source: https://github.com/tfourj/Palladium/blob/main/Palladium/Services/Python/palladium_ytdlp/ytdlp.py and `args.py`.
+- Suspected cause: the old delay did not pace requests within an extraction; three cookie-less probes (forced `web,mweb`, yt-dlp default client selection, and `ios`) still hit the bot check, so IP/environment blocking may also be involved.
+- Implementation: `_youtube_request_args()` applies 2-second request/subtitle sleeps, randomized 2–5-second download sleeps, exponential HTTP/extractor retry backoff, and `--remote-components ejs:github` to video, thumbnail, transcript, comment, and playlist yt-dlp paths. Client selection and impersonation now match Palladium's unset defaults; Node runtime and comment-specific extractor args remain.
+- Verification: all three metadata-only probes against public `jNQXAC9IVRw` failed with YouTube's bot-check response; no media was downloaded. Probe used `--ignore-config` and no cookie options. Container yt-dlp warns that its `2026.03.17` version is over 90 days old.
+- Concurrent worktree note: spider queue changes are in progress in separate files and must remain unstaged for this YouTube commit.
+- Next: commit and push only the YouTube code and this task's state/journal records; leave the spider queue work unstaged.
 
 ## Prior handoff history
 
