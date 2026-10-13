@@ -80,7 +80,7 @@ from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 import httpx
 
 from src.core.base_collector import BaseCollector
-from src.core.collection_surface import normalize_collection_surface
+from src.core.collection_surface import bounded_capture_limit, normalize_collection_surface
 from src.collectors.lemon8.parse import (
     normalize_username as _parse_normalize_username,
     clean_media_url as _parse_clean_media_url,
@@ -293,17 +293,14 @@ class Lemon8Collector(BaseCollector):
             0,
             int(os.getenv("LEMON8_SPIDER_QUEUE_PER_CYCLE", "8") or "0"),
         )
-        self._feed_pages_per_cycle = max(
-            1,
-            int(os.getenv("LEMON8_FEED_PAGES_PER_CYCLE", "2") or "1"),
+        self._feed_pages_per_cycle = bounded_capture_limit(
+            os.getenv("LEMON8_FEED_PAGES_PER_CYCLE"), default=2, maximum=5, minimum=1,
         )
-        self._feed_media_per_cycle = max(
-            0,
-            int(os.getenv("LEMON8_FEED_MEDIA_PER_CYCLE", "40") or "0"),
+        self._feed_media_per_cycle = bounded_capture_limit(
+            os.getenv("LEMON8_FEED_MEDIA_PER_CYCLE"), default=40, maximum=120,
         )
-        self._fyp_detail_per_cycle = max(
-            0,
-            int(os.getenv("LEMON8_FYP_DETAIL_PER_CYCLE", "2") or "0"),
+        self._fyp_detail_per_cycle = bounded_capture_limit(
+            os.getenv("LEMON8_FYP_DETAIL_PER_CYCLE"), default=2, maximum=5,
         )
         try:
             self._rate_limit_cooldown_seconds = max(
@@ -1312,7 +1309,7 @@ class Lemon8Collector(BaseCollector):
         # Download media discovered from FYP. Skip profile photos unless enabled.
         # Also upsert a structured row into lemon8_posts so FYP-derived data is
         # queryable (synthesised id falls back to a hash when absent).
-        max_media = self._feed_media_per_cycle or max(50, pages * 30)
+        max_media = self._feed_media_per_cycle or min(120, max(50, pages * 30))
         detail_enabled = os.getenv("LEMON8_FYP_DETAIL_FETCH", "false").lower() == "true"
         detail_seen: set[str] = set()
         detail_fetches = 0
@@ -1359,8 +1356,7 @@ class Lemon8Collector(BaseCollector):
                     detail_enabled
                     and note_id not in detail_seen
                     and (
-                        self._fyp_detail_per_cycle <= 0
-                        or detail_fetches < self._fyp_detail_per_cycle
+                        detail_fetches < self._fyp_detail_per_cycle
                     )
                 ):
                     detail_seen.add(note_id)

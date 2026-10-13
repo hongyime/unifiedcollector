@@ -22,6 +22,24 @@ COLLECTION_SURFACES = (
     "unknown",
 )
 
+
+def bounded_capture_limit(
+    value: object,
+    *,
+    default: int,
+    maximum: int,
+    minimum: int = 0,
+) -> int:
+    """Parse an operator capture limit and clamp it to a hard safe range."""
+    lower = max(0, int(minimum))
+    upper = max(lower, int(maximum))
+    try:
+        parsed = int(value) if value is not None else int(default)
+    except (TypeError, ValueError, OverflowError):
+        parsed = int(default)
+    return max(lower, min(parsed, upper))
+
+
 _ALIASES = {
     "profile": "profile",
     "following": "following",
@@ -113,4 +131,8 @@ def normalize_collection_surface(
     return "unknown"
 
 
-__all__ = ["COLLECTION_SURFACES", "normalize_collection_surface"]
+__all__ = [
+    "COLLECTION_SURFACES",
+    "bounded_capture_limit",
+    "normalize_collection_surface",
+]

@@ -66,6 +66,7 @@ from typing import AsyncIterator, Optional
 import httpx
 
 from src.core.base_collector import BaseCollector
+from src.core.collection_surface import bounded_capture_limit
 from src.collectors.tiktok.decoder import tiktok_id_to_utc
 from src.collectors.tiktok.parse import safe_int as _parse_safe_int, to_dt as _parse_to_dt
 from src.core.file_naming import sanitize_name
@@ -110,6 +111,12 @@ except Exception:  # pragma: no cover
     SmartAccountSelector = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
+
+
+def _tiktok_item_limit(value: object, *, default: int) -> int:
+    """Keep configurable per-profile downloads finite even when set to zero."""
+    limit = bounded_capture_limit(value, default=default, maximum=100)
+    return limit or min(max(1, default), 100)
 
 # Module-level toggle for the Playwright browser fallback. Re-read at the call
 # site (via ``os.getenv``) so monkeypatch-based tests can flip it after import.
@@ -531,14 +538,14 @@ class TiktokCollector(BaseCollector):
             )
             or "0"
         )
-        self._profile_chunk_items = max(0, int(os.getenv("TIKTOK_PROFILE_CHUNK_ITEMS", "60") or "0"))
-        self._gallery_dl_max_items = max(
-            0,
-            int(os.getenv("TIKTOK_GALLERY_DL_MAX_ITEMS", str(self._profile_chunk_items)) or "0"),
+        self._profile_chunk_items = _tiktok_item_limit(
+            os.getenv("TIKTOK_PROFILE_CHUNK_ITEMS"), default=60,
         )
-        self._yt_dlp_max_downloads = max(
-            0,
-            int(os.getenv("TIKTOK_YTDLP_MAX_DOWNLOADS", str(self._profile_chunk_items)) or "0"),
+        self._gallery_dl_max_items = _tiktok_item_limit(
+            os.getenv("TIKTOK_GALLERY_DL_MAX_ITEMS"), default=self._profile_chunk_items,
+        )
+        self._yt_dlp_max_downloads = _tiktok_item_limit(
+            os.getenv("TIKTOK_YTDLP_MAX_DOWNLOADS"), default=self._profile_chunk_items,
         )
         self._yt_dlp_after_empty_gallery = (
             os.getenv("TIKTOK_YTDLP_AFTER_EMPTY_GALLERY", "false").lower() == "true"
@@ -2189,7 +2196,10 @@ class TiktokCollector(BaseCollector):
             if self._cookies_file
             else Path(os.getenv("TIKTOK_COOKIES_FILE", "/data/cookies/tiktok.txt"))
         )
-        max_videos = int(os.getenv("TIKTOK_BROWSER_MAX_VIDEOS", str(self._profile_chunk_items or 50)))
+        max_videos = _tiktok_item_limit(
+            os.getenv("TIKTOK_BROWSER_MAX_VIDEOS"),
+            default=self._profile_chunk_items or 50,
+        )
         browser_output_dir = Path(
             os.getenv("TIKTOK_BROWSER_TEMP_DIR", str(VAULT_ROOT / "tmp" / "tiktok_browser"))
         )

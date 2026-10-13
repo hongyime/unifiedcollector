@@ -1003,7 +1003,8 @@
     }
     async function autoScroll(times = 8, dist = 1400, pause = 1800, options = {}) {
       const maxPauseMs = options && options.maxPauseMs;
-      for (let i = 0; i < times; i++) {
+      const scrollPasses = Math.max(0, Math.min(18, Math.floor(Number(times) || 0)));
+      for (let i = 0; i < scrollPasses; i++) {
         window.scrollBy(0, dist * (0.7 + Math.random() * 0.6));
         await sleep(cappedHuman(pause, maxPauseMs));
       }

@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 
 from src.core.base_collector import BaseCollector
-from src.core.collection_surface import normalize_collection_surface
+from src.core.collection_surface import bounded_capture_limit, normalize_collection_surface
 from src.collectors.strava.parse import (
     normalize_training_activity as _parse_normalize_training_activity,
     normalize_feed_activity as _parse_normalize_feed_activity,
@@ -2589,7 +2589,10 @@ class StravaCollector(BaseCollector):
         before = day_end
         cursor = None
         page = 1
-        max_pages = int(os.getenv("STRAVA_FEED_MAX_PAGES", "20"))
+        max_pages = bounded_capture_limit(
+            os.getenv("STRAVA_FEED_MAX_PAGES"), default=20, maximum=20,
+        )
+        rate_limit_retries = 0
 
         async with httpx.AsyncClient(timeout=30, cookies=jar, follow_redirects=True) as client:
             while not self._stop.is_set() and page <= max_pages:
@@ -2607,6 +2610,10 @@ class StravaCollector(BaseCollector):
                     logger.warning("strava feed: page %d fetch error: %s", page, e)
                     break
                 if resp.status_code == 429:
+                    if rate_limit_retries >= 1:
+                        logger.warning("strava feed: repeated 429 on page %d after backoff; stopping this pass", page)
+                        break
+                    rate_limit_retries += 1
                     logger.warning("strava feed: rate-limited on page %d, sleeping %ds", page, self._ratelimit_sleep)
                     self._note_rate_limit(
                         scope="feed",
@@ -2619,6 +2626,7 @@ class StravaCollector(BaseCollector):
                 if resp.status_code != 200:
                     logger.warning("strava feed: stopped at page %d HTTP %d", page, resp.status_code)
                     break
+                rate_limit_retries = 0
                 try:
                     payload = resp.json()
                 except Exception as e:
@@ -2770,9 +2778,12 @@ class StravaCollector(BaseCollector):
         before = int(_time.time())
         cursor = None
         page = 1
-        max_pages = min(int(os.getenv("STRAVA_FEED_MAX_PAGES", "10")), 10)
+        max_pages = bounded_capture_limit(
+            os.getenv("STRAVA_FEED_MAX_PAGES"), default=10, maximum=10,
+        )
         total_kept = 0
         seen: set[int] = set()
+        rate_limit_retries = 0
 
         async with httpx.AsyncClient(
             timeout=30, cookies=jar, follow_redirects=True
@@ -2796,6 +2807,13 @@ class StravaCollector(BaseCollector):
                     logger.warning("strava following-feed: page %d fetch error: %s", page, e)
                     break
                 if resp.status_code == 429:
+                    if rate_limit_retries >= 1:
+                        logger.warning(
+                            "strava following-feed: repeated 429 on page %d after backoff; stopping this pass",
+                            page,
+                        )
+                        break
+                    rate_limit_retries += 1
                     logger.warning("strava following-feed: rate-limited on page %d; sleeping %ds", page, self._ratelimit_sleep)
                     self._note_rate_limit(
                         scope="following_feed",
@@ -2810,6 +2828,7 @@ class StravaCollector(BaseCollector):
                         "strava following-feed: stopped at page %d HTTP %d", page, resp.status_code
                     )
                     break
+                rate_limit_retries = 0
                 try:
                     payload = resp.json()
                 except Exception as e:

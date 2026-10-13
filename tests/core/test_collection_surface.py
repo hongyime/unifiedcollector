@@ -1,4 +1,8 @@
-from src.core.collection_surface import COLLECTION_SURFACES, normalize_collection_surface
+from src.core.collection_surface import (
+    COLLECTION_SURFACES,
+    bounded_capture_limit,
+    normalize_collection_surface,
+)
 
 
 def test_normalizes_surface_aliases_and_common_paths():
@@ -16,3 +20,10 @@ def test_surface_vocabulary_is_unique_and_has_required_labels():
         "profile", "following", "for_you", "explore", "topic", "home",
         "search", "message_stream", "unknown",
     } <= set(COLLECTION_SURFACES)
+
+
+def test_capture_limit_uses_default_and_hard_bounds():
+    assert bounded_capture_limit(None, default=2, maximum=5, minimum=1) == 2
+    assert bounded_capture_limit("999", default=2, maximum=5, minimum=1) == 5
+    assert bounded_capture_limit("-4", default=2, maximum=5, minimum=1) == 1
+    assert bounded_capture_limit("bad", default=2, maximum=5, minimum=1) == 2
