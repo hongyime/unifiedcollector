@@ -1,11 +1,11 @@
 # Agent State
 Current task: Correct `docs/architecture.md` using the independent architecture and efficiency vetting reports.
-Status: Documentation changes and Mermaid validation are complete locally; commit and push are pending.
+Status: Complete and pushed to `main` in commit `f0bb7b90`.
 Progress:
 - Corrected the System Map and sequence diagram for worker-to-Redis alerts, Beeper REST polling, WhatsApp bridge boundaries, Analyzer hint direction, and Instagram cycle timing; added watchdog, scheduler, browser cookie vault, and SpiderFoot service.
 - Marked the four approved efficiency workstreams from `93d14759` as complete and recorded remaining audit risks, including deferred profile-probe consolidation.
 - Mermaid CLI v12.0.0 rendered all three diagrams successfully; `git diff --check` passed. No application tests or service restarts were needed for this docs-only change.
-Next steps: Commit and push the verified documentation and state update, then record publication status.
+Next steps: None.
 
 ## Prior handoff history
 
