@@ -1,13 +1,13 @@
 # Agent State
 Current task: Execute Phases 2–6 of `docs/spider-foryou-plan.md` in order, with bounded checks and per-platform rollout gates.
-Status: Phase 2 is pushed as `e2238c33`; Phase 3 is pushed as `0e6c47fa` with state commit `63e4a6a4`. Phase 4 implementation and rollback-only live checks are complete; commit/push is next. Its additive schema migration is unapplied. Focused pytest is unavailable on host/runtime.
+Status: Phase 2 is pushed as `e2238c33`; Phase 3 is pushed as `0e6c47fa` with state commit `63e4a6a4`. Phase 4 is pushed as `33c18f5b`; implementation and rollback-only live checks are complete. Its additive schema migration is unapplied. Focused pytest is unavailable on host/runtime.
 Progress:
 - Phase 4 adds canonical `collection_surface` values to social post/media and native Telegram/WhatsApp message writes. Browser writes classify page/feed context, preserve unknown when ambiguous, and record observed/stored/deduped/failed counts and outcomes.
 - `/collectors/surface-progress` and the Coverage page report per-platform surface counts, failures, last success, media/message rows, and freshness. Beeper is excluded from report queries.
 - Extension `1.23.106` and dashboard production builds passed. Python compile/diff checks and focused manual helper/API assertions passed. Transaction-only live Postgres smokes exercised browser event/post writes and the report SQL; all synthetic rows rolled back. No platform requests were made.
 - The migration is named `zzzz_20261013_add_collection_surface_provenance.sql` so it sorts after its prerequisite tables; it has not been applied to the live schema.
 - Phase 3 shared discovery gates remain off, and its additive evidence migration remains unapplied. Do not touch Beeper; preserve platform pacing and per-platform gates.
-Next: commit/push Phase 4 and update its pushed hash, then implement Phases 5 and 6 in order. See `.agents/handoffs/20261013-spider-phases-2-6.json`.
+Next: implement Phase 5 feed adapter coverage and Phase 6 operations/rollout in order. See `.agents/handoffs/20261013-spider-phases-2-6.json`.
 
 Previous task: YouTube cookies were exported locally. The active collector yt-dlp `2026.03.17` hit a bot-related sign-in challenge; official yt-dlp `2026.08.19` returned no metadata on two public probes without a bot-related message (one age/unavailable, one generic failure). No media was downloaded; see the journal and never include cookie values.
 
