@@ -1,6 +1,6 @@
 {
   "date": "2026-10-13",
-  "task": "Execute Phases 2\u20136 of docs/spider-foryou-plan.md in order",
+  "task": "Execute Phases 2–6 of docs/spider-foryou-plan.md in order",
   "start_commit": "c8d127fd",
   "branch": "main",
   "phase_1": {
@@ -74,9 +74,8 @@
     "commit_push": "pushed to main as e2238c33"
   },
   "next_steps": [
-    "Implement Phase 5 feed adapter coverage and feasibility checks, then bounded checks and commit/push.",
-    "Implement Phase 6 operational views, error classifications, controls, and rollout notes; commit/push.",
-    "Before each commit touching .agents, replace any real hostname in staged state/journal blobs with dev-host-3.example and verify staged blobs."
+    "Implement Phase 6 queue-age/surface-freshness operations, error classifications, per-platform pause/limit controls, and rollout notes; validate and commit/push.",
+    "Before the Phase 6 state commit, replace any real hostname in staged state/journal blobs with dev-host-3.example and verify staged blobs."
   ],
   "phase_3_status": {
     "implementation": "complete; legacy platform queues remain active and per-platform shared gates default off",
@@ -89,11 +88,11 @@
     "validation": "compileall, git diff --check, env split validation, helper assertions, and transaction-only live PostgreSQL smoke passed; pytest unavailable on host and runtime; no platform endpoints contacted",
     "transaction_smoke": "passed evidence idempotency and per-platform pending cap using transaction-local temp tables; rolled back all writes",
     "sql_debugging": "initial live smoke exposed ambiguous text/VARCHAR parameter inference in queue insert; explicit casts fixed it and rerun passed",
-    "migration": "20261013_add_spider_discovery_evidence.sql is not applied; gates remain off",
+    "migration": "20261013_add_spider_discovery_evidence.sql is applied; live ledger checksum matches the repository file; shared gates remain off.",
     "commit_push": "pushed to main as 0e6c47fa"
   },
   "phase_4_status": {
-    "implementation": "complete; schema rollout pending",
+    "implementation": "complete; live schema applied",
     "coverage": [
       "canonical surface vocabulary on social post/media writes",
       "Telegram and WhatsApp message_stream labels",
@@ -102,7 +101,19 @@
     ],
     "validation": "extension 1.23.106 and dashboard builds passed; compileall, diff-check, manual helper/API assertions, route registration, and transaction-only live PostgreSQL checks passed; pytest unavailable; no platform requests made",
     "transaction_smoke": "passed actual browser event/post write SQL and per-surface API aggregation against transaction-local temp tables; includes synthetic Telegram/WhatsApp stream rows; rolled back all writes",
-    "migration": "zzzz_20261013_add_collection_surface_provenance.sql is not applied; filename sorts after prerequisite table migrations",
+    "migration": "zzzz_20261013_add_collection_surface_provenance.sql is applied; live ledger checksum matches the repository file.",
     "commit_push": "pushed to main as 33c18f5b"
+  },
+  "phase_5_status": {
+    "implementation": "complete; shared queue and For You rollout gates remain off",
+    "coverage": [
+      "18-pass browser scroll ceiling for existing feed/profile adapters",
+      "TikTok profile fallback capped at 100 items",
+      "Lemon8 FYP capped at 5 pages, 120 media items, and 5 optional detail requests",
+      "Strava feed capped at 10/20 pages and at most one retry after a 429 backoff",
+      "Instagram personalized home/Reels and YouTube personalized home assessed unsupported pending a bounded visible-page adapter"
+    ],
+    "validation": "Python compileall, eight bounded-limit assertions, extension 1.23.107 build, git diff --check, and read-only live Postgres schema/ledger check passed. Pytest unavailable; direct collector import blocked by missing asyncpg. No platform endpoints contacted.",
+    "commit_push": "pushed to main as 8be2796a"
   }
 }

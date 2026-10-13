@@ -1,13 +1,13 @@
 # Agent State
 Current task: Execute Phases 2–6 of `docs/spider-foryou-plan.md` in order, with bounded checks and per-platform rollout gates.
-Status: Phase 2 is pushed as `e2238c33`; Phase 3 is pushed as `0e6c47fa` with state commit `63e4a6a4`. Phase 4 is pushed as `33c18f5b`; implementation and rollback-only live checks are complete. Its additive schema migration is unapplied. Focused pytest is unavailable on host/runtime.
+Status: Phases 2–5 are pushed (`e2238c33`, `0e6c47fa`, `33c18f5b`, `8be2796a`). Phase 6 remains. A read-only live Postgres check confirmed matching ledger checksums for the Phase 3 and 4 migrations. Pytest and asyncpg are unavailable in the host Python environment.
 Progress:
-- Phase 4 adds canonical `collection_surface` values to social post/media and native Telegram/WhatsApp message writes. Browser writes classify page/feed context, preserve unknown when ambiguous, and record observed/stored/deduped/failed counts and outcomes.
-- `/collectors/surface-progress` and the Coverage page report per-platform surface counts, failures, last success, media/message rows, and freshness. Beeper is excluded from report queries.
-- Extension `1.23.106` and dashboard production builds passed. Python compile/diff checks and focused manual helper/API assertions passed. Transaction-only live Postgres smokes exercised browser event/post writes and the report SQL; all synthetic rows rolled back. No platform requests were made.
-- The migration is named `zzzz_20261013_add_collection_surface_provenance.sql` so it sorts after its prerequisite tables; it has not been applied to the live schema.
-- Phase 3 shared discovery gates remain off, and its additive evidence migration remains unapplied. Do not touch Beeper; preserve platform pacing and per-platform gates.
-Next: implement Phase 5 feed adapter coverage and Phase 6 operations/rollout in order. See `.agents/handoffs/20261013-spider-phases-2-6.json`.
+- Phase 4 adds canonical `collection_surface` values to social post/media and native Telegram/WhatsApp message writes. Browser writes classify page/feed context, preserve unknown when ambiguous, and report observed/stored/deduped/failed counts and outcomes.
+- `/collectors/surface-progress` and the Coverage page report per-platform surface counts, failures, last success, media/message rows, and freshness. Do not touch Beeper.
+- Phase 5 hardens feed bounds: browser scroll passes cap at 18; TikTok profile fallbacks cap at 100 items; Lemon8 FYP caps at 5 pages, 120 media items, and 5 optional detail requests; Strava feed passes cap at 10/20 pages and stop after one repeated 429 after backoff. Instagram personalized home/Reels and YouTube personalized home remain unsupported.
+- Extension `1.23.107` build, Python compileall, focused helper assertions, and read-only live Postgres schema/ledger checks passed. Pytest is unavailable and collector imports fail because asyncpg is absent. No platform endpoints were contacted.
+- Live ledger checksums match `20261013_add_spider_discovery_evidence.sql` and `zzzz_20261013_add_collection_surface_provenance.sql`; both migrations are applied. Shared discovery gates remain off pending reconciliation.
+Next: implement and verify Phase 6 operations/rollout. See `.agents/handoffs/20261013-spider-phases-2-6.json`.
 
 Previous task: YouTube bot-check resolved. Cross-project survey (musicstream, healthkaki-pov, unifiedcollector) identified root cause as cookie jar writeback permissions: yt-dlp calls save_cookies() at exit, raising PermissionError on host-owned read-only cookie mount in the container (uid 1001), misclassified as a restricted/bot failure, compounded by negative-cache memoization in _usable_cookie_file(). Added ephemeral writable cookie snapshotting (_create_writable_cookie_snapshot) into operation tempdirs across video, thumbnail, transcript, comment, and playlist calls. Verified with public probe video jNQXAC9IVRw (RC 0, metadata and 11 formats extracted, zero bot check). No media was bulk-downloaded; never include cookie values.
 
