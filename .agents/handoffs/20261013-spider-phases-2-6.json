@@ -74,7 +74,6 @@
     "commit_push": "pushed to main as e2238c33"
   },
   "next_steps": [
-    "Commit and push Phase 3 implementation and state update.",
     "Implement Phase 4 normalized collection-surface provenance and reporting, then bounded checks and commit/push.",
     "Continue with Phases 5 and 6 in order; preserve per-platform default-off gates and do not touch Beeper.",
     "Before each commit touching .agents, replace any real hostname in staged state/journal blobs with dev-host-3.example and verify staged blobs."
@@ -91,6 +90,6 @@
     "transaction_smoke": "passed evidence idempotency and per-platform pending cap using transaction-local temp tables; rolled back all writes",
     "sql_debugging": "initial live smoke exposed ambiguous text/VARCHAR parameter inference in queue insert; explicit casts fixed it and rerun passed",
     "migration": "20261013_add_spider_discovery_evidence.sql is not applied; gates remain off",
-    "commit_push": "pending"
+    "commit_push": "pushed to main as 0e6c47fa"
   }
 }

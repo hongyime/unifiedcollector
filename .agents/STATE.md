@@ -1,12 +1,12 @@
 # Agent State
 Current task: Execute Phases 2–6 of `docs/spider-foryou-plan.md` in order, with bounded checks and per-platform rollout gates.
-Status: Phase 2 is pushed as `e2238c33`. Phase 3 implementation and rollback-only live DB smoke are complete; commit/push is next. Discovery migration is unapplied, and all new platform gates default off. Pytest is unavailable in host and collector runtime.
+Status: Phase 2 is pushed as `e2238c33`; Phase 3 is pushed as `0e6c47fa`. Phase 3 implementation and rollback-only live DB smoke are complete. Discovery migration is unapplied, and all new platform gates default off. Pytest is unavailable in host and collector runtime.
 Progress:
 - Phase 3 adds source-linked typed discovery for YouTube channel references, Lemon8 feed/topic/profile co-occurrences, Telegram chats/members/links, and bounded browser-observed X/Threads/Facebook accounts. Legacy queues remain active; no platform endpoints were contacted.
 - `compileall`, `git diff --check`, `scripts/verify_env_split.py`, helper assertions, and a transaction-only live PostgreSQL smoke passed. The smoke verified evidence idempotency and pending-cap behavior; all temporary rows were rolled back.
 - The first queue SQL smoke exposed ambiguous `$1` text/VARCHAR inference; explicit casts fixed it. No credentials or tokens were logged. The new evidence migration is not applied.
 - Do not touch Beeper. Preserve platform pacing and shared scrape controls. Keep claims gated until bounded shadow parity is measured.
-Next: finish Phase 3 commit/push and state update, then implement Phase 4 feed provenance/reporting, followed by Phases 5 and 6. See `.agents/handoffs/20261013-spider-phases-2-6.json`.
+Next: implement Phase 4 feed provenance/reporting, followed by Phases 5 and 6. See `.agents/handoffs/20261013-spider-phases-2-6.json`.
 
 Previous task: YouTube cookies were exported locally. The active collector yt-dlp `2026.03.17` hit a bot-related sign-in challenge; official yt-dlp `2026.08.19` returned no metadata on two public probes without a bot-related message (one age/unavailable, one generic failure). No media was downloaded; see the journal and never include cookie values.
 
