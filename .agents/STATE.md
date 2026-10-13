@@ -1,11 +1,14 @@
 # Agent State
-Current task: Correct `docs/architecture.md` using the independent architecture and efficiency vetting reports.
-Status: Complete and pushed to `main` in commit `f0bb7b90`.
+Current task: Repair and verify the profile-probe queue feeder, verify YouTube download behavior after `ac9ee584`, and classify the 35 empty tables from the 2026-10-13 inventory.
+Status: Implementation and empty-table triage are complete; commit/push is pending. Cookie-less YouTube verification failed at the authentication gate.
 Progress:
-- Corrected the System Map and sequence diagram for worker-to-Redis alerts, Beeper REST polling, WhatsApp bridge boundaries, Analyzer hint direction, and Instagram cycle timing; added watchdog, scheduler, browser cookie vault, and SpiderFoot service.
-- Marked the four approved efficiency workstreams from `93d14759` as complete and recorded remaining audit risks, including deferred profile-probe consolidation.
-- Mermaid CLI v12.0.0 rendered all three diagrams successfully; `git diff --check` passed. No application tests or service restarts were needed for this docs-only change.
-Next steps: None.
+- Read repository guidance, shared state, `/tmp/agy-data-inventory.md`, and `docs/architecture.md`. The inventory confirms all five profile tables and `profile_probe_queue` are empty.
+- Traced the queue consumer: five source-specific probe containers poll `profile_probe_queue`; the scheduler has no feeder handler. `social_users` contains collected account names and is indexed by platform/username; `discovered_links` contains direct profile URLs for several target platforms.
+- Added `ProfileProbeFeederHandler` to the scheduler. It routes direct spider profile URLs, prioritizes Instagram/TikTok/Threads/X same-handle candidates ahead of Telegram, and seeds at most 100 targets per source every 15 minutes.
+- Live verification: the scheduled feeder logged 100 queued per source; queue counts reached 201–205 per source with matching case-insensitive unique counts. Probes processed targets without errors. Profile rows: Snapchat 7, PayPal 12, Airbnb 0, Bluesky 0, Pinterest 21; Airbnb and Bluesky candidates so far were 404s.
+- YouTube: cookie-less yt-dlp with `player_client=web,mweb` reached both player APIs but received “Sign in to confirm you’re not a bot.” The configured cookie file is absent from the collector container and the Chrome profile is not mounted there. Per the no-browser constraint, no profile export was attempted.
+- Triaged all 35 empty tables: 15 expected-empty, 16 gaps, and 4 unknown. Fixed the six profile-probe queue/table gaps only; see the task report for the remaining gap causes.
+Next steps: Scrub and verify staged shared-state blobs, commit and push. A successful YouTube retry needs an exported cookie file supplied without browser access.
 
 ## Prior handoff history
 

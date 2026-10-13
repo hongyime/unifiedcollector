@@ -1,0 +1,35 @@
+{
+  "date": "2026-10-13",
+  "task": "Profile-probe queue feeder, YouTube download verification, and empty-table triage",
+  "status": "implementation_complete_publication_pending_youtube_cookie_followup",
+  "base_commit": "810ffa5a",
+  "constraints": [
+    "Do not touch Beeper",
+    "Do not access or operate a browser",
+    "Do not print credentials",
+    "Keep all work within this repository"
+  ],
+  "verified_context": [
+    "Inventory reports 31 GB, 160 tables, 37,040,712 rows, and 35 empty tables.",
+    "profile_probe_queue and all five profile-only target tables are empty.",
+    "Five profile-only containers consume queue rows; no feeder handler is registered in the scheduler.",
+    "profile_probe_queue has a unique (source, username) constraint.",
+    "social_users has an index on (platform, username) and contains collected usernames.",
+    "discovered_links contains a small number of direct URLs for probe-target platforms.",
+    "YouTube fix ac9ee584 adds the web,mweb player clients; collector uses yt-dlp through subprocess_downloader.",
+    "The scheduled feeder logged 100 queued per source. Queue totals reached 201–205 per source with matching case-insensitive unique counts; Snapchat, PayPal, and Pinterest profiles now have rows.",
+    "The cookie-less YouTube probe reached both player APIs, then received the bot-verification sign-in gate. The collector container has no configured cookie file and does not mount the Chrome profile."
+  ],
+  "next_steps": [
+    "Implement a scheduler handler that seeds direct target-platform spider URLs and bounded same-handle candidates from social_users.",
+    "Add cadence and per-source batch settings to the common environment example; maintain unique-key idempotency.",
+    "Publish the implemented feeder and triage changes after staged hostname checks.",
+    "For YouTube success, retry after receiving an exported cookie file that can be used without browser access.",
+    "Keep the 16 non-probe empty-table gaps as follow-up work; none shares the profile-probe feeder cause."
+  ],
+  "triage_counts": {
+    "expected_empty": 15,
+    "gaps": 16,
+    "unknown": 4
+  }
+}
