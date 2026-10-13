@@ -1,13 +1,13 @@
 # Agent State
 Current task: Execute Phase 1 of `docs/spider-foryou-plan.md`: queue lifecycle parity.
-Status: Shared lifecycle foundation, additive migration, and generation-based shadow reconciliation are implemented; verification is complete and commit/push are pending. Legacy consumers remain unchanged.
+Status: Shared lifecycle foundation, additive migration, and generation-based shadow reconciliation are implemented and pushed as `eb6ad9bd` on `main`. Legacy consumers remain unchanged.
 Progress:
 - Shared queue retries now persist `next_attempt_at`, `max_attempts`, and terminal reasons; claims use ownership tokens and renewable leases, and startup only reclaims expired claims. Queue state is authoritative over the informational visited cache, so stale markers cannot skip reclaimed work. Heartbeat database failures retry and cancel the worker before its lease expires.
 - Added migration `spider_queue_lifecycle_20261013.sql` and bounded read/mirror/status-compare helpers for Instagram (including bridge targets), TikTok, GitHub, Strava, Lemon8, YouTube, and Telegram. Full shadow generations validate source IDs and statuses before old rows are retired; legacy queues stay authoritative and no live migration was performed.
 - Captured a read-only live baseline. GitHub has 1,722,517 pending, 1,086 processing, 12,891 done, and 12,453 failed rows; TikTok's `delayed` and `unavailable` states remain unmapped as `unknown` in the shadow view.
 - `compileall` and `git diff --check` pass. Transaction-scoped live PostgreSQL smoke passed retry/backoff, terminal state, active/expired lease handling, traversal provenance despite a stale visited marker, heartbeat failure fencing, two bounded shadow pages, exact row/status parity, and stale-row retirement. Temporary schema/data rolled back with no persistent migration or smoke rows.
 - Focused pytest was attempted on the host and collector container but is unavailable because pytest is not installed.
-Next: scrub and verify staged agent-state blobs, then commit and push. Full shadow sweeps across the large legacy queues and rollout gates remain Phase 1 follow-up work.
+Next: run full bounded shadow sweeps across the large legacy queues and hold consumers on their existing queues until parity and rollout gates are met. Focused pytest remains unavailable in the current host and collector environments.
 
 ## Prior handoff history
 

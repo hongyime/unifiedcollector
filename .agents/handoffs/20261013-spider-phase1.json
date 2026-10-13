@@ -2,6 +2,8 @@
   "date": "2026-10-13",
   "task": "Execute Phase 1 queue lifecycle parity from docs/spider-foryou-plan.md",
   "start_commit": "27919493",
+  "implementation_commit": "eb6ad9bd",
+  "implementation_pushed": true,
   "branch": "main",
   "findings": [
     "The shared SpiderDiscover queue uses FOR UPDATE SKIP LOCKED and a platform/node key; lifecycle behavior is now extended with retries, terminal reasons, source provenance, idempotency, claim tokens, and leases.",
@@ -22,9 +24,7 @@
     "Pytest is unavailable in the host and active collector container. The additive migration has not been applied to the live database."
   ],
   "next_steps": [
-    "Commit and push after staging only intended files and verifying staged agent-state blobs contain no real hostname.",
     "When operationally scheduled, run bounded shadow pages per queue over a complete interval and compare row/status counts before proposing any consumer cutover.",
-    "Before staging agent state, replace the real hostname with dev-host-3.example and verify the staged STATE.md and JOURNAL.md blobs.",
-    "Commit on main and push; continue the remaining Phase 1 parity work afterward."
+    "Continue Phase 1 parity work; preserve source-specific queues and per-platform rollback until rollout gates are met."
   ]
 }
