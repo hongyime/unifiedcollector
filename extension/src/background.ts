@@ -2215,8 +2215,10 @@ async function uploadMediaViaBrowserNow(base, msg, item) {
     const payload = withExtensionVersion({
       platform,
       username: msg.username,
+      collection_surface: msg.collection_surface || "unknown",
       item: {
         ...item,
+        collection_surface: item.collection_surface || msg.collection_surface || "unknown",
         mime_type: blob.type || response.headers.get("content-type") || null,
         meta: { ...(item.meta || {}), browser_upload: true, browser_upload_transport: "multipart" },
       },
@@ -2552,6 +2554,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             body: JSON.stringify(withExtensionVersion({
               platform,
               username: msg.username,
+              collection_surface: msg.collection_surface || "unknown",
               items: urlItems,
               record_empty: !!msg.record_empty || tiktokUploadOnlyProgress,
               probe_reason: msg.probe_reason || (tiktokUploadOnlyProgress ? "browser_upload_candidates_queued" : null),
@@ -2628,7 +2631,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         try {
           const r = await fetch(base + "/social/posts", {
             method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(withExtensionVersion({ platform: msg.platform || "instagram", username: msg.username, posts: msg.posts })),
+            body: JSON.stringify(withExtensionVersion({
+              platform: msg.platform || "instagram", username: msg.username,
+              collection_surface: msg.collection_surface || "unknown", posts: msg.posts,
+            })),
           });
           const j = await r.json().catch(() => ({}));
           await log("info", `📝 ${msg.platform || "instagram"} · ${msg.username} · ${j.saved ?? msg.posts.length} post(s) w/ captions+counts`);

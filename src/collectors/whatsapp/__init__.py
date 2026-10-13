@@ -1369,8 +1369,8 @@ class WhatsappCollector(BaseCollector):
                 INSERT INTO whatsapp_messages (
                     platform_message_id, chat_id, sender_id, from_me,
                     text, media_mime_type, quoted_message_id, quoted_text,
-                    forward_from_name, timestamp, metadata
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                    forward_from_name, timestamp, metadata, collection_surface
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'message_stream')
                 ON CONFLICT (platform_message_id) DO UPDATE SET
                     chat_id = COALESCE(whatsapp_messages.chat_id, EXCLUDED.chat_id),
                     sender_id = COALESCE(EXCLUDED.sender_id, whatsapp_messages.sender_id),
@@ -1381,7 +1381,8 @@ class WhatsappCollector(BaseCollector):
                     quoted_text = COALESCE(NULLIF(EXCLUDED.quoted_text, ''), whatsapp_messages.quoted_text),
                     forward_from_name = COALESCE(NULLIF(EXCLUDED.forward_from_name, ''), whatsapp_messages.forward_from_name),
                     timestamp = COALESCE(EXCLUDED.timestamp, whatsapp_messages.timestamp),
-                    metadata = COALESCE(whatsapp_messages.metadata, '{}'::jsonb) || COALESCE(EXCLUDED.metadata, '{}'::jsonb)
+                    metadata = COALESCE(whatsapp_messages.metadata, '{}'::jsonb) || COALESCE(EXCLUDED.metadata, '{}'::jsonb),
+                    collection_surface = 'message_stream'
             """,
             msg_id, chat_uuid, sender_uuid, from_me,
             text, event.get("mimetype"), quoted_message_id, quoted_text,

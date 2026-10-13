@@ -80,6 +80,7 @@ from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 import httpx
 
 from src.core.base_collector import BaseCollector
+from src.core.collection_surface import normalize_collection_surface
 from src.collectors.lemon8.parse import (
     normalize_username as _parse_normalize_username,
     clean_media_url as _parse_clean_media_url,
@@ -776,34 +777,41 @@ class Lemon8Collector(BaseCollector):
         seed = "|".join(seed_parts)
         return "fyp_" + hashlib.sha256(seed.encode("utf-8", "ignore")).hexdigest()[:32]
 
-    async def _link_lemon8_media(self, note_id: str, username: str, url: str, is_video: bool) -> None:
+    async def _link_lemon8_media(
+        self, note_id: str, username: str, url: str, is_video: bool,
+        *, collection_surface: str = "for_you",
+    ) -> None:
         """Group a feed-card media URL under its post so lemon8_posts.image_urls /
         video_url is populated (was 0% — media existed as loose files, unlinked to
         posts). Idempotent: creates a minimal post row if absent, else appends the
         URL to image_urls (deduped). A later detail fetch fills title/stats."""
         if not note_id or not url:
             return
+        collection_surface = normalize_collection_surface(collection_surface)
         post_url = f"https://www.lemon8-app.com/@{username}/{note_id}"
         async with self.pool.acquire() as conn:
             profile_uuid = await self._ensure_post_profile(conn, username, username)
             if is_video:
                 await conn.execute(
                     """
-                    INSERT INTO lemon8_posts (platform_post_id, profile_id, username, video_url, post_url)
-                    VALUES ($1, $2, $3, $4, $5)
+                    INSERT INTO lemon8_posts (platform_post_id, profile_id, username, video_url, post_url, collection_surface)
+                    VALUES ($1, $2, $3, $4, $5, $6)
                     ON CONFLICT (platform_post_id) DO UPDATE SET
                         profile_id = COALESCE(lemon8_posts.profile_id, EXCLUDED.profile_id),
                         video_url = COALESCE(lemon8_posts.video_url, EXCLUDED.video_url),
                         username  = COALESCE(lemon8_posts.username, EXCLUDED.username),
-                        post_url  = COALESCE(lemon8_posts.post_url, EXCLUDED.post_url)
+                        post_url  = COALESCE(lemon8_posts.post_url, EXCLUDED.post_url),
+                        collection_surface = CASE WHEN EXCLUDED.collection_surface='unknown'
+                                                  THEN lemon8_posts.collection_surface
+                                                  ELSE EXCLUDED.collection_surface END
                     """,
-                    note_id, profile_uuid, username, url, post_url,
+                    note_id, profile_uuid, username, url, post_url, collection_surface,
                 )
             else:
                 await conn.execute(
                     """
-                    INSERT INTO lemon8_posts (platform_post_id, profile_id, username, image_urls, post_url)
-                    VALUES ($1, $2, $3, ARRAY[$4], $5)
+                    INSERT INTO lemon8_posts (platform_post_id, profile_id, username, image_urls, post_url, collection_surface)
+                    VALUES ($1, $2, $3, ARRAY[$4], $5, $6)
                     ON CONFLICT (platform_post_id) DO UPDATE SET
                         profile_id = COALESCE(lemon8_posts.profile_id, EXCLUDED.profile_id),
                         image_urls = (
@@ -811,12 +819,18 @@ class Lemon8Collector(BaseCollector):
                             FROM unnest(COALESCE(lemon8_posts.image_urls, '{}') || EXCLUDED.image_urls) e
                         ),
                         username = COALESCE(lemon8_posts.username, EXCLUDED.username),
-                        post_url = COALESCE(lemon8_posts.post_url, EXCLUDED.post_url)
+                        post_url = COALESCE(lemon8_posts.post_url, EXCLUDED.post_url),
+                        collection_surface = CASE WHEN EXCLUDED.collection_surface='unknown'
+                                                  THEN lemon8_posts.collection_surface
+                                                  ELSE EXCLUDED.collection_surface END
                     """,
-                    note_id, profile_uuid, username, url, post_url,
+                    note_id, profile_uuid, username, url, post_url, collection_surface,
                 )
 
-    async def _upsert_post(self, user_id: str, post_data: dict):
+    async def _upsert_post(
+        self, user_id: str, post_data: dict, *, collection_surface: str = "profile",
+    ):
+        collection_surface = normalize_collection_surface(collection_surface)
         platform_post_id = self._resolve_post_id(post_data)
         if not platform_post_id:
             logger.debug("lemon8 _upsert_post: skipped — no resolvable id; keys=%s",
@@ -849,8 +863,8 @@ class Lemon8Collector(BaseCollector):
                     INSERT INTO lemon8_posts (
                         platform_post_id, profile_id, username, title, description,
                         image_urls, video_url,
-                        like_count, comment_count, post_url, metadata
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                        like_count, comment_count, post_url, metadata, collection_surface
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                     ON CONFLICT (platform_post_id) DO UPDATE SET
                         profile_id    = COALESCE(lemon8_posts.profile_id, EXCLUDED.profile_id),
                         like_count    = EXCLUDED.like_count,
@@ -861,7 +875,10 @@ class Lemon8Collector(BaseCollector):
                         description   = COALESCE(NULLIF(EXCLUDED.description, ''), lemon8_posts.description),
                         username      = COALESCE(EXCLUDED.username, lemon8_posts.username),
                         post_url      = COALESCE(EXCLUDED.post_url,  lemon8_posts.post_url),
-                        metadata      = EXCLUDED.metadata
+                        metadata      = EXCLUDED.metadata,
+                        collection_surface = CASE WHEN EXCLUDED.collection_surface='unknown'
+                                                  THEN lemon8_posts.collection_surface
+                                                  ELSE EXCLUDED.collection_surface END
                 """,
                     platform_post_id, profile_uuid, user_id,
                     post_data.get("title"), post_data.get("description"),
@@ -869,7 +886,7 @@ class Lemon8Collector(BaseCollector):
                     int(post_data.get("stats", {}).get("likeCount", 0) or 0),
                     int(post_data.get("stats", {}).get("commentCount", 0) or 0),
                     post_url,
-                    json.dumps(post_data, default=str))
+                    json.dumps(post_data, default=str), collection_surface)
                 return True
             except Exception as e:
                 logger.warning("lemon8 _upsert_post failed for %s: %s", platform_post_id, e)
@@ -1139,10 +1156,10 @@ class Lemon8Collector(BaseCollector):
         posts = self._extract_posts(html, user_id, username)
         for post in posts:
             if self._stop.is_set(): break
-            await self._upsert_post(user_id, post)
+            await self._upsert_post(user_id, post, collection_surface="profile")
             for media_item in post.get("media", []):
                 if not self.is_known(media_item["content_id"]):
-                    await self.download_media(media_item)
+                        await self.download_media({**media_item, "collection_surface": "profile"})
 
     async def _fetch_note_detail(self, client: httpx.AsyncClient,
                                 username: str, note_id: str) -> dict | None:
@@ -1329,7 +1346,10 @@ class Lemon8Collector(BaseCollector):
 
             if note_id:
                 try:
-                    await self._link_lemon8_media(note_id, uname, enhanced_url, is_video)
+                    await self._link_lemon8_media(
+                        note_id, uname, enhanced_url, is_video,
+                        collection_surface="for_you",
+                    )
                 except Exception as e:
                     logger.debug("lemon8 media-link failed for note %s: %s", note_id, e)
 
@@ -1348,7 +1368,7 @@ class Lemon8Collector(BaseCollector):
                     try:
                         detail = await self._fetch_note_detail(client, uname, note_id)
                         if detail:
-                            ok = await self._upsert_post(entity_id, detail)
+                            ok = await self._upsert_post(entity_id, detail, collection_surface="for_you")
                             if ok:
                                 logger.info("lemon8 FYP detail: upserted post %s for %s", note_id, uname)
                     except Exception as e:
@@ -1365,6 +1385,7 @@ class Lemon8Collector(BaseCollector):
                 "url": enhanced_url,
                 "extension": ext,
                 "raw": item,
+                "collection_surface": "for_you",
             })
 
     async def _collect_tag(self, client: httpx.AsyncClient, tag_id: str):
@@ -1440,6 +1461,7 @@ class Lemon8Collector(BaseCollector):
                 "url": _enhance_image_url(url) if self._enhance_urls else url,
                 "extension": ext,
                 "raw": item,
+                "collection_surface": "topic",
             })
 
     # ──────────────────────────────────────────────────────────────────────
@@ -2458,6 +2480,7 @@ class Lemon8Collector(BaseCollector):
                 sha256=artifact.sha256,
                 metadata=metadata,
                 source_url=source_url,
+                collection_surface=item.get("collection_surface") or "unknown",
             )
             if artifact.partial:
                 await self.send_to_dlq(item["entity_id"], cid, f"vault artifact partial: {artifact.error}")

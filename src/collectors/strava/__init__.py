@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 
 from src.core.base_collector import BaseCollector
+from src.core.collection_surface import normalize_collection_surface
 from src.collectors.strava.parse import (
     normalize_training_activity as _parse_normalize_training_activity,
     normalize_feed_activity as _parse_normalize_feed_activity,
@@ -1556,11 +1557,14 @@ class StravaCollector(BaseCollector):
                 cleaned["state"], cleaned["country"], cleaned["sex"],
                 follower_count, following_count)
 
-    async def _upsert_activity(self, activity: dict, athlete_id: str):
+    async def _upsert_activity(
+        self, activity: dict, athlete_id: str, *, collection_surface: str = "unknown",
+    ):
         async with self.pool.acquire() as conn:
             athlete_row = await conn.fetchrow("SELECT id FROM strava_athletes WHERE platform_athlete_id = $1", int(athlete_id))
             athlete_uuid = athlete_row['id'] if athlete_row else None
             metadata_json = json.dumps(activity, default=str)
+            surface = normalize_collection_surface(collection_surface)
 
             # latlng comes from API as [lat, lng] list; schema is VARCHAR(50)
             def _latlng(val):
@@ -1592,7 +1596,7 @@ class StravaCollector(BaseCollector):
                     calories,
                     start_date, start_latlng, end_latlng,
                     timezone, utc_offset,
-                    summary_polyline, metadata
+                    summary_polyline, metadata, collection_surface
                 ) VALUES (
                     $1, $2, $3, $4, $5,
                     $6, $7,
@@ -1604,7 +1608,7 @@ class StravaCollector(BaseCollector):
                     $22,
                     $23, $24, $25,
                     $26, $27,
-                    $28, $29::jsonb
+                    $28, $29::jsonb, $30
                 )
                 ON CONFLICT (platform_activity_id) DO UPDATE SET
                     name             = EXCLUDED.name,
@@ -1619,7 +1623,10 @@ class StravaCollector(BaseCollector):
                     calories         = COALESCE(EXCLUDED.calories,         strava_activities.calories),
                     weighted_average_watts = COALESCE(EXCLUDED.weighted_average_watts, strava_activities.weighted_average_watts),
                     kilojoules       = COALESCE(EXCLUDED.kilojoules,       strava_activities.kilojoules),
-                    metadata         = EXCLUDED.metadata
+                    metadata         = EXCLUDED.metadata,
+                    collection_surface = CASE WHEN EXCLUDED.collection_surface='unknown'
+                                              THEN strava_activities.collection_surface
+                                              ELSE EXCLUDED.collection_surface END
             """,
             activity.get("id"), athlete_uuid, activity.get("name"), activity.get("type"), activity.get("sport_type"),
             activity.get("workout_type"), activity.get("description"),
@@ -1632,7 +1639,7 @@ class StravaCollector(BaseCollector):
             activity.get("calories"),
             start_date, start_latlng, end_latlng,
             activity.get("timezone"), utc_offset,
-            polyline, metadata_json)
+            polyline, metadata_json, surface)
         self._archive_raw_payload(
             artifact_id=f"activities/{activity.get('id') or 'unknown'}",
             payload=activity,
@@ -2451,6 +2458,7 @@ class StravaCollector(BaseCollector):
                 sha256=artifact.sha256,
                 metadata=metadata,
                 source_url=source_url,
+                collection_surface=item.get("collection_surface") or "unknown",
             )
             if artifact.partial:
                 await self.send_to_dlq(item["entity_id"], cid, f"vault artifact partial: {artifact.error}")
@@ -2653,7 +2661,7 @@ class StravaCollector(BaseCollector):
                                    ON CONFLICT (platform_athlete_id) DO NOTHING""",
                                 int(aoid), norm.get("_athlete_name") or str(aoid),
                         )
-                        await self._upsert_activity(norm, str(aoid))
+                        await self._upsert_activity(norm, str(aoid), collection_surface="following")
                         self._progress_count += 1
                     except Exception as e:
                         logger.warning("strava feed: upsert activity %s failed: %s", aid, e)
@@ -2841,7 +2849,9 @@ class StravaCollector(BaseCollector):
                                 athlete_id_int,
                                 athlete_name,
                         )
-                        await self._upsert_activity(norm, str(athlete_id_int))
+                        await self._upsert_activity(
+                            norm, str(athlete_id_int), collection_surface="following",
+                        )
                         self._progress_count += 1
                         page_kept += 1
                     except Exception as e:

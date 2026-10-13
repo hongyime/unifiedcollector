@@ -74,8 +74,9 @@
     "commit_push": "pushed to main as e2238c33"
   },
   "next_steps": [
-    "Implement Phase 4 normalized collection-surface provenance and reporting, then bounded checks and commit/push.",
-    "Continue with Phases 5 and 6 in order; preserve per-platform default-off gates and do not touch Beeper.",
+    "Commit and push Phase 4 implementation and state update.",
+    "Implement Phase 5 feed adapter coverage and feasibility checks, then bounded checks and commit/push.",
+    "Implement Phase 6 operational views, error classifications, controls, and rollout notes; commit/push.",
     "Before each commit touching .agents, replace any real hostname in staged state/journal blobs with dev-host-3.example and verify staged blobs."
   ],
   "phase_3_status": {
@@ -91,5 +92,18 @@
     "sql_debugging": "initial live smoke exposed ambiguous text/VARCHAR parameter inference in queue insert; explicit casts fixed it and rerun passed",
     "migration": "20261013_add_spider_discovery_evidence.sql is not applied; gates remain off",
     "commit_push": "pushed to main as 0e6c47fa"
+  },
+  "phase_4_status": {
+    "implementation": "complete; schema rollout pending",
+    "coverage": [
+      "canonical surface vocabulary on social post/media writes",
+      "Telegram and WhatsApp message_stream labels",
+      "browser capture observed/stored/deduped/failed event metrics",
+      "per-platform/surface progress API and Coverage page"
+    ],
+    "validation": "extension 1.23.106 and dashboard builds passed; compileall, diff-check, manual helper/API assertions, route registration, and transaction-only live PostgreSQL checks passed; pytest unavailable; no platform requests made",
+    "transaction_smoke": "passed actual browser event/post write SQL and per-surface API aggregation against transaction-local temp tables; includes synthetic Telegram/WhatsApp stream rows; rolled back all writes",
+    "migration": "zzzz_20261013_add_collection_surface_provenance.sql is not applied; filename sorts after prerequisite table migrations",
+    "commit_push": "pending"
   }
 }

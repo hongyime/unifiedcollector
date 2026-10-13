@@ -1982,13 +1982,13 @@ class YoutubeCollector(BaseCollector):
                         """
                         INSERT INTO youtube_community_posts
                           (platform_post_id, channel_id, text, likes_count, comments_count,
-                           has_image, image_url, collected_at, raw)
-                        VALUES ($1,$2,$3,$4,$5,$6,$7,NOW(),$8::jsonb)
+                          has_image, image_url, collected_at, raw, collection_surface)
+                        VALUES ($1,$2,$3,$4,$5,$6,$7,NOW(),$8::jsonb,'community')
                         ON CONFLICT (platform_post_id) DO UPDATE SET
                           text=EXCLUDED.text, likes_count=EXCLUDED.likes_count,
                           comments_count=EXCLUDED.comments_count,
                           has_image=EXCLUDED.has_image, image_url=EXCLUDED.image_url,
-                          raw=EXCLUDED.raw
+                          raw=EXCLUDED.raw, collection_surface='community'
                         """,
                         pid, channel_id, text or None, votes, comments, bool(image_url), image_url, pj,
                     )
@@ -2013,6 +2013,7 @@ class YoutubeCollector(BaseCollector):
                             "content_id": f"community_{pid}",
                             "url": image_url,
                             "extension": "jpg",
+                            "collection_surface": "community",
                             "source_url": f"https://www.youtube.com/channel/{channel_id}/community",
                             "raw": {"platform_post_id": pid, "image_url": image_url},
                         })

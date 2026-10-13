@@ -292,6 +292,7 @@ function directFallbackRequest(msg, error) {
       payload: withDirectVersion({
         platform,
         username: msg.username,
+        collection_surface: msg.collection_surface || inferCollectionSurface(msg),
         items: urlItems,
         record_empty: !!msg.record_empty,
         probe_reason: msg.probe_reason || "content_direct_fallback",
@@ -302,7 +303,11 @@ function directFallbackRequest(msg, error) {
   const jsonRoutes = {
     discover: ["/social/discover", { platform, source: msg.source, hop: msg.hop, discovered: msg.discovered }],
     targetStatus: ["/social/target-status", { platform, username: msg.username, status: msg.status, reason: msg.reason || null }],
-    posts: ["/social/posts", { platform, username: msg.username, posts: msg.posts }],
+    posts: ["/social/posts", {
+      platform, username: msg.username,
+      collection_surface: msg.collection_surface || inferCollectionSurface(msg),
+      posts: msg.posts,
+    }],
     comments: ["/social/comments", { platform, post_id: msg.post_id, comments: msg.comments }],
     users: ["/social/users", { platform, context: msg.context || "seen", owner: msg.owner || null, users: msg.users }],
     profile: ["/social/profile", { platform, profile: msg.profile, owner: msg.owner || null }],
@@ -391,6 +396,9 @@ async function directSendFallback(msg, error) {
 }
 
 async function send(msg, { retries = 1, timeoutMs = null } = {}) {
+  if (msg && (msg.type === "posts" || msg.type === "ingest")) {
+    msg = { ...msg, collection_surface: msg.collection_surface || inferCollectionSurface(msg) };
+  }
   for (let i = 0; ; i++) {
     try {
       const ms = sendTimeoutMs(msg, timeoutMs);
@@ -416,6 +424,36 @@ async function send(msg, { retries = 1, timeoutMs = null } = {}) {
       await sleep(400); // let the worker respawn
     }
   }
+}
+
+function inferCollectionSurface(msg) {
+  const aliases = new Map([
+    ["for you", "for_you"], ["foryou", "for_you"], ["fyp", "for_you"],
+    ["home/foryou", "for_you"], ["home/for-you", "for_you"],
+    ["following", "following"], ["home/following", "following"],
+    ["explore", "explore"], ["topic", "topic"], ["search", "search"],
+    ["home", "home"], ["profile", "profile"], ["message", "message_stream"],
+    ["messages", "message_stream"], ["dm", "message_stream"],
+  ]);
+  const explicit = String(msg && (msg.collection_surface || msg.surface) || "").trim().toLowerCase();
+  if (aliases.has(explicit)) return aliases.get(explicit);
+  const hint = String(msg && msg.username || "").trim().toLowerCase().replace(/[_-]+/g, "/");
+  if (aliases.has(hint)) return aliases.get(hint);
+  const path = String(location.pathname || "").toLowerCase();
+  if (/\/(explore|discover)(\/|$)/.test(path)) return "explore";
+  if (/\/(search|hashtag)(\/|$)/.test(path)) return path.includes("hashtag") ? "topic" : "search";
+  if (/\/(messages|direct)(\/|$)/.test(path)) return "message_stream";
+  if (/\/community(\/|$)/.test(path)) return "community";
+  if (/\/reels?(\/|$)/.test(path)) return "reels";
+  if (/\/stories?(\/|$)/.test(path)) return "stories";
+  if (/\/tagged(\/|$)/.test(path)) return "tagged";
+  if (/\/(following)(\/|$)/.test(path)) return "following";
+  if (/\/(foryou|fyp)(\/|$)/.test(path)) return "for_you";
+  if (/\/(topic|tag)\//.test(path)) return "topic";
+  const platform = String(msg && msg.platform || "").toLowerCase();
+  if (platform === "facebook" && (/^\/(feed|home)(\/|$)/.test(path) || path === "/")) return "home";
+  if (/^\/@[^/]+\/?$/.test(path) || /^\/[a-z0-9_.-]+\/?$/i.test(path)) return "profile";
+  return "unknown";
 }
 function clog(level, msg, platform) {
   send({ type: "log", level, msg, platform }).catch(() => {});

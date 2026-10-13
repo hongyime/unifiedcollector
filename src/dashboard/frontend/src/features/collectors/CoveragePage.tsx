@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import type { ColumnDef } from "@tanstack/react-table";
 import { Database, ShieldAlert, Target } from "lucide-react";
 import { api } from "../../services/api";
-import type { CollectionCoverageRow } from "../../services/types";
+import type { CollectionCoverageRow, CollectionSurfaceProgress } from "../../services/types";
 import { Header } from "../../components/layout/Header";
 import { DataTable } from "../../components/ui/DataTable";
 import { ErrorState } from "../../components/ui/ErrorState";
@@ -61,11 +61,34 @@ const columns: ColumnDef<CollectionCoverageRow, unknown>[] = [
   { accessorKey: "stale_targets", header: "Stale targets", cell: (info) => formatNumber(staleTargetCount(info.row.original.stale_targets)) },
 ];
 
+const surfaceColumns: ColumnDef<CollectionSurfaceProgress, unknown>[] = [
+  { accessorKey: "platform", header: "Platform", cell: (info) => <span className="font-medium uppercase text-text-primary">{info.getValue() as string}</span> },
+  { accessorKey: "surface", header: "Surface", cell: (info) => {
+    const value = String(info.getValue() || "unknown");
+    return value === "for_you" ? "For You" : value === "message_stream" ? "Message stream" : value.replace(/_/g, " ");
+  } },
+  { accessorKey: "capture_count", header: "Captures", cell: (info) => formatNumber(info.getValue() as number) },
+  { accessorKey: "observed_count", header: "Observed", cell: (info) => formatNumber(info.getValue() as number) },
+  { accessorKey: "stored_count", header: "Stored", cell: (info) => formatNumber(info.getValue() as number) },
+  { accessorKey: "deduped_count", header: "Deduped", cell: (info) => formatNumber(info.getValue() as number) },
+  { accessorKey: "failed_count", header: "Failures", cell: (info) => formatNumber(info.getValue() as number) },
+  { accessorKey: "media_rows", header: "Media rows", cell: (info) => formatNumber(info.getValue() as number) },
+  { accessorKey: "message_rows", header: "Messages", cell: (info) => formatNumber(info.getValue() as number) },
+  { accessorKey: "last_success_at", header: "Last success", cell: (info) => relativeTime(info.getValue() as string | null) },
+  { accessorKey: "freshness_seconds", header: "Freshness (s)", cell: (info) => info.getValue() == null ? "—" : formatNumber(info.getValue() as number) },
+];
+
 export function CoveragePage() {
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ["collector-coverage"],
     queryFn: api.collectorsCoverage,
     refetchInterval: 60_000,
+  });
+  const surfaceQuery = useQuery({
+    queryKey: ["collector-surface-progress"],
+    queryFn: () => api.collectionSurfaceProgress(),
+    refetchInterval: 60_000,
+    retry: false,
   });
 
   const rows = data?.sources ?? [];
@@ -125,6 +148,24 @@ export function CoveragePage() {
           </p>
         </div>
         <DataTable data={rows} columns={columns} />
+      </div>
+
+      <div className="mt-6 rounded-lg border border-border bg-surface p-4">
+        <div className="mb-3">
+          <h2 className="text-xs uppercase tracking-wider text-text-muted">Feed Surface Progress</h2>
+          <p className="mt-1 text-xs text-text-muted">Browser captures, stored media, and native message streams by normalized surface over seven days.</p>
+        </div>
+        {surfaceQuery.data?.available && surfaceQuery.data.surfaces.length > 0 ? (
+          <DataTable data={surfaceQuery.data.surfaces} columns={surfaceColumns} />
+        ) : (
+          <p className="text-sm text-text-muted">
+            {surfaceQuery.isLoading
+              ? "Loading surface progress…"
+              : surfaceQuery.data?.reason === "collection_surface_migration_pending"
+                ? "Surface progress will appear after the collection-surface migration is applied."
+                : "No surface capture events in the last seven days."}
+          </p>
+        )}
       </div>
     </div>
   );

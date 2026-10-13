@@ -2082,8 +2082,8 @@ class TelegramCollector(
                     platform_message_id, chat_id, sender_id, text, caption,
                     media_type, platform_created_at, metadata,
                     reply_to_message_id, forward_from_chat_id, forward_from_message_id, via_bot_id,
-                    is_pinned
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                    is_pinned, collection_surface
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'message_stream')
                 ON CONFLICT (platform_message_id) DO NOTHING
                 RETURNING id
             """,

@@ -3,6 +3,7 @@ import type {
   HealthStatus,
   CollectorStatus,
   CollectionCoverageRow,
+  CollectionSurfaceProgressResponse,
   CollectorDetail,
   SourceCollectionMatrix,
   MediaItem,
@@ -120,6 +121,7 @@ export const api = {
   collectors: () => get<CollectorStatus[]>("/collectors"),
   collectorsLive: () => get<CollectorsLive>("/collectors/live"),
   collectorsCoverage: () => get<{ sources: CollectionCoverageRow[]; total: number }>("/coverage/collectors"),
+  collectionSurfaceProgress: (hours = 168) => get<CollectionSurfaceProgressResponse>(`/collectors/surface-progress?hours=${hours}`),
   sourceMatrix: () => get<SourceCollectionMatrix>("/collectors/source-matrix"),
   collectorDetail: (source: string) => get<CollectorDetail>(`/collectors/${source}`),
 

@@ -16,6 +16,7 @@ from .rate_limiter import AdaptiveRateLimiter
 from .resilience import CircuitBreaker, wait_for_internet
 from .scrape_pacing import sleep_rate_limit
 from .user_agent import UserAgentPool
+from .collection_surface import normalize_collection_surface
 from .vault import (
     VAULT_ROOT,
     assert_media_write_allowed,
@@ -576,7 +577,8 @@ class BaseCollector(ABC):
                                 sha256: str | None = None,
                                 source_url: str | None = None,
                                 metadata: dict | None = None,
-                                kind: str | None = None) -> bool:
+                                kind: str | None = None,
+                                collection_surface: str | None = None) -> bool:
         """Insert into media_items. Returns False on duplicate (same source+content_id).
 
         For profile_photo items, sha256 is auto-computed from the file on disk
@@ -671,20 +673,24 @@ class BaseCollector(ABC):
             # the same bytes under different content_ids. The advisory sha256 pre-check
             # above still runs first to delete the redundant blob in the common case;
             # the DB constraint is the backstop for the race it couldn't close.
+            surface = normalize_collection_surface(
+                collection_surface,
+                context=(metadata or {}).get("collection_surface") or (metadata or {}).get("surface"),
+            )
             status = await conn.execute(
                 """
                 INSERT INTO media_items
                     (source, entity_id, entity_name, content_type, content_id,
                      filename, file_path, file_size, width, height,
-                     sha256, source_url, metadata, ingest_path, kind)
+                     sha256, source_url, metadata, ingest_path, kind, collection_surface)
                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14,
-                        COALESCE($15, 'post'))
+                        COALESCE($15, 'post'),$16)
                 ON CONFLICT DO NOTHING
                 """,
                 self.SOURCE_NAME, entity_id, entity_name, content_type, content_id,
                 filename, file_path, file_size, width, height,
                 sha256, source_url, json.dumps(metadata, default=str) if metadata is not None else None,
-                self.INGEST_PATH, kind,
+                self.INGEST_PATH, kind, surface,
             )
             
             # asyncpg returns the command tag, e.g. "INSERT 0 1" (stored) / "INSERT 0 0"

@@ -56,6 +56,7 @@ from src.core.vault import (
     write_media_sidecar,
     write_raw_payload,
 )
+from src.core.collection_surface import normalize_collection_surface
 from src.collectors.strava import _derive_gps_route_fields
 
 # Follow-aware access recording (Phase 0). The extension IS the live IG path, so
@@ -1383,6 +1384,10 @@ async def _download_and_save(pool, session, platform, username, item, reject_sta
 
     url = item.get("url")
     cid = str(item.get("content_id") or "")
+    collection_surface = normalize_collection_surface(
+        item.get("collection_surface") or item.get("surface"),
+        context=(item.get("meta") or {}).get("collection_surface") if isinstance(item.get("meta"), dict) else None,
+    )
     if not url or not cid:
         return _reject("missing_url_or_content_id")
     # media kind: post (default) | story | highlight. Stories/highlights live in
@@ -1537,8 +1542,8 @@ async def _download_and_save(pool, session, platform, username, item, reject_sta
                 INSERT INTO media_items
                   (source, entity_id, entity_name, content_type, content_id,
                    filename, file_path, file_size, sha256, source_url, metadata, kind,
-                   ingest_path)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12,'extension')
+                   ingest_path, collection_surface)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12,'extension',$13)
                 ON CONFLICT (source, content_id) DO UPDATE SET
                    file_path = EXCLUDED.file_path,
                    file_size = EXCLUDED.file_size,
@@ -1546,10 +1551,14 @@ async def _download_and_save(pool, session, platform, username, item, reject_sta
                    source_url = EXCLUDED.source_url,
                    metadata = EXCLUDED.metadata,
                    kind = EXCLUDED.kind,
-                   ingest_path = 'extension'
+                   ingest_path = 'extension',
+                   collection_surface = CASE WHEN EXCLUDED.collection_surface = 'unknown'
+                                              THEN media_items.collection_surface
+                                              ELSE EXCLUDED.collection_surface END
                 """,
                 platform, safe_user, item.get("entity_name") or username, ctype, store_cid,
                 dest.name, str(stored_path), len(data), sha, url, meta_json, media_kind,
+                collection_surface,
             )
             if artifact.partial or not artifact.ok:
                 await conn.execute(
@@ -1686,7 +1695,10 @@ def _merge_reject_stats(dest: dict, src: dict | None) -> None:
             dest[key] = value
 
 
-async def _drain(app, platform, username, items, extension_version: str | None = None):
+async def _drain(
+    app, platform, username, items, extension_version: str | None = None,
+    collection_surface: str = "unknown",
+):
     """Background download worker — bounded concurrency, never blocks the POST."""
     pool, session, sem = app["pool"], app["session"], app["sem"]
     saved = 0
@@ -1700,6 +1712,12 @@ async def _drain(app, platform, username, items, extension_version: str | None =
                 payload = dict(it)
                 meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
                 payload["meta"] = {**meta, "extension_version": extension_version}
+            elif isinstance(it, dict):
+                payload = dict(it)
+            if isinstance(payload, dict):
+                payload["collection_surface"] = normalize_collection_surface(
+                    payload.get("collection_surface") or collection_surface
+                )
             item_stats: dict = {}
             item_saved = await _download_and_save(pool, session, platform, username, payload, item_stats)
             _merge_reject_stats(reject_stats, item_stats)
@@ -1722,6 +1740,14 @@ async def _drain(app, platform, username, items, extension_version: str | None =
         event_meta["extension_version"] = extension_version
     if reject_stats:
         event_meta["reject_stats"] = reject_stats
+    deduped = _browser_event_duplicate_count({"reject_stats": reject_stats})
+    failed = max(0, len(items) - saved - deduped)
+    failure_buckets = {
+        name: _reject_count(count)
+        for name, count in reject_stats.items()
+        if name not in {"examples", "duplicate_content_id", "duplicate_sha256"}
+    }
+    failure_class = max(failure_buckets, key=failure_buckets.get) if failure_buckets else None
     await _record_browser_ingest_event(
         pool,
         platform,
@@ -1729,6 +1755,11 @@ async def _drain(app, platform, username, items, extension_version: str | None =
         username,
         observed_count=len(items),
         stored_count=saved,
+        collection_surface=collection_surface,
+        deduped_count=deduped,
+        failed_count=failed,
+        outcome="partial" if saved and failed else "failed" if failed else "success" if saved or deduped else "empty",
+        error_class=failure_class,
         metadata=event_meta or None,
     )
     if platform == "instagram":
@@ -1751,6 +1782,11 @@ async def _record_browser_ingest_event(
     *,
     observed_count: int = 0,
     stored_count: int = 0,
+    collection_surface: str = "unknown",
+    deduped_count: int = 0,
+    failed_count: int = 0,
+    outcome: str | None = None,
+    error_class: str | None = None,
     metadata: dict | None = None,
 ) -> None:
     try:
@@ -1762,6 +1798,11 @@ async def _record_browser_ingest_event(
                 subject,
                 observed_count=observed_count,
                 stored_count=stored_count,
+                collection_surface=collection_surface,
+                deduped_count=deduped_count,
+                failed_count=failed_count,
+                outcome=outcome,
+                error_class=error_class,
                 metadata=metadata,
             )
     except TimeoutError:
@@ -1791,22 +1832,40 @@ async def _write_browser_ingest_event(
     *,
     observed_count: int = 0,
     stored_count: int = 0,
+    collection_surface: str = "unknown",
+    deduped_count: int = 0,
+    failed_count: int = 0,
+    outcome: str | None = None,
+    error_class: str | None = None,
     metadata: dict | None = None,
 ) -> None:
     observed = max(0, int(observed_count or 0))
     stored = max(0, int(stored_count or 0))
+    deduped = max(0, int(deduped_count or 0))
+    failed = max(0, int(failed_count or 0))
+    surface = normalize_collection_surface(collection_surface)
+    event_outcome = str(outcome or ("partial" if stored and failed else "failed" if failed else "success" if stored or deduped else "empty"))
+    if event_outcome not in {"success", "empty", "partial", "failed", "unknown"}:
+        event_outcome = "unknown"
+    safe_error_class = str(error_class or "").strip()[:64] or None
     async with pool.acquire() as conn:
         await conn.execute(
             """
             INSERT INTO browser_ingest_events
-              (platform, endpoint, subject, observed_count, stored_count, metadata)
-            VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+              (platform, endpoint, subject, observed_count, stored_count,
+               collection_surface, deduped_count, failed_count, outcome, error_class, metadata)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
             """,
             platform,
             endpoint,
             subject,
             observed,
             stored,
+            surface,
+            deduped,
+            failed,
+            event_outcome,
+            safe_error_class,
             json.dumps(metadata or {}),
         )
         if _browser_event_marks_source_success(platform, endpoint, observed, stored, metadata):
@@ -1877,9 +1936,12 @@ def _browser_event_duplicate_count(metadata: dict | None) -> int:
 
 async def _ingest(app, platform, body):
     username = body.get("username") or "unknown"
+    surface = normalize_collection_surface(body.get("collection_surface") or body.get("surface"))
     items = body.get("items") or []
     if items:
-        task = asyncio.create_task(_drain(app, platform, username, items, body.get("extension_version")))
+        task = asyncio.create_task(_drain(
+            app, platform, username, items, body.get("extension_version"), surface,
+        ))
         app["tasks"].add(task)
         task.add_done_callback(app["tasks"].discard)
     elif body.get("record_empty"):
@@ -1897,6 +1959,8 @@ async def _ingest(app, platform, body):
             username,
             observed_count=0,
             stored_count=0,
+            collection_surface=surface,
+            outcome="empty",
             metadata=meta or None,
         )
     return {"accepted": len(items), "platform": platform}
@@ -1904,10 +1968,14 @@ async def _ingest(app, platform, body):
 
 async def _ingest_uploaded_media(app, platform, body):
     username = body.get("username") or "unknown"
+    surface = normalize_collection_surface(body.get("collection_surface") or body.get("surface"))
     item = body.get("item") or {}
     if not isinstance(item, dict):
         item = {}
     item = dict(item)
+    item["collection_surface"] = normalize_collection_surface(
+        item.get("collection_surface") or surface
+    )
     if body.get("data_b64") and not item.get("data_b64"):
         item["data_b64"] = body.get("data_b64")
     if body.get("mime_type") and not item.get("mime_type"):
@@ -1969,7 +2037,12 @@ async def _ingest_uploaded_media(app, platform, body):
         "media",
         username,
         observed_count=1,
-        stored_count=1 if accepted else 0,
+        stored_count=1 if saved else 0,
+        collection_surface=surface,
+        deduped_count=1 if deduped else 0,
+        failed_count=0 if accepted else 1,
+        outcome="success" if saved or deduped else "failed",
+        error_class=None if accepted else str(reason or "media_rejected").split(":", 1)[0],
         metadata=event_meta,
     )
     logger.info(
@@ -2472,7 +2545,7 @@ async def _ensure_ig_profile(conn, ppid: str, p: dict) -> str | None:
 # ---------------------------------------------------------------------------
 # structured post + comment metadata (captions/likes/comments threads)
 # ---------------------------------------------------------------------------
-async def _save_posts(pool, platform, posts) -> int:
+async def _save_posts(pool, platform, posts, collection_surface: str = "unknown") -> int:
     """Upsert post metadata (caption, engagement, hashtags, mentions) into the
     platform's posts table. instagram_posts has the richest schema; threads_posts
     and facebook_posts mirror the essentials. tiktok/lemon8 posts are owned by
@@ -2480,11 +2553,16 @@ async def _save_posts(pool, platform, posts) -> int:
     if platform not in ("instagram", "threads", "facebook", "x"):
         return 0
     n = 0
+    default_surface = normalize_collection_surface(collection_surface)
     async with pool.acquire() as conn:
         for p in posts:
             ppid = str(p.get("platform_post_id") or "")
             if not ppid:
                 continue
+            post_metadata = p.get("metadata") if isinstance(p.get("metadata"), dict) else {}
+            post_surface = normalize_collection_surface(
+                p.get("collection_surface") or post_metadata.get("collection_surface") or default_surface
+            )
             # stamp a canonical, openable verification URL + correct shortcode into
             # metadata (overrides any wrong/long "code" the extension may have sent).
             vurl = _verify_url(platform, ppid)
@@ -2508,9 +2586,9 @@ async def _save_posts(pool, platform, posts) -> int:
                           (id, platform_post_id, profile_id, media_type, caption, hashtags, mentions,
                            location_name, location_lat, location_lng, music_title, music_author,
                            likes_count, comments_count, video_duration,
-                           platform_created_at, collected_at, metadata)
+                           platform_created_at, collected_at, metadata, collection_surface)
                         VALUES (gen_random_uuid(),$1,$2::uuid,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,
-                                to_timestamp($15), now(), $16::jsonb)
+                                to_timestamp($15), now(), $16::jsonb, $17)
                         ON CONFLICT (platform_post_id) DO UPDATE SET
                            profile_id=COALESCE(instagram_posts.profile_id, EXCLUDED.profile_id),
                            caption=EXCLUDED.caption, likes_count=EXCLUDED.likes_count,
@@ -2520,7 +2598,10 @@ async def _save_posts(pool, platform, posts) -> int:
                            location_lng=COALESCE(EXCLUDED.location_lng, instagram_posts.location_lng),
                            music_title=COALESCE(EXCLUDED.music_title, instagram_posts.music_title),
                            music_author=COALESCE(EXCLUDED.music_author, instagram_posts.music_author),
-                           collected_at=now(), metadata=EXCLUDED.metadata
+                           collected_at=now(), metadata=EXCLUDED.metadata,
+                           collection_surface=CASE WHEN EXCLUDED.collection_surface='unknown'
+                                                   THEN instagram_posts.collection_surface
+                                                   ELSE EXCLUDED.collection_surface END
                         """,
                         ppid, profile_id, p.get("media_type"), p.get("caption"),
                         p.get("hashtags") or [], p.get("mentions") or [],
@@ -2528,7 +2609,7 @@ async def _save_posts(pool, platform, posts) -> int:
                         p.get("music_title"), p.get("music_author"),
                         _int(p.get("likes_count")), _int(p.get("comments_count")),
                         _int(p.get("video_duration")), _num(p.get("taken_at")),
-                        json.dumps(p.get("metadata") or {}),
+                        json.dumps(p.get("metadata") or {}), post_surface,
                     )
                 elif platform == "x":
                     await conn.execute(
@@ -2536,8 +2617,8 @@ async def _save_posts(pool, platform, posts) -> int:
                         INSERT INTO x_posts
                           (platform_post_id, author_username, caption, hashtags, mentions,
                            likes_count, comments_count, reposts_count, quote_count, views_count,
-                           media_type, platform_created_at, collected_at, metadata)
-                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,to_timestamp($12),now(),$13::jsonb)
+                           media_type, platform_created_at, collected_at, metadata, collection_surface)
+                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,to_timestamp($12),now(),$13::jsonb,$14)
                         ON CONFLICT (platform_post_id) DO UPDATE SET
                            caption=EXCLUDED.caption, likes_count=EXCLUDED.likes_count,
                            comments_count=EXCLUDED.comments_count, reposts_count=EXCLUDED.reposts_count,
@@ -2545,13 +2626,16 @@ async def _save_posts(pool, platform, posts) -> int:
                            hashtags=EXCLUDED.hashtags, mentions=EXCLUDED.mentions,
                            media_type=COALESCE(EXCLUDED.media_type, x_posts.media_type),
                            platform_created_at=COALESCE(EXCLUDED.platform_created_at, x_posts.platform_created_at),
-                           collected_at=now(), metadata=x_posts.metadata || EXCLUDED.metadata
+                           collected_at=now(), metadata=x_posts.metadata || EXCLUDED.metadata,
+                           collection_surface=CASE WHEN EXCLUDED.collection_surface='unknown'
+                                                   THEN x_posts.collection_surface
+                                                   ELSE EXCLUDED.collection_surface END
                         """,
                         ppid, p.get("author_username"), p.get("caption"),
                         p.get("hashtags") or [], p.get("mentions") or [],
                         _int(p.get("likes_count")), _int(p.get("comments_count")), _int(p.get("reposts_count")),
                         _int(p.get("quote_count")), _int(p.get("views_count")), p.get("media_type"),
-                        _num(p.get("taken_at")), json.dumps(p.get("metadata") or {}),
+                        _num(p.get("taken_at")), json.dumps(p.get("metadata") or {}), post_surface,
                     )
                     await _record_x_post_graph(conn, ppid, p)
                 else:  # threads / facebook
@@ -2570,21 +2654,24 @@ async def _save_posts(pool, platform, posts) -> int:
                         INSERT INTO {table}
                           (platform_post_id, author_username, caption, hashtags, mentions,
                            likes_count, comments_count, {extra_col}, media_type,
-                           platform_created_at, collected_at, metadata)
-                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,to_timestamp($10),now(),$11::jsonb)
+                           platform_created_at, collected_at, metadata, collection_surface)
+                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,to_timestamp($10),now(),$11::jsonb,$12)
                         ON CONFLICT (platform_post_id) DO UPDATE SET
                            author_username=COALESCE(NULLIF(EXCLUDED.author_username, ''), {table}.author_username),
                            caption=EXCLUDED.caption, likes_count=EXCLUDED.likes_count,
                            comments_count=EXCLUDED.comments_count,
                            {extra_col}=EXCLUDED.{extra_col}, collected_at=now(),
-                           metadata=EXCLUDED.metadata
+                           metadata=EXCLUDED.metadata,
+                           collection_surface=CASE WHEN EXCLUDED.collection_surface='unknown'
+                                                   THEN {table}.collection_surface
+                                                   ELSE EXCLUDED.collection_surface END
                         """,
                         ppid, p.get("author_username"), p.get("caption"),
                         p.get("hashtags") or [], p.get("mentions") or [],
                         _int(p.get("likes_count")), _int(p.get("comments_count")),
                         _int(p.get("reposts_count") if platform == "threads" else p.get("shares_count")),
                         p.get("media_type"), _num(p.get("taken_at")),
-                        json.dumps(p.get("metadata") or {}),
+                        json.dumps(p.get("metadata") or {}), post_surface,
                     )
                 n += 1
             except Exception:
@@ -4130,9 +4217,10 @@ async def _posts_ingest_background(app, platform: str, body: dict) -> None:
     if sem is None:
         sem = asyncio.Semaphore(SOCIAL_INGEST_STRUCTURED_BACKGROUND_CONCURRENCY)
         app["structured_sem"] = sem
+    surface = normalize_collection_surface(body.get("collection_surface") or body.get("surface"))
     async with sem:
         await _archive_browser_capture(app["pool"], platform, "posts", body)
-        n = await _save_posts(app["pool"], platform, posts)
+        n = await _save_posts(app["pool"], platform, posts, surface)
         await _record_browser_ingest_event(
             app["pool"],
             platform,
@@ -4140,6 +4228,10 @@ async def _posts_ingest_background(app, platform: str, body: dict) -> None:
             body.get("username") or body.get("owner"),
             observed_count=len(posts),
             stored_count=n,
+            collection_surface=surface,
+            failed_count=max(0, len(posts) - n),
+            outcome="partial" if n and n < len(posts) else "failed" if posts and not n else "success" if n else "empty",
+            error_class="post_row_not_saved" if n < len(posts) else None,
         )
         # post authors (threads/facebook carry author_username) count as seen users
         authors = [
@@ -4166,6 +4258,10 @@ async def comments_handler(request):
         body.get("post_id"),
         observed_count=len(comments),
         stored_count=n,
+        collection_surface=normalize_collection_surface(body.get("collection_surface")),
+        failed_count=max(0, len(comments) - n),
+        outcome="partial" if n and n < len(comments) else "failed" if comments and not n else "success" if n else "empty",
+        error_class="comment_row_not_saved" if n < len(comments) else None,
     )
     # every commenter is a user we've seen
     authors = [

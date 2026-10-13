@@ -14,6 +14,7 @@ Modules and what they contain:
 * ``auth.py`` — /auth/* routes, JWT/bcrypt config, ``require_role``.
 * ``browser.py`` — Chrome extension diagnostics used by /health + source-matrix.
 * ``source_matrix.py`` — /collectors/source-matrix route + payload cache.
+* ``surfaces.py`` — normalized post/media surface progress for Coverage.
 * ``telegram_ops.py`` — /api/telegram/* onboarding-ops routes.
 * ``strava.py`` — /strava/* routes.
 * ``youtube.py`` — /youtube/* routes.
@@ -204,6 +205,10 @@ from src.dashboard.api.source_matrix import (  # noqa: E402,F401
     collectors_source_matrix,
     _get_build_task,
     _set_build_task,
+)
+from src.dashboard.api.surfaces import (  # noqa: E402,F401
+    router as _surfaces_router,
+    collection_surface_progress,
 )
 from src.dashboard.api.telegram_ops import (  # noqa: E402,F401
     router as _telegram_ops_router,
@@ -406,6 +411,7 @@ DIST_DIR = Path(__file__).resolve().parent.parent.parent / "dashboard" / "fronte
 app.include_router(_auth_router)
 app.include_router(_browser_router)
 app.include_router(_source_matrix_router)
+app.include_router(_surfaces_router)
 app.include_router(_telegram_ops_router)
 app.include_router(_strava_router)
 app.include_router(_youtube_router)

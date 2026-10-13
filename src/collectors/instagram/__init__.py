@@ -3015,8 +3015,8 @@ class InstagramCollector(BaseCollector):
                     platform_post_id, profile_id, media_type, caption,
                     location_name, location_lat, location_lng,
                     likes_count, comments_count, platform_created_at,
-                    collected_at, metadata
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), $11)
+                    collected_at, metadata, collection_surface
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), $11, 'profile')
                 ON CONFLICT (platform_post_id) DO UPDATE SET
                     profile_id = COALESCE(instagram_posts.profile_id, EXCLUDED.profile_id),
                     likes_count = EXCLUDED.likes_count,
@@ -3025,7 +3025,8 @@ class InstagramCollector(BaseCollector):
                     location_name = COALESCE(EXCLUDED.location_name, instagram_posts.location_name),
                     location_lat = COALESCE(EXCLUDED.location_lat, instagram_posts.location_lat),
                     location_lng = COALESCE(EXCLUDED.location_lng, instagram_posts.location_lng),
-                    metadata = EXCLUDED.metadata
+                    metadata = EXCLUDED.metadata,
+                    collection_surface = 'profile'
             """,
             node.get("shortcode"), profile_uuid, node.get("__typename"), caption,
             location_name, location_lat, location_lng,
@@ -3222,7 +3223,10 @@ class InstagramCollector(BaseCollector):
                 file_size=len(data),
                 sha256=sha,
                 source_url=item.get("source_url"),
-                metadata=metadata
+                metadata=metadata,
+                collection_surface=item.get("collection_surface") or {
+                    "story": "stories", "highlight": "stories", "tagged": "tagged",
+                }.get(str(item.get("kind") or "").lower(), "profile"),
             )
         except Exception as e:
             self.rate_limiter.record_failure("instagram.com")

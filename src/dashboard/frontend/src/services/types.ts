@@ -167,6 +167,35 @@ export interface CollectionCoverageRow {
   created_at: string | null;
 }
 
+export interface CollectionSurfaceProgress {
+  platform: string;
+  surface: string;
+  capture_path: string;
+  capture_count: number;
+  observed_count: number;
+  stored_count: number;
+  deduped_count: number;
+  failed_count: number;
+  failed_captures: number;
+  media_rows: number;
+  message_rows: number;
+  error_classes?: string[];
+  last_capture_at: string | null;
+  last_success_at: string | null;
+  last_failure_at: string | null;
+  last_media_at: string | null;
+  last_message_at: string | null;
+  freshness_seconds: number | null;
+}
+
+export interface CollectionSurfaceProgressResponse {
+  available: boolean;
+  reason?: string;
+  hours: number;
+  generated_at: string;
+  surfaces: CollectionSurfaceProgress[];
+}
+
 export interface SourceWindowCounts {
   records: number;
   messages: number;
