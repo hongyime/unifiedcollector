@@ -57,6 +57,7 @@ export function SchedulesPage() {
                     <input
                       type="number"
                       min={1}
+                      max={720}
                       value={edits[s.source] ?? s.interval_hours}
                       onChange={(e) => setEdits({ ...edits, [s.source]: Number(e.target.value) })}
                       className="bg-background border border-border rounded-md text-sm px-2 py-1 w-20"

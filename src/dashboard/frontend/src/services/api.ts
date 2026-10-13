@@ -4,6 +4,7 @@ import type {
   CollectorStatus,
   CollectionCoverageRow,
   CollectionSurfaceProgressResponse,
+  CollectorOperationsResponse,
   CollectorDetail,
   SourceCollectionMatrix,
   MediaItem,
@@ -122,6 +123,9 @@ export const api = {
   collectorsLive: () => get<CollectorsLive>("/collectors/live"),
   collectorsCoverage: () => get<{ sources: CollectionCoverageRow[]; total: number }>("/coverage/collectors"),
   collectionSurfaceProgress: (hours = 168) => get<CollectionSurfaceProgressResponse>(`/collectors/surface-progress?hours=${hours}`),
+  collectorOperations: (hours = 168) => get<CollectorOperationsResponse>(`/collectors/operations?hours=${hours}`),
+  updateFeedControl: (platform: string, enabled: boolean, interval_hours: number) =>
+    put(`/collectors/feed-controls/${encodeURIComponent(platform)}`, { enabled, interval_hours }),
   sourceMatrix: () => get<SourceCollectionMatrix>("/collectors/source-matrix"),
   collectorDetail: (source: string) => get<CollectorDetail>(`/collectors/${source}`),
 

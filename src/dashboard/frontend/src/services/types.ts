@@ -190,10 +190,57 @@ export interface CollectionSurfaceProgress {
 
 export interface CollectionSurfaceProgressResponse {
   available: boolean;
+  freshness_available: boolean;
+  freshness_error_class: string | null;
   reason?: string;
   hours: number;
   generated_at: string;
   surfaces: CollectionSurfaceProgress[];
+}
+
+export interface CollectorQueueOperation {
+  platform: string;
+  status_counts: Record<string, number>;
+  pending_count: number;
+  in_progress_count: number;
+  failed_count: number;
+  oldest_pending_at: string | null;
+  oldest_pending_age_seconds: number | null;
+  oldest_in_progress_at: string | null;
+  oldest_in_progress_age_seconds: number | null;
+  age_basis: string;
+}
+
+export interface CollectorFeedControl {
+  platform: string;
+  enabled: boolean;
+  interval_hours: number;
+  next_run: string | null;
+  configured: boolean;
+}
+
+export interface CollectorClassifiedError {
+  platform: string;
+  error_class: string;
+  category: string;
+  error_count: number;
+  last_seen_at: string | null;
+  source: string;
+}
+
+export interface CollectorOperationsResponse {
+  available: boolean;
+  hours: number;
+  generated_at: string;
+  queue_age_available: boolean;
+  queue_error_class: string | null;
+  queues: CollectorQueueOperation[];
+  errors: CollectorClassifiedError[];
+  error_sources: Array<{ source: string; available: boolean; error_class: string | null }>;
+  error_reporting_available: boolean;
+  error_reporting_partial: boolean;
+  controls: CollectorFeedControl[];
+  control_interval_bounds_hours: { min: number; max: number };
 }
 
 export interface SourceWindowCounts {

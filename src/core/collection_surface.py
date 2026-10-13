@@ -40,6 +40,28 @@ def bounded_capture_limit(
     return max(lower, min(parsed, upper))
 
 
+def classify_collection_error(error_class: object) -> str:
+    """Map stored exception/status labels to a small operator-facing taxonomy."""
+    text = str(error_class or "").strip().lower()
+    if not text:
+        return "unknown"
+    if "429" in text or any(token in text for token in ("rate_limit", "ratelimit", "throttl")):
+        return "rate_limit"
+    if "401" in text or any(token in text for token in ("auth", "login", "cookie", "credential")):
+        return "auth"
+    if "403" in text or any(token in text for token in ("private", "visibility", "forbidden", "unavailable")):
+        return "visibility"
+    if "timeout" in text or "timedout" in text:
+        return "timeout"
+    if any(token in text for token in ("parse", "decode", "json")):
+        return "parse"
+    if any(token in text for token in ("database", "postgres", "sql", "persistence")):
+        return "persistence"
+    if any(token in text for token in ("network", "connect", "http", "socket")):
+        return "network"
+    return "other"
+
+
 _ALIASES = {
     "profile": "profile",
     "following": "following",
@@ -134,5 +156,6 @@ def normalize_collection_surface(
 __all__ = [
     "COLLECTION_SURFACES",
     "bounded_capture_limit",
+    "classify_collection_error",
     "normalize_collection_surface",
 ]

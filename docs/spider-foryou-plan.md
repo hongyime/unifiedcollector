@@ -5,17 +5,17 @@ This plan turns the uneven source-specific spider and feed work described in
 status is tracked below; implementation does not imply that a rollout gate has
 been enabled.
 
-## Execution status — 2026-10-13
+## Execution status — 2026-10-14
 
 | Phase | Status | Evidence / remaining gate |
 |---|---|---|
 | **0. Baseline and contract** | Complete | Contract and source inventory captured in this plan. |
 | **1. Queue lifecycle parity** | Implemented | Commits `eb6ad9bd` and `092ec85b`; full shadow reconciliation and consumer cutover remain gated. |
 | **2. Active graph adapters** | Implemented; rollout pending | Typed graph edges and fetch observations cover Instagram headless/browser, GitHub, TikTok visible-roster, and Strava visible-roster paths. GitHub shared traversal and graph writes are opt-in; legacy workers remain active. Focused assertions and transaction-only database checks passed; pytest is unavailable in the current host/runtime. Keep all flags off until bounded per-source shadow parity is measured. |
-| **3. Discovery-source adapters** | Implemented; rollout pending | Typed discovery evidence and bounded shared queue writes now cover YouTube channel references, Lemon8 feed/topic/profile observations, Telegram chats/members/links, and browser-observed X/Threads/Facebook accounts. Per-platform gates remain off; legacy queues stay active. Compilation, env split validation, custom helper checks, and transaction-only live Postgres smoke passed; pytest is unavailable. The additive evidence migration is not applied. |
+| **3. Discovery-source adapters** | Implemented; rollout pending | Typed discovery evidence and bounded shared queue writes now cover YouTube channel references, Lemon8 feed/topic/profile observations, Telegram chats/members/links, and browser-observed X/Threads/Facebook accounts. Per-platform gates remain off; legacy queues stay active. Compilation, env split validation, custom helper checks, and transaction-only live Postgres smoke passed; pytest is unavailable. A read-only ledger check confirmed the additive evidence migration is applied with the matching repository checksum. |
 | **4. Feed provenance and reporting** | Implemented; live schema applied | Added a canonical surface vocabulary and persisted it on social post/media and native message writes. Browser captures report observed, stored, deduped, failed, and last-success counts through `/collectors/surface-progress`; the Coverage page shows platform/surface progress and freshness. Extension and dashboard builds, compilation, focused manual assertions, and rollback-only live Postgres write/API checks passed. A later read-only check confirmed the live migration ledger contains matching checksums for the discovery-evidence and collection-surface migrations. Pytest is unavailable. |
 | **5. Feed adapter coverage** | Implemented; rollout pending | Existing browser paths retain the Phase 4 surface labels and are bounded to at most 18 scroll passes. TikTok profile fallback is capped at 100 items, Lemon8 FYP is capped at 5 pages / 120 media / 5 detail fetches, and Strava Following/date passes are capped at 10/20 pages with one retry after a 429 backoff. Instagram personalized home/Reels and YouTube personalized home are unsupported: current collectors have no bounded visible-surface adapter for them. Helper assertions, Python compilation, extension build, and read-only live schema/ledger checks passed; pytest is unavailable. No platform endpoints were contacted. |
-| **6. Operations and rollout** | Not started | — |
+| **6. Operations and rollout** | Implemented; rollout remains gated | `/collectors/operations` reports shared spider queue status/age, recent browser/graph/headless DLQ errors by safe category, and per-source error-query availability. The Coverage page distinguishes no errors from unavailable or partial reporting and shows stale surface freshness using recent counts plus indexed latest-record lookups. Operator-only `/collectors/feed-controls/{platform}` pauses/resumes scheduled collectors and limits cadence to 1–720 hours. Phase 2/3 shared claims stay disabled until legacy shadow parity is measured; no legacy queue was removed or cut over. Pytest is unavailable. The current live DB exceeds the bounded all-time freshness lookup and browser-error query bounds; API/UI report incomplete status rather than a false zero. |
 
 ## Current state by platform
 
@@ -78,7 +78,7 @@ do not build on unmeasured coverage or ambiguous edge semantics.
 | **3. Discovery-source adapters** | Connect YouTube channel references, Lemon8 feed/topic creator discovery, and Telegram chat/member/link discovery to the shared lifecycle while keeping their evidence types distinct. Add bounded account queues for X, Threads, and Facebook only for identifiers exposed by existing browser captures. | Every discovered target retains its source record and confidence; For You authors do not silently become follow edges or Instagram seeds; no unbounded cross-platform fan-out. | **5–8 days** |
 | **4. Feed provenance and reporting** | Add a normalized collection-surface vocabulary to post/media writes (profile, Following, For You, Explore, topic, home, search, message stream, unknown) and expose per-surface progress. Preserve existing source IDs and raw payloads. | Dashboard/API can separate Following from recommendation captures and show freshness, stored/deduped counts, failures, and last success by platform and surface. | **4–6 days** |
 | **5. Feed adapter coverage** | Stabilize and label current TikTok, X, Threads, Lemon8, Strava, Facebook, and Instagram capture paths. Evaluate Instagram home/Reels capture and YouTube personalized recommendations as explicit feasibility spikes; ship only surfaces that can be captured with bounded, supportable access. | Each supported surface has a bounded cadence and item/page cap, idempotent writes, clear opt-in where appropriate, and an honest unsupported/unavailable state for inaccessible surfaces. | **8–13 days** |
-| **6. Operations and rollout** | Add queue-age and surface-freshness views, error classifications, per-platform pause/limit controls, rollout notes, and migration cleanup only after parity has held. | Operators can identify stale queues versus unavailable source surfaces; rollout can be paused or rolled back per platform; no queue is dropped before reconciliation. | **3–5 days** |
+| **6. Operations and rollout** | Implemented; rollout remains gated | `/collectors/operations` reports shared spider queue status/age, recent browser/graph/headless DLQ errors by safe category, and per-source error-query availability. The Coverage page distinguishes no errors from unavailable or partial reporting and shows stale surface freshness using recent counts plus indexed latest-record lookups. Operator-only `/collectors/feed-controls/{platform}` pauses/resumes scheduled collectors and limits cadence to 1–720 hours. Phase 2/3 shared claims stay disabled until legacy shadow parity is measured; no legacy queue was removed or cut over. Pytest is unavailable. The current live DB exceeds the bounded all-time freshness lookup and browser-error query bounds; API/UI report incomplete status rather than a false zero. |
 
 **Total:** approximately **34–53 engineering person-days**. Phases 1–3 are
 the Spider workstream; phases 4–6 are the feed/For You workstream. Phase 0 is
@@ -87,6 +87,20 @@ shared and should precede both.
 ## Recommended rollout gates
 
 - Use feature flags per platform for shared-queue claims and For You capture.
+- Keep the Phase 2/3 platform flags disabled until the legacy and shared queue
+  status distributions agree for a full collection interval. The new feed
+  control endpoint only changes `collection_schedules`; it does not enable
+  shared claims or For You capture.
+- Surface counts use the selected recent window; latest-record lookups are separately bounded. If historical freshness queries time out, the API returns an incomplete state and the Coverage page warns that older surfaces may be omitted.
+- Use `/collectors/operations` to inspect shared-queue age and classified
+  failures. The Coverage page also reports per-surface freshness. Queue age is
+  based on `spider_queue.enqueued_at`; legacy queues remain active and their
+  status accounting remains available through the backfill-equilibrium view
+  until a safe indexed age source is available for each legacy schema.
+- Operators can pause/resume a listed platform and set a 1–720 hour scheduler
+  interval at `/collectors/feed-controls/{platform}`. Browser extensions honor
+  pauses on their next config poll; the interval limits headless scheduler
+  cadence. Collector-specific page/item ceilings remain hard caps.
 - Run old and new queue accounting in shadow mode for one full collection
   interval; compare pending, completed, failed, duplicate, and retryable rows.
 - Enable one platform at a time, starting with a source whose current behavior

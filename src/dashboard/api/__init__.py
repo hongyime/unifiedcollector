@@ -209,6 +209,9 @@ from src.dashboard.api.source_matrix import (  # noqa: E402,F401
 from src.dashboard.api.surfaces import (  # noqa: E402,F401
     router as _surfaces_router,
     collection_surface_progress,
+    collector_operations,
+    update_feed_control,
+    FeedControlUpdate,
 )
 from src.dashboard.api.telegram_ops import (  # noqa: E402,F401
     router as _telegram_ops_router,

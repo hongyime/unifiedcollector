@@ -21,7 +21,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from src.db.connection import get_pool
 from src.dashboard.api.auth import require_role
@@ -43,7 +43,7 @@ async def _get_pool():
 
 class ScheduleRequest(BaseModel):
     source: str
-    interval_hours: int = 24
+    interval_hours: int = Field(default=24, ge=1, le=720)
     enabled: bool = True
 
 
