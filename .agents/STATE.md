@@ -1,14 +1,7 @@
 # Agent State
-Current task: Repair and verify the profile-probe queue feeder, verify YouTube download behavior after `ac9ee584`, and classify the 35 empty tables from the 2026-10-13 inventory.
-Status: Feeder and empty-table triage are pushed in `292c8160`; the publication record is pushed in `843ead37`. Cookie-less YouTube verification failed at the authentication gate.
-Progress:
-- Read repository guidance, shared state, `/tmp/agy-data-inventory.md`, and `docs/architecture.md`. The inventory confirms all five profile tables and `profile_probe_queue` are empty.
-- Traced the queue consumer: five source-specific probe containers poll `profile_probe_queue`; the scheduler has no feeder handler. `social_users` contains collected account names and is indexed by platform/username; `discovered_links` contains direct profile URLs for several target platforms.
-- Added `ProfileProbeFeederHandler` to the scheduler. It routes direct spider profile URLs, prioritizes Instagram/TikTok/Threads/X same-handle candidates ahead of Telegram, and seeds at most 100 targets per source every 15 minutes.
-- Live verification: scheduled feeder passes logged 95–100 queued per source. Latest queue counts are 302–306 per source with matching case-insensitive unique counts and no probe errors. Profile rows: Snapchat 11, PayPal 15, Airbnb 0, Bluesky 0, Pinterest 25; Airbnb and Bluesky each have 100 not-found results so far.
-- YouTube: cookie-less yt-dlp with `player_client=web,mweb` reached both player APIs but received “Sign in to confirm you’re not a bot.” The configured cookie file is absent from the collector container and the Chrome profile is not mounted there. Per the no-browser constraint, no profile export was attempted.
-- Triaged all 35 empty tables: 15 expected-empty, 16 gaps, and 4 unknown. Fixed the six profile-probe queue/table gaps only; see the task report for the remaining gap causes.
-Next steps: A successful YouTube retry needs an exported cookie file supplied without browser access. The remaining 16 non-probe gaps are independent follow-up work.
+Current task: Restore authenticated YouTube yt-dlp downloads from the live Chrome session.
+Status: Blocked on access to the authenticated browser profile. Available CDP port 9336 proxies to headless Chrome on 9222; both expose empty cookie jars. The collector expects `/app/credentials/youtube/cookies.txt`, which is absent. No old migrated cookie file was read or decrypted.
+Next steps: Point the collector/CDP export at the live logged-in Chrome profile (or its cookie-sync path), export only youtube.com cookies, verify account identity without exposing cookie data, then run one yt-dlp `--skip-download` probe and publish the resulting change.
 
 ## Prior handoff history
 
