@@ -1,7 +1,16 @@
 # Agent State
-Current task: Restore authenticated YouTube yt-dlp downloads from the live Chrome session.
-Status: Blocked on access to the authenticated browser profile. Available CDP port 9336 proxies to headless Chrome on 9222; both expose empty cookie jars. The collector expects `/app/credentials/youtube/cookies.txt`, which is absent. No old migrated cookie file was read or decrypted.
-Next steps: Point the collector/CDP export at the live logged-in Chrome profile (or its cookie-sync path), export only youtube.com cookies, verify account identity without exposing cookie data, then run one yt-dlp `--skip-download` probe and publish the resulting change.
+Current task: Diagnose the extension heartbeat/injection report, configure Chrome and Beeper XDG autostart, and write the Spider / For You / Feeds implementation plan.
+Status: Extension fix is committed as `319a5870`; plan/state publication and push remain.
+Progress:
+- Read repository guidance, state, and architecture documentation. The repository was clean on `main` at start.
+- The bridge health endpoint returns 200. Read-only Collector DB telemetry for the last 15 minutes shows extension `1.23.104` heartbeats, real-page post writes, and media ingests; no Beeper tables or records were queried.
+- `swStartedAt` is set when the MV3 worker bundle starts, but the status badge incorrectly uses that lifecycle timestamp as a 10-minute liveness check. Periodic scraper heartbeats are fresh; normal heartbeat summaries POST to the bridge but do not refresh the popup's local `lastBridgeHeartbeatOkAt` field.
+- Updated `extension/src/tabs.ts` to report current worker activity from recent scraper/loop/bridge timestamps, and `extension/src/background.ts` to refresh bridge success/failure status from periodic heartbeat summaries. Chrome error-document injection rejections now log as expected skips when Chromium exposes `chrome-error://` / `chromewebdata` in the error.
+- Chrome-generated error documents cannot accept script injection. Recent real-page post writes and media ingests confirm extension capture is live; the main-world hook is registered for supported hosts, but its runtime marker could not be inspected because browser security policy blocked the internal extension diagnostics page. No alternate browser-control route will be used.
+- Updated Beeper autostart to set `DISPLAY=:10` and added a Google Chrome XDG autostart entry; desktop-file validation and executable-target checks pass. No application was launched.
+- Added `docs/spider-foryou-plan.md` with per-platform current state, gaps, phased order, and 34–53 engineering-day estimates. The repository-wide `docs/` ignore rule requires force-adding this specifically requested file.
+- `npm run build`, syntax checks on built background/tabs bundles, `git diff --check`, bridge `/health`, and read-only recent heartbeat/post/media telemetry checks pass. Live telemetry is from the running `1.23.104` extension; the new `1.23.105` build was not hot-loaded because browser security policy blocked internal diagnostics access.
+Next steps: Commit the plan and agent-state files, then push both commits to `origin/main`.
 
 ## Prior handoff history
 

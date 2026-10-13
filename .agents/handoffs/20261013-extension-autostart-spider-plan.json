@@ -1,0 +1,18 @@
+{
+  "date": "2026-10-13",
+  "task": "Fix UnifiedCollector extension status reporting, configure desktop autostart, and plan Spider / For You / Feeds work.",
+  "findings": [
+    "The MV3 service worker's swStartedAt field is a lifecycle start time, not a liveness signal; recent periodic scraper heartbeats show the worker is active.",
+    "Periodic scraper heartbeat summaries reach the bridge but currently do not update the extension's local lastBridgeHeartbeatOkAt status field.",
+    "Read-only bridge and Collector telemetry shows extension 1.23.104 is producing real-page post writes and media ingests. No Beeper data was queried.",
+    "The existing Beeper XDG autostart entry lacks DISPLAY=:10, and no Chrome autostart entry exists.",
+    "The browser security policy blocked the internal extension diagnostics page; do not retry through another browser-control path."
+  ],
+  "next_steps": [
+    "Fix status freshness using recent worker activity and refresh bridge success timestamps from periodic heartbeat summaries.",
+    "Build the extension and verify bridge telemetry without changing Beeper data.",
+    "Write the requested platform-by-platform implementation plan without implementing it.",
+    "Create Chrome autostart and update Beeper autostart with DISPLAY=:10; verify desktop-file contents only.",
+    "Scrub any real hostname from staged agent-state blobs, commit the requested changes to main, and push."
+  ]
+}
