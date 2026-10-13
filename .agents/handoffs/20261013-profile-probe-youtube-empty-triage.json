@@ -17,7 +17,7 @@
     "social_users has an index on (platform, username) and contains collected usernames.",
     "discovered_links contains a small number of direct URLs for probe-target platforms.",
     "YouTube fix ac9ee584 adds the web,mweb player clients; collector uses yt-dlp through subprocess_downloader.",
-    "The scheduled feeder logged 100 queued per source. Queue totals reached 201–205 per source with matching case-insensitive unique counts; Snapchat, PayPal, and Pinterest profiles now have rows.",
+    "Scheduled feeder passes logged 95–100 queued per source. Latest queue totals are 302–306 per source with matching case-insensitive unique counts and no probe errors. Profile row counts are Snapchat 11, PayPal 15, Airbnb 0, Bluesky 0, Pinterest 25; Airbnb and Bluesky each have 100 not-found results.",
     "The cookie-less YouTube probe reached both player APIs, then received the bot-verification sign-in gate. The collector container has no configured cookie file and does not mount the Chrome profile."
   ],
   "next_steps": [
