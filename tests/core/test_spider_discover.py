@@ -16,6 +16,7 @@ import pytest_asyncio
 
 from src.core.spider_discover import (
     Edge,
+    EdgeFetchUnavailable,
     EdgeFetcher,
     EdgeType,
     SpiderDiscover,
@@ -125,6 +126,72 @@ async def test_stale_visited_marker_does_not_suppress_reclaimed_queue_work():
     })
 
     assert fetcher.fetch_calls == [("stale-node", EdgeType.FOLLOWING)]
+
+
+@pytest.mark.asyncio
+async def test_empty_graph_is_recorded_separately_from_unavailable(monkeypatch):
+    observations = []
+
+    async def observe(*args):
+        observations.append(args)
+
+    empty_spider = SpiderDiscover(
+        platform="test_observation",
+        fetcher=StubFetcher({}),
+        pool=_ExecuteOnlyPool(),
+        observation_sink=observe,
+    )
+    await empty_spider._process_node({
+        "node_id": "empty-node",
+        "hop_distance": 0,
+        "priority": 5,
+        "attempts": 1,
+        "max_attempts": 5,
+        "claim_token": uuid4(),
+    })
+    assert observations.pop() == (
+        "empty-node", EdgeType.FOLLOWING, "empty", 0, None,
+    )
+
+    class UnavailableFetcher:
+        supported_edge_types = (EdgeType.FOLLOWING,)
+
+        async def fetch_edges(self, node_id, edge_type):
+            raise EdgeFetchUnavailable("private_or_rate_limited")
+            yield  # pragma: no cover
+
+    unavailable_spider = SpiderDiscover(
+        platform="test_observation",
+        fetcher=UnavailableFetcher(),
+        pool=_ExecuteOnlyPool(),
+        observation_sink=observe,
+    )
+
+    async def retryable_failure(*_args):
+        return "pending"
+
+    monkeypatch.setattr(unavailable_spider, "_mark_failed", retryable_failure)
+    await unavailable_spider._process_node({
+        "node_id": "restricted-node",
+        "hop_distance": 0,
+        "priority": 5,
+        "attempts": 1,
+        "max_attempts": 5,
+        "claim_token": uuid4(),
+    })
+    assert observations.pop() == (
+        "restricted-node", EdgeType.FOLLOWING, "unavailable", 0,
+        "private_or_rate_limited",
+    )
+
+
+@pytest.mark.asyncio
+async def test_shared_spider_run_cap_must_be_positive():
+    spider = SpiderDiscover(
+        platform="test_cap", fetcher=StubFetcher({}), pool=None,
+    )
+    with pytest.raises(ValueError, match="max_nodes"):
+        await spider.run(max_nodes=0)
 
 
 @pytest.mark.asyncio

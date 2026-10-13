@@ -101,6 +101,20 @@ class EdgeType(str, Enum):
     COLLABORATOR = "collaborator"
     CONTRIBUTOR = "contributor"
     SUBSCRIBER = "subscriber"  # YouTube etc.
+    CLUB_MEMBER = "club_member"  # membership evidence, not a follow edge
+
+
+class EdgeFetchUnavailable(RuntimeError):
+    """A source did not expose a relationship list for this node/type.
+
+    Use this when auth, privacy, rate limiting, or a missing snapshot prevents
+    the adapter from deciding whether the list is empty. A valid empty list
+    should simply yield no edges and complete normally.
+    """
+
+    def __init__(self, error_class: str, message: str | None = None) -> None:
+        self.error_class = error_class.strip().lower()[:64] or "source_unavailable"
+        super().__init__(message or self.error_class)
 
 
 @dataclass(frozen=True)
@@ -239,6 +253,7 @@ class SpiderStats:
 
 RateWaiter = Callable[[], Awaitable[Any]]
 EdgeSink = Callable[[Edge, int], Awaitable[None]]
+ObservationSink = Callable[[str, EdgeType, str, int, str | None], Awaitable[None]]
 """Optional callback invoked for every edge produced. ``hop_distance`` is the
 BFS depth of the SOURCE node; the target is at depth+1. Use this to persist
 edges to your platform's relationship table."""
@@ -281,6 +296,7 @@ class SpiderDiscover:
         concurrency: int = 4,
         rate_waiter: Optional[RateWaiter] = None,
         edge_sink: Optional[EdgeSink] = None,
+        observation_sink: Optional[ObservationSink] = None,
         visited=None,
         breaker: Optional[CircuitBreaker] = None,
         max_attempts: int = 5,
@@ -322,6 +338,7 @@ class SpiderDiscover:
         self.heartbeat_seconds = heartbeat_seconds
         self._rate_waiter = rate_waiter
         self._edge_sink = edge_sink
+        self._observation_sink = observation_sink
         self._visited = visited or _InMemoryVisited()
         self._breaker = breaker or CircuitBreaker(
             name=f"spider:{platform}",
@@ -648,32 +665,50 @@ class SpiderDiscover:
             self.stats.nodes_visited += 1
 
             for et in self.fetcher.supported_edge_types:
-                async for edge in self._iter_edges_with_breaker(node_id, et):
-                    self.stats.edges_yielded += 1
-                    if self._edge_sink is not None:
-                        try:
-                            await self._edge_sink(edge, hop)
-                        except Exception:
-                            logger.exception(
-                                "spider[%s] edge_sink raised for %s",
-                                self.platform, edge.target,
-                            )
+                edge_count = 0
+                try:
+                    async for edge in self._iter_edges_with_breaker(node_id, et):
+                        edge_count += 1
+                        self.stats.edges_yielded += 1
+                        if self._edge_sink is not None:
+                            try:
+                                await self._edge_sink(edge, hop)
+                            except Exception:
+                                logger.exception(
+                                    "spider[%s] edge_sink raised for %s",
+                                    self.platform, edge.target,
+                                )
 
-                    # Enqueue child only if within max_hops (children at
-                    # depth hop+1; if hop+1 > max_hops, record edge but
-                    # don't expand further).
-                    if hop + 1 <= self.max_hops:
-                        async with self.pool.acquire() as conn:
-                            inserted = await self._enqueue_child(
-                                conn,
-                                target=edge.target,
-                                hop_distance=hop + 1,
-                                priority=claim["priority"],
-                                parent_node_id=node_id,
-                                edge_type=et,
-                            )
-                        if inserted:
-                            self.stats.edges_enqueued += 1
+                        # Enqueue child only if within max_hops (children at
+                        # depth hop+1; if hop+1 > max_hops, record edge but
+                        # don't expand further).
+                        if hop + 1 <= self.max_hops:
+                            async with self.pool.acquire() as conn:
+                                inserted = await self._enqueue_child(
+                                    conn,
+                                    target=edge.target,
+                                    hop_distance=hop + 1,
+                                    priority=claim["priority"],
+                                    parent_node_id=node_id,
+                                    edge_type=et,
+                                )
+                            if inserted:
+                                self.stats.edges_enqueued += 1
+                except EdgeFetchUnavailable as exc:
+                    await self._record_observation(
+                        node_id, et, "unavailable", edge_count, exc.error_class
+                    )
+                    raise
+                except Exception as exc:
+                    await self._record_observation(
+                        node_id, et, "error", edge_count, type(exc).__name__
+                    )
+                    raise
+                else:
+                    await self._record_observation(
+                        node_id, et, "success" if edge_count else "empty",
+                        edge_count, None,
+                    )
 
             completed = await self._mark_completed(node_id, claim_token)
             if completed:
@@ -701,6 +736,26 @@ class SpiderDiscover:
         finally:
             heartbeat.cancel()
             await asyncio.gather(heartbeat, return_exceptions=True)
+
+    async def _record_observation(
+        self,
+        node_id: str,
+        edge_type: EdgeType,
+        outcome: str,
+        edge_count: int,
+        error_class: str | None,
+    ) -> None:
+        if self._observation_sink is None:
+            return
+        try:
+            await self._observation_sink(
+                node_id, edge_type, outcome, edge_count, error_class
+            )
+        except Exception:
+            logger.debug(
+                "spider[%s] observation sink failed for %s/%s",
+                self.platform, node_id, edge_type.value, exc_info=True,
+            )
 
     async def _iter_edges_with_breaker(
         self, node_id: str, edge_type: EdgeType
@@ -757,15 +812,19 @@ class SpiderDiscover:
         """Cooperative shutdown. In-flight tasks finish their current node."""
         self._stop.set()
 
-    async def run(self) -> SpiderStats:
+    async def run(self, *, max_nodes: int | None = None) -> SpiderStats:
         """Drain the queue until empty (or ``request_stop`` is called).
 
         Resets stuck in_progress rows on entry. Returns the SpiderStats
-        snapshot when complete."""
+        snapshot when complete. ``max_nodes`` bounds claims for scheduled
+        platform adapters; at most the configured concurrency can be in flight."""
+        if max_nodes is not None and max_nodes < 1:
+            raise ValueError("max_nodes must be >=1 when provided")
         self.stats = SpiderStats(started_at=time.monotonic())
         await self.reset_stuck_in_progress()
 
         in_flight: set[asyncio.Task[None]] = set()
+        claimed_nodes = 0
 
         try:
             while not self._stop.is_set():
@@ -792,6 +851,9 @@ class SpiderDiscover:
                     )
                     continue
 
+                if max_nodes is not None and claimed_nodes >= max_nodes:
+                    break
+
                 claim = await self._claim_next()
                 if claim is None:
                     if not in_flight:
@@ -802,6 +864,8 @@ class SpiderDiscover:
                         in_flight, return_when=asyncio.FIRST_COMPLETED,
                     )
                     continue
+
+                claimed_nodes += 1
 
                 task = asyncio.create_task(
                     self._process_node(claim),
@@ -826,6 +890,7 @@ __all__ = [
     "EdgeFetcher",
     "Edge",
     "EdgeType",
+    "EdgeFetchUnavailable",
     "SpiderStats",
     "RedisVisited",
 ]

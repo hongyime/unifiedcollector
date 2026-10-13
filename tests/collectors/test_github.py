@@ -27,7 +27,7 @@ from src.collectors.github import (
     GithubCollector,
     _parse_iso,
 )
-from src.core.spider_discover import EdgeType
+from src.core.spider_discover import EdgeFetchUnavailable, EdgeType
 
 
 # ── helpers ───────────────────────────────────────────────────────────────
@@ -845,3 +845,47 @@ def test_module_exposes_main_classes():
     assert hasattr(github_mod, "GithubCollector")
     assert hasattr(github_mod, "GithubEdgeFetcher")
     assert github_mod.AVATAR_CDN_BASE.startswith("https://avatars.")
+
+
+@pytest.mark.asyncio
+async def test_shared_github_graph_fetch_is_item_capped(monkeypatch):
+    coll = _new_collector(monkeypatch)
+    monkeypatch.setenv("GITHUB_SHARED_SPIDER_EDGE_CAP", "2")
+    response = MagicMock()
+    response.json.return_value = [
+        {"login": "first"}, {"login": "second"}, {"login": "third"},
+    ]
+    coll._api_get = AsyncMock(return_value=response)
+
+    @asynccontextmanager
+    async def fake_client():
+        yield object()
+
+    monkeypatch.setattr(coll, "_make_client", fake_client)
+    edges = [
+        edge async for edge in github_mod.GithubEdgeFetcher(coll).fetch_edges(
+            "seed", EdgeType.FOLLOWING,
+        )
+    ]
+
+    assert [edge.target for edge in edges] == ["first", "second"]
+    coll._api_get.assert_awaited_once()
+    assert "per_page=2&page=1" in coll._api_get.await_args.args[1]
+
+
+@pytest.mark.asyncio
+async def test_shared_github_graph_marks_missing_api_page_unavailable(monkeypatch):
+    coll = _new_collector(monkeypatch)
+    coll._api_get = AsyncMock(return_value=None)
+
+    @asynccontextmanager
+    async def fake_client():
+        yield object()
+
+    monkeypatch.setattr(coll, "_make_client", fake_client)
+    with pytest.raises(EdgeFetchUnavailable) as exc_info:
+        async for _edge in github_mod.GithubEdgeFetcher(coll).fetch_edges(
+            "seed", EdgeType.FOLLOWING,
+        ):
+            pass
+    assert exc_info.value.error_class == "github_relationships_unavailable"

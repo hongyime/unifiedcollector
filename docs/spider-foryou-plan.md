@@ -1,8 +1,21 @@
 # Spider, For You, and Feeds Implementation Plan
 
 This plan turns the uneven source-specific spider and feed work described in
-[`architecture.md`](architecture.md) into a staged implementation. It is a plan
-only; no spider or feed feature is built here.
+[`architecture.md`](architecture.md) into a staged implementation. Execution
+status is tracked below; implementation does not imply that a rollout gate has
+been enabled.
+
+## Execution status — 2026-10-13
+
+| Phase | Status | Evidence / remaining gate |
+|---|---|---|
+| **0. Baseline and contract** | Complete | Contract and source inventory captured in this plan. |
+| **1. Queue lifecycle parity** | Implemented | Commits `eb6ad9bd` and `092ec85b`; full shadow reconciliation and consumer cutover remain gated. |
+| **2. Active graph adapters** | Implemented; rollout pending | Typed graph edges and fetch observations cover Instagram headless/browser, GitHub, TikTok visible-roster, and Strava visible-roster paths. GitHub shared traversal and graph writes are opt-in; legacy workers remain active. Focused assertions and transaction-only database checks passed; pytest is unavailable in the current host/runtime. Keep all flags off until bounded per-source shadow parity is measured. |
+| **3. Discovery-source adapters** | Not started | — |
+| **4. Feed provenance and reporting** | Not started | — |
+| **5. Feed adapter coverage** | Not started | — |
+| **6. Operations and rollout** | Not started | — |
 
 ## Current state by platform
 

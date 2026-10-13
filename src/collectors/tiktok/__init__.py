@@ -930,6 +930,9 @@ class TiktokCollector(BaseCollector):
         await self._load_tracker_state()
         await self._sync_persisted_local_tool_cooldown()
         self._metadata_cooldown_media_fallbacks_used = 0
+        from src.core.spider_graph_store import shared_spider_enabled
+        if shared_spider_enabled("tiktok"):
+            await self._record_visible_follow_graph()
         spider_enabled = os.getenv("TIKTOK_SPIDER_ENABLED", "true").lower() == "true"
         if spider_enabled and self._spider_first:
             await self._process_spider_queue(max_items=self._spider_queue_per_cycle)
@@ -1002,6 +1005,57 @@ class TiktokCollector(BaseCollector):
         # Spider queue processing
         if spider_enabled and not self._spider_first:
             await self._process_spider_queue(max_items=self._spider_queue_per_cycle)
+
+    async def _record_visible_follow_graph(self) -> None:
+        """Normalize only follow edges observed by the browser extension.
+
+        This path performs bounded database reads/writes and makes no TikTok
+        requests. The legacy profile queue remains the profile collector.
+        """
+        owner = os.getenv("TIKTOK_FOLLOW_OWNER_FALLBACK", "").strip().lstrip("@")
+        if not owner or self.pool is None:
+            logger.info("tiktok visible graph unavailable: owner or database is missing")
+            return
+        from src.core.spider_discover import EdgeType
+        from src.core.spider_graph_store import (
+            bounded_limit,
+            persist_visible_follow_edges,
+            record_spider_fetch_observation,
+            shared_spider_schema_ready,
+        )
+
+        if not await shared_spider_schema_ready(self.pool):
+            logger.info("tiktok visible graph paused: graph migration is not applied")
+            return
+        try:
+            counts = await persist_visible_follow_edges(
+                self.pool,
+                "tiktok",
+                owner,
+                max_edges=bounded_limit("TIKTOK_SHARED_GRAPH_EDGE_CAP", 250, maximum=1000),
+            )
+            for direction, edge_type in (
+                ("following", EdgeType.FOLLOWING),
+                ("follower", EdgeType.FOLLOWER),
+            ):
+                count = counts[direction]
+                await record_spider_fetch_observation(
+                    self.pool,
+                    "tiktok",
+                    owner,
+                    edge_type,
+                    "success" if count else "unavailable",
+                    count,
+                    None if count else "no_visible_follow_snapshot",
+                    source_observed_at=counts.get(f"{direction}_last_seen_at"),
+                )
+        except Exception:
+            logger.info("tiktok visible graph normalization skipped after database error", exc_info=True)
+            return
+        logger.info(
+            "tiktok visible graph normalized for owner: following=%d followers=%d",
+            counts["following"], counts["follower"],
+        )
 
     async def _process_spider_queue(self, max_items: int | None = None):
         await refresh_account_proximity_cache(self.pool)

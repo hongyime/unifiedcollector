@@ -4431,7 +4431,13 @@ class InstagramCollector(BaseCollector):
         """
         try:
             from src.core.spider_discover import (
-                SpiderDiscover, EdgeType, Edge,
+                SpiderDiscover, EdgeType, Edge, EdgeFetchUnavailable,
+            )
+            from src.core.spider_graph_store import (
+                persist_spider_edge,
+                record_spider_fetch_observation,
+                shared_spider_enabled,
+                shared_spider_schema_ready,
             )
         except Exception as e:
             logger.debug("spider_discover unavailable: %s", e)
@@ -4439,6 +4445,14 @@ class InstagramCollector(BaseCollector):
 
         if not self._loader:
             logger.debug("spider_followers(%s): loader not initialised", username)
+            return
+        if not shared_spider_enabled("instagram"):
+            logger.debug("instagram shared graph disabled by rollout flag")
+            return
+        if self.pool is None or not await shared_spider_schema_ready(self.pool):
+            logger.info(
+                "instagram shared graph paused: lifecycle/graph migrations are not applied"
+            )
             return
 
         max_followers = int(os.getenv("INSTA_SPIDER_MAX_FOLLOWERS", "200"))
@@ -4463,8 +4477,9 @@ class InstagramCollector(BaseCollector):
                         None, lambda: _il.Profile.from_id(loader.context, int(node_id)),
                     )
                 except Exception as e:
-                    logger.debug("spider fetch_edges from_id(%s) failed: %s", node_id, e)
-                    return
+                    raise EdgeFetchUnavailable(
+                        "instagram_profile_unavailable"
+                    ) from e
                 iter_fn = (
                     prof.get_followers if edge_type == EdgeType.FOLLOWER
                     else prof.get_followees
@@ -4492,14 +4507,23 @@ class InstagramCollector(BaseCollector):
                         )
                         count += 1
                 except Exception as e:
-                    logger.debug(
-                        "spider fetch_edges(%s,%s) iter raised %s",
-                        node_id, edge_type, e,
-                    )
+                    raise EdgeFetchUnavailable(
+                        "instagram_relationship_list_unavailable"
+                    ) from e
 
-        async def _edge_sink(edge):
+        async def _edge_sink(edge, hop):
             # Persist into instagram_relationships if the table exists; soft-fail
             # otherwise so the spider keeps moving.
+            try:
+                await persist_spider_edge(
+                    self.pool,
+                    "instagram",
+                    edge,
+                    hop_distance=hop,
+                    discovery_type="headless_profile_graph",
+                )
+            except Exception:
+                logger.debug("instagram normalized graph edge persistence failed", exc_info=True)
             try:
                 async with self.pool.acquire() as conn:
                     await conn.execute(
@@ -4515,7 +4539,13 @@ class InstagramCollector(BaseCollector):
                         edge.metadata.get("username"),
                     )
             except Exception:
-                pass
+                logger.debug("instagram legacy relationship edge persistence failed", exc_info=True)
+
+        async def _observation_sink(node_id, edge_type, outcome, edge_count, error_class):
+            await record_spider_fetch_observation(
+                self.pool, "instagram", node_id, edge_type,
+                outcome, edge_count, error_class,
+            )
 
         try:
             spider = SpiderDiscover(
@@ -4528,6 +4558,7 @@ class InstagramCollector(BaseCollector):
                     "instagram.com", OperationType.PROFILE_VIEW, account=acct_name,
                 ),
                 edge_sink=_edge_sink,
+                observation_sink=_observation_sink,
             )
             await spider.seed(uid)
             await spider.run()

@@ -2,6 +2,7 @@ from src.core.spider_queue_compat import (
     LEGACY_QUEUE_SPECS,
     normalize_legacy_status,
 )
+from src.core.spider_graph_store import bounded_limit, shared_spider_enabled
 
 
 def test_legacy_queue_status_aliases_are_normalized():
@@ -20,3 +21,17 @@ def test_legacy_queue_specs_cover_current_dedicated_queues():
     } == set(LEGACY_QUEUE_SPECS)
     assert LEGACY_QUEUE_SPECS["github"].target_type_field == "target_type"
     assert not LEGACY_QUEUE_SPECS["instagram_targets"].record_id_is_uuid
+
+
+def test_shared_spider_rollout_is_per_platform_and_disabled_by_default(monkeypatch):
+    monkeypatch.delenv("GITHUB_SHARED_SPIDER_ENABLED", raising=False)
+    monkeypatch.setenv("TIKTOK_SHARED_SPIDER_ENABLED", "true")
+    assert shared_spider_enabled("github") is False
+    assert shared_spider_enabled("tiktok") is True
+
+
+def test_bounded_spider_limits_clamp_invalid_and_excessive_values(monkeypatch):
+    monkeypatch.setenv("GITHUB_SHARED_SPIDER_EDGE_CAP", "9999")
+    assert bounded_limit("GITHUB_SHARED_SPIDER_EDGE_CAP", 100, maximum=500) == 500
+    monkeypatch.setenv("GITHUB_SHARED_SPIDER_EDGE_CAP", "invalid")
+    assert bounded_limit("GITHUB_SHARED_SPIDER_EDGE_CAP", 100, maximum=500) == 100

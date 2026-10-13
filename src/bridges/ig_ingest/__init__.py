@@ -2782,6 +2782,44 @@ async def _record_users(pool, platform, users, context, owner=None) -> int:
                         await conn.execute(_FOLLOW_EDGES_UPSERT_SQL, *args)
                     except Exception:
                         logger.debug("record follow edge failed %s", args[2], exc_info=True)
+            if edge_args and owner_account and direction:
+                try:
+                    from src.core.spider_graph_store import shared_spider_enabled
+
+                    if shared_spider_enabled(platform):
+                        graph_args = [
+                            (
+                                platform,
+                                owner_account,
+                                r["uid"],
+                                direction,
+                                "browser_visible_follow",
+                                0,
+                                json.dumps({"target_username": r["username"]}),
+                            )
+                            for r in rows
+                        ]
+                        await conn.executemany(
+                            """
+                            INSERT INTO spider_graph_edges (
+                                platform, source_node_id, target_node_id, edge_type,
+                                discovery_type, hop_distance, source_metadata,
+                                first_seen_at, last_seen_at
+                            ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, NOW(), NOW())
+                            ON CONFLICT (platform, source_node_id, target_node_id, edge_type)
+                            DO UPDATE SET
+                                discovery_type = EXCLUDED.discovery_type,
+                                source_metadata = spider_graph_edges.source_metadata || EXCLUDED.source_metadata,
+                                last_seen_at = NOW()
+                            """,
+                            graph_args,
+                        )
+                except Exception:
+                    logger.debug(
+                        "record normalized visible graph failed platform=%s",
+                        platform,
+                        exc_info=True,
+                    )
         usernames = [r["username"] for r in successful_rows if r["username"]]
         ctx = context_value.lower()
         target_metadata = {

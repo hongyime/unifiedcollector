@@ -112,7 +112,16 @@ from src.core.dedupe_hash import sha256_bytes as _sha256_bytes
 from src.core.file_naming import sanitize_name as sanitize_name
 from src.core.proximity import refresh_account_proximity_cache
 from src.core.profile_photo_tracker import ProfilePhotoTracker
-from src.core.spider_discover import Edge, EdgeType, SpiderDiscover
+from src.core.spider_discover import (
+    Edge, EdgeFetchUnavailable, EdgeType, SpiderDiscover,
+)
+from src.core.spider_graph_store import (
+    bounded_limit,
+    persist_spider_edge,
+    record_spider_fetch_observation,
+    shared_spider_enabled,
+    shared_spider_schema_ready,
+)
 from src.core.vault import VAULT_ROOT, write_atomic_artifact
 from src.core.user_change_tracker import (
     UserChangeTracker,
@@ -168,14 +177,38 @@ class GithubEdgeFetcher:
         if edge_type not in self.supported_edge_types:
             raise NotImplementedError(f"unsupported edge type: {edge_type}")
         endpoint = "followers" if edge_type == EdgeType.FOLLOWER else "following"
+        edge_cap = bounded_limit(
+            "GITHUB_SHARED_SPIDER_EDGE_CAP", 100, maximum=200
+        )
         async with self._c._make_client() as client:
-            users = await self._c._paginate(
-                client, f"{API_BASE}/users/{node_id}/{endpoint}"
-            )
-        for u in users:
-            login = (u or {}).get("login")
-            if login:
-                yield Edge(source=node_id, target=login, edge_type=edge_type)
+            page = 1
+            yielded = 0
+            while yielded < edge_cap:
+                per_page = min(PER_PAGE, edge_cap - yielded)
+                response = await self._c._api_get(
+                    client,
+                    f"{API_BASE}/users/{node_id}/{endpoint}"
+                    f"?per_page={per_page}&page={page}",
+                )
+                if response is None:
+                    raise EdgeFetchUnavailable("github_relationships_unavailable")
+                try:
+                    users = response.json()
+                except Exception as exc:
+                    raise EdgeFetchUnavailable("github_relationship_payload_invalid") from exc
+                if not isinstance(users, list):
+                    raise EdgeFetchUnavailable("github_relationship_payload_invalid")
+                for user in users:
+                    login = (user or {}).get("login") if isinstance(user, dict) else None
+                    if not login:
+                        continue
+                    yield Edge(source=node_id, target=str(login), edge_type=edge_type)
+                    yielded += 1
+                    if yielded >= edge_cap:
+                        break
+                if len(users) < per_page:
+                    break
+                page += 1
 
 
 # ----------------------------------------------------------------------------
@@ -1225,13 +1258,69 @@ class GithubCollector(BaseCollector):
         """Build a ``SpiderDiscover`` instance ready to run against the unified
         ``spider_queue`` table. The legacy ``github_spider_queue`` drain is
         still preferred by ``collect()``; this is the new path."""
+        async def edge_sink(edge, hop):
+            await persist_spider_edge(
+                self.pool, "github", edge, hop,
+                discovery_type="github_api_graph",
+            )
+
+        async def observation_sink(node_id, edge_type, outcome, edge_count, error_class):
+            await record_spider_fetch_observation(
+                self.pool, "github", node_id, edge_type,
+                outcome, edge_count, error_class,
+            )
+
         return SpiderDiscover(
             platform="github",
             fetcher=self.make_edge_fetcher(),
             pool=self.pool,
             max_hops=max_hops if max_hops is not None else self._spider_depth,
             concurrency=int(os.getenv("GITHUB_SPIDER_CONCURRENCY", "4")),
+            edge_sink=edge_sink,
+            observation_sink=observation_sink,
         )
+
+    async def _run_shared_spider(self) -> None:
+        """Opt-in, bounded adapter over explicit operator-owned GitHub seeds."""
+        if not shared_spider_enabled("github"):
+            return
+        if self.pool is None or not await shared_spider_schema_ready(self.pool):
+            logger.info("github shared spider paused: required migrations are not applied")
+            return
+        seeds = [
+            value.strip().lstrip("@")
+            for value in os.getenv("GITHUB_SHARED_SPIDER_SEEDS", "").split(",")
+            if re.fullmatch(
+                r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?",
+                value.strip().lstrip("@"),
+            )
+        ][:bounded_limit("GITHUB_SHARED_SPIDER_SEEDS_PER_CYCLE", 1, maximum=3)]
+        if not seeds:
+            logger.info("github shared spider enabled but no explicit seeds are configured")
+            return
+
+        spider = self.make_spider_discover(
+            max_hops=bounded_limit("GITHUB_SHARED_SPIDER_DEPTH", 1, maximum=2)
+        )
+        node_cap = bounded_limit(
+            "GITHUB_SHARED_SPIDER_NODES_PER_CYCLE", 2, maximum=5
+        )
+        try:
+            for seed in seeds:
+                await spider.seed(
+                    seed,
+                    discovery_type="operator_seed",
+                    source_table="configured_seeds",
+                    source_record_id=seed,
+                    source_metadata={"seed_kind": "github_shared_spider"},
+                )
+            stats = await spider.run(max_nodes=node_cap)
+            logger.info(
+                "github shared spider bounded pass: nodes=%d edges=%d failed=%d cap=%d",
+                stats.nodes_visited, stats.edges_yielded, stats.nodes_failed, node_cap,
+            )
+        except Exception:
+            logger.warning("github shared spider pass failed; legacy queue remains active", exc_info=True)
 
     async def _github_spider_pending_count(self) -> int:
         if self.pool is None:
@@ -1385,6 +1474,7 @@ class GithubCollector(BaseCollector):
         if os.getenv("GITHUB_SPIDER_ENABLED", "true").lower() == "true":
             await self._process_spider_queue()
             await self._run_quota_pusher_spider()
+        await self._run_shared_spider()
 
     async def _process_spider_queue(
         self,

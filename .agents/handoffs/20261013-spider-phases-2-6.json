@@ -1,0 +1,54 @@
+{
+  "date": "2026-10-13",
+  "task": "Execute Phases 2–6 of docs/spider-foryou-plan.md in order",
+  "start_commit": "c8d127fd",
+  "branch": "main",
+  "phase_1": {
+    "status": "complete and pushed",
+    "implementation_commit": "eb6ad9bd",
+    "state_commit": "092ec85b",
+    "migration_applied": true,
+    "shadow_sweeps_complete": false
+  },
+  "scope": {
+    "phase_2": ["Instagram browser/headless", "GitHub legacy graph", "TikTok visible graph", "Strava athlete relationships"],
+    "phase_3": ["YouTube channel references", "Lemon8 feed/topic discovery", "Telegram chat/member/link discovery", "bounded X/Threads/Facebook target queues"],
+    "phase_4": ["normalized feed surface provenance", "per-surface reporting"],
+    "phase_5": ["TikTok", "X", "Threads", "Lemon8", "Strava", "Facebook", "Instagram capture paths", "bounded feasibility checks for Instagram recommendations and YouTube home"],
+    "phase_6": ["queue age and surface freshness", "error classifications", "per-platform pause/limits", "rollout notes"]
+  },
+  "constraints": [
+    "Do not touch Beeper or inspect its session/data.",
+    "All repository work stays inside this repository; do not modify sibling projects.",
+    "Preserve platform pacing, shared scrape mutexes, backoff, and bounded page/item limits.",
+    "Do not print credentials or tokens.",
+    "Use per-platform feature flags for shared queue claims and recommendation capture.",
+    "Keep legacy queues active until bounded shadow reconciliation establishes parity; commit and push phases separately."
+  ],
+  "starting_evidence": [
+    "Working tree was clean on main at c8d127fd.",
+    "The Phase 1 migration is additive; a later read-only check found matching lifecycle and Phase 2 graph migration checksums in the live ledger.",
+    "Phase 1 provided typed queue lifecycle fields, token-owned claims/leases, retries, and bounded shadow mirror/reconciliation helpers.",
+    "The live runtime may have unavailable pytest; inspect the environment before choosing test commands."
+  ],
+  "phase_2_live_smoke": {
+    "read_only_database_check": "passed; lifecycle columns and graph tables are present",
+    "phase_1_lifecycle_checksum_matches": true,
+    "phase_2_graph_migration_checksum_matches": true,
+    "rollout_flags_enabled": [],
+    "unmatched_ledger_record": "spider_queue_lifecycle_20261014.sql has no matching file in this checkout and was left untouched",
+    "pytest": "unavailable on host and collector runtime; custom in-container assertions passed",
+    "transaction_smoke": "passed typed edge/outcome upserts and verified a seven-day source timestamp remains unchanged; all synthetic rows rolled back",
+    "sql_debugging": "first observation-upsert smoke exposed ambiguous text/varchar inference for outcome parameter $4; explicit VARCHAR(16) casts fixed it and the transaction smoke passed"
+  },
+  "phase_2_status": {
+    "implementation": "complete; legacy queues remain active and rollout flags remain disabled",
+    "validation": "compileall, focused assertions, adapter stubs, and rollback-only live database checks passed; pytest unavailable",
+    "commit_push": "pending"
+  },
+  "next_steps": [
+    "Commit and push the reviewed Phase 2 implementation before starting Phase 3.",
+    "Update STATE.md and append JOURNAL.md after each meaningful milestone.",
+    "Before each commit touching .agents, replace any real hostname in staged state/journal blobs with dev-host-3.example and verify staged blobs."
+  ]
+}

@@ -1,12 +1,17 @@
 # Agent State
-Current task: Export YouTube cookies from the local Chrome profile through CDP.
-Status: Exported 22 `youtube.com` cookies to the collector's ignored Netscape cookie path with mode `0600`. The active collector yt-dlp probe still receives a bot-related sign-in challenge; no media was downloaded.
+Current task: Execute the remaining Spider / For You plan phases (2–6) in order, with per-platform gates and bounded verification.
+Status: Phase 2 implementation is complete and focused smoke checks pass; Phase 2 commit/push is pending. `pytest` is unavailable on host and runtime, so in-container assertions and transaction-only Postgres checks were used. All four rollout flags are off.
 Progress:
-- Read the profile-wide cookie jar with CDP `Network.getAllCookies` from Chrome 155 on localhost port 9223, filtering to `youtube.com` and subdomains only. Cookie values and tokens were not logged.
-- The cookie file is `credentials/youtube/cookies.txt`; Git ignores `credentials/`.
-- Metadata-only probes for one public video using the collector container's yt-dlp `2026.03.17` returned a bot-related/sign-in response. Verification has not passed.
-Previous task: Spider queue lifecycle parity was committed and pushed to main as `eb6ad9bd`; the follow-up state record is `092ec85b`. The additive migration is not applied, and full shadow sweeps remain follow-up work.
-Next: Report the verification failure and preserve the local cookie file; retry only when the yt-dlp runtime or session evidence changes.
+- Read `AGENTS.md`, `.agents/STATE.md`, the Phase 1 handoff, and `docs/spider-foryou-plan.md`; confirmed current branch and clean worktree.
+- Scope includes Strava relationships in Phase 2 and X/Threads/Facebook bounded target queues in Phase 3 per the full plan. Keep old queues active until reconciliation supports a gated cutover; do not touch Beeper.
+- Instagram and GitHub already have shared-spider wrappers; TikTok's wrapper is unwired; Strava currently discovers from authenticated rosters/clubs into its legacy queue. Graph fetchers must distinguish empty from inaccessible and preserve platform pacing/caps.
+- Phase 2 now has typed graph-edge storage, last-known fetch outcomes, disabled-by-default platform gates, explicit GitHub seed/item caps, visible-browser graph normalization for TikTok/Strava, and strict Instagram unavailable reporting. `compileall`, `git diff --check`, core outcome/cap assertions, GitHub adapter stubs, and transaction-only Postgres edge/outcome/timestamp checks passed; all temporary rows rolled back.
+- The observation upsert's ambiguous VARCHAR parameter was fixed after the first transaction smoke failed. The live ledger contains matching lifecycle and graph migration checksums; no migration command was run in this session. The service runtime may have applied the new additive migration; no further live schema writes are planned.
+- Live DB ledger records matching checksums for `spider_queue_lifecycle_20261013.sql` and `20261013_add_spider_graph_observability.sql`. It also contains a `spider_queue_lifecycle_20261014.sql` record without a matching migration file in this checkout; left untouched.
+- Detailed scope and safety constraints: `.agents/handoffs/20261013-spider-phases-2-6.json`.
+Next: Stage the reviewed Phase 2 diff after hostname scrub verification, then commit/push it. Proceed to Phase 3 only after the Phase 2 commit is on main. Keep shared claims disabled until bounded shadow parity is measured; no platform traffic or credentials/tokens in durable state.
+
+Previous task: YouTube cookies were exported locally. The active collector yt-dlp `2026.03.17` hit a bot-related sign-in challenge; official yt-dlp `2026.08.19` returned no metadata on two public probes without a bot-related message (one age/unavailable, one generic failure). No media was downloaded; see the journal and never include cookie values.
 
 ## Prior handoff history
 

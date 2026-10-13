@@ -1601,7 +1601,8 @@ def test_posts_background_ingest_keeps_archive_save_event_and_author_writes(monk
     ]
 
 
-def test_record_users_batches_user_and_follow_edge_upserts():
+def test_record_users_batches_user_and_follow_edge_upserts(monkeypatch):
+    monkeypatch.setenv("INSTAGRAM_SHARED_SPIDER_ENABLED", "0")
     pool = _FakePool()
 
     recorded = asyncio.run(ig_ingest._record_users(
@@ -1627,6 +1628,30 @@ def test_record_users_batches_user_and_follow_edge_upserts():
         ("instagram", "me", "100", "following", "alpha"),
         ("instagram", "me", "beta", "following", "beta"),
     ]
+
+
+def test_record_users_can_write_typed_browser_graph_edges_when_gated_on(monkeypatch):
+    monkeypatch.setenv("TIKTOK_SHARED_SPIDER_ENABLED", "1")
+    pool = _FakePool()
+
+    recorded = asyncio.run(ig_ingest._record_users(
+        pool,
+        "tiktok",
+        [{"user_id": "200", "username": "visible_user"}],
+        "follow",
+        owner="my_account",
+    ))
+
+    assert recorded == 1
+    graph_call = next(
+        call for call in pool.conn.executemany_calls
+        if "INSERT INTO spider_graph_edges" in call[0]
+    )
+    assert graph_call[1] == [(
+        "tiktok", "my_account", "200", "following",
+        "browser_visible_follow", 0,
+        '{"target_username": "visible_user"}',
+    )]
 
 
 @pytest.mark.parametrize("platform,table", [

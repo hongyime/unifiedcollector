@@ -992,6 +992,55 @@ class StravaCollector(BaseCollector):
                 logger.info("strava: roster expansion skipped (no session cookie / web auth); "
                             "set STRAVA_SESSION_COOKIE or cookies file to enable following/follower spider")
 
+        from src.core.spider_graph_store import shared_spider_enabled
+        if (
+            shared_spider_enabled("strava")
+            and self._my_athlete_id
+            and self.pool is not None
+        ):
+            from src.core.spider_discover import EdgeType
+            from src.core.spider_graph_store import (
+                bounded_limit,
+                persist_visible_follow_edges,
+                record_spider_fetch_observation,
+                shared_spider_schema_ready,
+            )
+
+            if await shared_spider_schema_ready(self.pool):
+                owner = str(self._my_athlete_id)
+                try:
+                    counts = await persist_visible_follow_edges(
+                        self.pool,
+                        "strava",
+                        owner,
+                        max_edges=bounded_limit(
+                            "STRAVA_SHARED_GRAPH_EDGE_CAP", 250, maximum=1000
+                        ),
+                    )
+                    for direction, edge_type in (
+                        ("following", EdgeType.FOLLOWING),
+                        ("follower", EdgeType.FOLLOWER),
+                    ):
+                        count = counts[direction]
+                        await record_spider_fetch_observation(
+                            self.pool,
+                            "strava",
+                            owner,
+                            edge_type,
+                            "success" if count else "unavailable",
+                            count,
+                            None if count else "no_visible_follow_snapshot",
+                            source_observed_at=counts.get(f"{direction}_last_seen_at"),
+                        )
+                    logger.info(
+                        "strava visible graph normalized: following=%d followers=%d",
+                        counts["following"], counts["follower"],
+                    )
+                except Exception:
+                    logger.info("strava visible graph normalization skipped after database error", exc_info=True)
+            else:
+                logger.info("strava visible graph paused: graph migration is not applied")
+
     async def _process_spider_queue(self):
         max_per_cycle = int(os.getenv("STRAVA_SPIDER_MAX_PER_CYCLE", "10"))
         await refresh_account_proximity_cache(self.pool)
