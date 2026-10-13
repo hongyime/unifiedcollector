@@ -1,13 +1,12 @@
 # Agent State
-Current task: Execute Phase 1 of `docs/spider-foryou-plan.md`: queue lifecycle parity.
-Status: Shared lifecycle foundation, additive migration, and generation-based shadow reconciliation are implemented and pushed as `eb6ad9bd` on `main`. Legacy consumers remain unchanged.
+Current task: Export YouTube cookies from the local Chrome profile through CDP.
+Status: Exported 22 `youtube.com` cookies to the collector's ignored Netscape cookie path with mode `0600`. The active collector yt-dlp probe still receives a bot-related sign-in challenge; no media was downloaded.
 Progress:
-- Shared queue retries now persist `next_attempt_at`, `max_attempts`, and terminal reasons; claims use ownership tokens and renewable leases, and startup only reclaims expired claims. Queue state is authoritative over the informational visited cache, so stale markers cannot skip reclaimed work. Heartbeat database failures retry and cancel the worker before its lease expires.
-- Added migration `spider_queue_lifecycle_20261013.sql` and bounded read/mirror/status-compare helpers for Instagram (including bridge targets), TikTok, GitHub, Strava, Lemon8, YouTube, and Telegram. Full shadow generations validate source IDs and statuses before old rows are retired; legacy queues stay authoritative and no live migration was performed.
-- Captured a read-only live baseline. GitHub has 1,722,517 pending, 1,086 processing, 12,891 done, and 12,453 failed rows; TikTok's `delayed` and `unavailable` states remain unmapped as `unknown` in the shadow view.
-- `compileall` and `git diff --check` pass. Transaction-scoped live PostgreSQL smoke passed retry/backoff, terminal state, active/expired lease handling, traversal provenance despite a stale visited marker, heartbeat failure fencing, two bounded shadow pages, exact row/status parity, and stale-row retirement. Temporary schema/data rolled back with no persistent migration or smoke rows.
-- Focused pytest was attempted on the host and collector container but is unavailable because pytest is not installed.
-Next: run full bounded shadow sweeps across the large legacy queues and hold consumers on their existing queues until parity and rollout gates are met. Focused pytest remains unavailable in the current host and collector environments.
+- Read the profile-wide cookie jar with CDP `Network.getAllCookies` from Chrome 155 on localhost port 9223, filtering to `youtube.com` and subdomains only. Cookie values and tokens were not logged.
+- The cookie file is `credentials/youtube/cookies.txt`; Git ignores `credentials/`.
+- Metadata-only probes for one public video using the collector container's yt-dlp `2026.03.17` returned a bot-related/sign-in response. Verification has not passed.
+Previous task: Spider queue lifecycle parity was committed and pushed to main as `eb6ad9bd`; the follow-up state record is `092ec85b`. The additive migration is not applied, and full shadow sweeps remain follow-up work.
+Next: Report the verification failure and preserve the local cookie file; retry only when the yt-dlp runtime or session evidence changes.
 
 ## Prior handoff history
 
