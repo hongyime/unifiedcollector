@@ -9,18 +9,24 @@ flowchart LR
   subgraph Inputs[Collection inputs]
     APIs[Platform APIs and web pages]
     Chrome[Host Chrome tabs<br/>MV3 extension]
+    ManagedChrome[Managed Chrome session<br/>CDP :9336]
     TG[Telegram MTProto]
-    WA[WhatsApp linked devices<br/>Baileys bridges]
-    BP[Beeper local API / Matrix]
+    WA[WhatsApp linked devices]
+    BP[Beeper Desktop REST API]
   end
 
   subgraph Collection[UnifiedCollector services]
     Workers[Timed source workers<br/>YouTube · TikTok · Instagram · Lemon8<br/>GitHub · Strava · Search · Website · Exposure]
-    Profiles[Profile-only probes<br/>Snapchat · PayPal · Airbnb · Bluesky · Pinterest]
+    Profiles[Five profile-only services<br/>Snapchat · PayPal · Airbnb · Bluesky · Pinterest]
+    Spiderfoot[collector_spiderfoot<br/>SpiderFoot · Maigret · GHunt]
     Ext[Extension content/page hooks<br/>background service worker]
     Bridge[Multi-platform HTTP ingest bridge<br/>src.bridges.ig_ingest :8765]
+    WABridge[WhatsApp Baileys bridge services]
     Rabbit[(RabbitMQ<br/>WhatsApp events)]
-    Msg[Realtime collectors<br/>Telegram · WhatsApp · Beeper]
+    Msg[Message collectors<br/>Telegram · WhatsApp · Beeper]
+    Scheduler[Scheduler<br/>due targets and maintenance]
+    Watchdog[Watchdog<br/>freshness and container recovery]
+    CookieVault[Browser cookie vault<br/>health port :8790]
   end
 
   subgraph Storage[Collector storage and operator views]
@@ -37,26 +43,35 @@ flowchart LR
     Supa[Supabase export<br/>not implemented in this repository]
     Backup[Host scheduled pg_dump utility<br/>scripts/run_pg_dump_backup.sh]
     BackupVolume[(Mounted backup volume)]
+    Docker[Docker Engine<br/>via /var/run/docker.sock]
   end
 
   APIs --> Workers
   APIs --> Profiles
+  APIs --> Spiderfoot
   Chrome --> Ext --> Bridge
   TG --> Msg
-  WA --> Rabbit --> Msg
-  BP --> Msg
+  WA --> WABridge --> Rabbit --> Msg
+  Msg -. REST poll request .-> BP
+  BP -. batch JSON response .-> Msg
 
   Workers --> PG
   Profiles --> PG
+  Spiderfoot --> PG
   Bridge --> PG
   Msg --> PG
+  Scheduler --> PG
+  Watchdog --> PG
   Workers --> Vault
   Bridge --> Vault
   Msg --> Vault
+  CookieVault <-->|snapshot and restore over CDP| ManagedChrome
+  Watchdog -. liveness and restart .-> Docker
   PG --> Dash
-  PG -. optional enqueue after media insert .-> Redis --> RTF --> Alert
+  Workers -.->|BaseCollector optional alert enqueue after media insert| Redis
+  Redis --> RTF --> Alert
   PG -. external downstream evidence contract .-> Analyzer
-  Analyzer -. optional pull: proximity and priority hints .-> PG
+  Analyzer -. proximity and priority hints read by Collector .-> Workers
   Analyzer -. aspirational / external export .-> Supa
   PG --> Backup --> BackupVolume
 
@@ -64,9 +79,9 @@ flowchart LR
   class Supa planned;
 ```
 
-**Boundary notes.** Docker Compose starts the Collector database, collectors, bridges, watchdog, scheduler, brokers, realtime alert worker, and Collector dashboard. UnifiedAnalyzer is a separate project; this repo does not start it or contain its downstream ingestion implementation. Collector code can optionally read Analyzer-owned proximity and collection-priority hints through `ANALYZER_DATABASE_URL` and cache them locally. The Collector dashboard reads Collector Postgres directly. No Supabase client, export job, or Supabase configuration was found in this repository, so the Supabase node is explicitly aspirational/external. The dashed Analyzer edge represents the downstream data contract, not a Collector-owned export process.
+**Boundary notes.** Docker Compose starts the Collector database, collectors, bridges, watchdog, scheduler, SpiderFoot recon service, browser cookie vault, brokers, realtime alert worker, and Collector dashboard. The watchdog uses `/var/run/docker.sock` for liveness checks and container recovery. The cookie vault listens on `:8790` and snapshots/restores the managed host Chrome session through CDP at `:9336`. UnifiedAnalyzer is a separate project; this repo does not start it or contain its downstream ingestion implementation. Collector code can optionally read Analyzer-owned proximity and collection-priority hints through `ANALYZER_DATABASE_URL` and cache them locally; the hints flow back to Collector workers when requested. The Collector dashboard reads Collector Postgres directly. No Supabase client, export job, or Supabase configuration was found in this repository, so the Supabase node is explicitly aspirational/external. The dashed Analyzer edge represents the downstream data contract, not a Collector-owned export process.
 
-The WhatsApp event path is a brokered push path. The browser extension uses a different path: logged-in pages are scraped by content/page hooks and POSTed to the aiohttp bridge, which writes into the same Collector database. The bridge retains the historical `ig_ingest` module name but accepts Instagram, TikTok, Lemon8, X, Threads, Facebook, and Strava payloads.
+The WhatsApp event path is a brokered push path from external linked devices through internal Baileys bridge containers and RabbitMQ. Beeper is a worker-initiated REST polling source; it does not push events into the Collector. The browser extension uses a different path: logged-in pages are scraped by content/page hooks and POSTed to the aiohttp bridge, which writes into the same Collector database. The bridge retains the historical `ig_ingest` module name but accepts Instagram, TikTok, Lemon8, X, Threads, Facebook, and Strava payloads. Python workers enqueue optional realtime alerts to Redis after eligible media inserts; PostgreSQL does not enqueue alerts.
 
 ## Collection layers: philosophy and actual coverage
 
@@ -107,7 +122,7 @@ sequenceDiagram
   participant P as Platform/API or browser
   participant V as Media vault
   participant TG as Telegram live updates
-  participant BP as Beeper sync
+  participant BP as Beeper REST API
   participant WA as WhatsApp Baileys bridge
   participant Q as RabbitMQ (WhatsApp only)
   participant R as Redis/realtime_feed
@@ -117,38 +132,38 @@ sequenceDiagram
     S->>DB: Run independent maintenance/health handlers
   end
 
-  loop Timed source cycle (source-specific; usually 5 min, Instagram 30 min)
-    W->>DB: Select pending/error targets; load checkpoints and priority
+  loop Timed source cycle - defaults 5 min or Instagram 30 min - Compose Instagram 20 min
+    W->>DB: Select pending or error targets and load checkpoints and priority
     W->>P: Fetch available profile/post history in bounded pages
-    P-->>W: Profile fields, posts/events, edges, media URLs
+    P-->>W: Profile fields / posts / events / edges / media URLs
     opt Media is eligible and downloadable
       W->>V: Write blob/JSON and sidecar
     end
-    W->>DB: Upsert platform rows and media_items; dedupe by IDs/hash
+    W->>DB: Upsert platform rows and media_items then dedupe by IDs/hash
+    opt Eligible media insert and realtime alerts enabled
+      W->>R: Enqueue alert from Python worker
+    end
     W->>DB: Advance cursor/queue/health state
     W-->>W: Sleep until next source cycle
   end
 
-  par Telegram / Beeper listeners
-    TG-->>W: New or edited Telegram update
-    BP-->>W: Synced Beeper message/event
+  par Telegram push listener
+    TG-->>W: Deliver new or edited Telegram update
     W->>DB: Persist message/profile/media metadata
-    opt Media insert and Redis delivery enabled
-      W->>R: Enqueue non-blocking realtime alert
-    end
+  and Beeper REST polling
+    W->>BP: Poll /v1/chats and chat messages
+    BP-->>W: Return message batches as JSON
+    W->>DB: Persist message/profile/media metadata
   and WhatsApp bridge consumer
     WA->>Q: Publish Baileys event
     Q-->>W: WhatsApp collector consumes event
     W->>DB: Persist message/profile/media metadata
-    opt Media insert and Redis delivery enabled
-      W->>R: Enqueue non-blocking realtime alert
-    end
   end
 ```
 
-The timed worker loop is separate from the Scheduler. `src/worker/__init__.py` loads pending/error targets, runs a source collector, and sleeps between cycles (default 300 seconds; Instagram defaults to 1,800 seconds). `src/scheduler/__init__.py` ticks every 60 seconds, re-arms target rows whose schedule is due, then dispatches independent maintenance handlers. The Scheduler does not perform a universal backfill itself.
+The timed worker loop is separate from the Scheduler. `src/worker/__init__.py` loads pending/error targets, runs a source collector, and sleeps between cycles. The code defaults to 300 seconds for most sources and 1,800 seconds for Instagram; Compose overrides Instagram to 1,200 seconds (20 minutes). `src/scheduler/__init__.py` ticks every 60 seconds, re-arms target rows whose schedule is due, then dispatches independent maintenance handlers. The Scheduler does not perform a universal backfill itself.
 
-Backfill depth and realtime behavior are source-specific. Cursor/checkpoint and queue-based history collection exists in multiple collectors, but maximum age, page counts, item caps, API visibility and authenticated access differ. The worker marks only Telegram, WhatsApp, and Beeper as persistent realtime sources (`REALTIME_SOURCES`). The extension performs repeated browser passes while pages/tabs and sessions are available; it is not a platform-side event subscription. The `realtime_feed` service is an alert sidecar fed after successful media inserts; it is not a collection listener or Supabase exporter.
+Backfill depth and realtime behavior are source-specific. Cursor/checkpoint and queue-based history collection exists in multiple collectors, but maximum age, page counts, item caps, API visibility and authenticated access differ. The worker marks Telegram, WhatsApp, and Beeper in `REALTIME_SOURCES` for quiet-source watchdog exemptions. Telegram and WhatsApp use event-driven paths; Beeper uses worker-initiated REST polling, not pushed events. The extension performs repeated browser passes while pages/tabs and sessions are available; it is not a platform-side event subscription. The `realtime_feed` service is an alert sidecar fed by Python workers after successful media inserts; it is not a collection listener, database trigger, or Supabase exporter.
 
 ## Persisted metadata and platform quirks
 
@@ -186,13 +201,14 @@ The five profile-only services are queue-driven, rate-limited probes. They write
 - **Worker supervision:** `src/worker` supervises source tasks, staggers cold starts, detects crashes/hangs/zero-progress runs, and rebuilds collector instances on retry. Docker restart policy is the final process-level recovery.
 - **Scheduler:** the single scheduler service runs the due-target rearm and periodic handlers. `FOR UPDATE SKIP LOCKED` avoids duplicate schedule claims; independent handlers are dispatched concurrently with per-handler failure isolation.
 - **Watchdog:** `src/watchdog/freshness.py` checks source freshness, browser/DM heartbeats, dead-letter work, and Docker liveness. It can start stopped containers and restart stale collectors, with source-specific cooldowns and deferrals for auth, 429, or bridge pairing states.
+- **Browser sessions:** `src/tools/browser_cookie_vault.py` listens on port 8790, snapshots managed Chrome cookies through CDP every five minutes, and can restore authenticated sessions.
 - **Reliability state:** `source_health`, `collection_targets`, `collection_runs`, checkpoint/queue tables and `dead_letter_queue` expose progress, retry, and operational state to the dashboard.
 
 ## Backup, notifications, and downstream boundaries
 
 - **Database backup — implemented, host-scheduled.** The deployed Linux launcher runs from the host’s scheduled task, builds a small PostgreSQL utility image, and starts a one-shot container on the Compose network. `scripts/pg_dump_backup.py` uses a custom-format, single-job, low-compression dump, an advisory lock, a freshness skip, temporary-file verification with `pg_restore --list`, then retention. It writes to the mounted backup volume. There is no always-on Compose `backup` service.
 - **Media sidecars — implemented.** `BaseCollector` writes media files to the vault and JSON sidecars; the database stores file paths, hashes and provenance. This is separate from the Postgres logical backup.
-- **Realtime notification sidecar — implemented but optional.** A successful `media_items` insert can enqueue to Redis without blocking collection; `realtime_feed` drains that queue and delivers configured alerts. It is downstream notification, not an analyzer data export.
+- **Realtime notification sidecar — implemented but optional.** After a successful `media_items` insert, BaseCollector's Python code can enqueue an alert to Redis without blocking collection; `realtime_feed` drains that queue and delivers configured alerts. This is downstream notification, not a database trigger or analyzer data export.
 - **Analyzer — external consumer.** UnifiedAnalyzer lives in another repository and owns identity resolution and analysis. This repo contains schema/provenance intended for that consumer and an optional reverse pull of Analyzer priority/proximity hints. It does not launch the Analyzer or implement a general outbound row exporter.
 - **Supabase export — aspirational/external.** No exporter, Supabase SDK usage, or Supabase env wiring exists in this repo. Add an independently owned export mechanism only when the Analyzer-side contract and ownership are defined.
 
@@ -200,27 +216,48 @@ The five profile-only services are queue-driven, rate-limited probes. They write
 
 This is a static code review, not a live throughput or database benchmark. The bottlenecks below are structural risks visible in the code; actual ranking depends on current platform quotas, target mix, and media volume.
 
+### Applied fixes and remaining risks
+
+The four approved efficiency workstreams from commit `93d14759` are **done**:
+
+- Instagram, TikTok, and Lemon8 share the `shared_social` advisory lock so their scrape requests do not overlap on common public egress.
+- TikTok gallery-dl artifacts stream from their temporary file into the vault through `write_atomic_artifact_from_path`; the whole video is no longer loaded into Python memory first.
+- Browser media candidate and revisit writes are batched, and X/TikTok/Lemon8 profile-target enqueues are batched instead of issuing one round trip per handle.
+- Freshness and browser raw-archive DLQ lookups have source-first/partial indexes, and the archive cleanup uses its matching selective index.
+
+The efficiency audit also identified remaining pressure points. These are risks to measure or evaluate, not work included in the approved fixes:
+
+| Area | Concrete finding | Status and practical impact |
+|---|---|---|
+| **Profile-probe containers** | Compose still runs five 192 MiB profile-only services (960 MiB reserved in total), while `profile_only_runner.py` can run all five sources in one process. | Consolidation was excluded from the approved changes. The separate services isolate stalls, but retain the extra memory limits, processes, and database pools. |
+| **Bridge post writes** | `_save_posts()` still resolves Instagram authors through per-post profile lookups/inserts and then inserts posts one at a time. | Candidate/revisit and profile-target batching is done; this separate author/post loop remains sequential and can add round trips on large browser batches. |
+| **Global PostgreSQL pool budget** | The audit estimated a theoretical 220–250 application connections across active pools against PostgreSQL's configured ceiling of 200. | This is a peak-capacity estimate, not evidence of observed saturation. Pool caps are per process, so measure combined live pool demand before raising any cap. |
+| **Browser and container memory** | Instagram Playwright collection launches isolated Chromium processes per profile/post operation, while the separate cookie-vault service manages host Chrome sessions. Five profile workers and other capped services can also peak together. | The audit flags potential browser churn and host memory contention. The cookie vault does not make the Instagram worker reuse its browser process. |
+| **Other database polling paths** | WhatsApp and Beeper backfill write messages sequentially; SpiderFoot can poll every 0.5 seconds while a target is active. | These paths were not part of the approved bridge batching change. Measure query and queue rates before batching or changing poll intervals. |
+
 | Area | Likely cost / pressure point | Existing controls and optimization |
 |---|---|---|
-| **Remote API / session limits** | Instagram/TikTok/Strava access can be throttled or hidden; GitHub REST quota is explicit; YouTube extraction has request/download limits; Telegram can return FloodWait. Crawling graph neighbors multiplies calls. | Per-source pacing, adaptive cooldowns/rate-limit events, API quota accounting, retries/circuit breakers, famous-account and queue caps, and source-specific cycle intervals. Instagram, TikTok and Lemon8 also share the `shared_social` advisory lock so their scrape cycles do not overlap on common public egress. Other source groups may still contend. |
+| **Remote API / session limits** | Instagram/TikTok/Strava access can be throttled or hidden; GitHub REST quota is explicit; YouTube extraction has request/download limits; Telegram can return FloodWait. Crawling graph neighbors multiplies calls. | Per-source pacing, adaptive cooldowns/rate-limit events, API quota accounting, retries/circuit breakers, famous-account and queue caps, and source-specific cycle intervals. The Instagram/TikTok/Lemon8 shared lock is implemented; other source groups may still contend. |
 | **Backfill vs fresh collection** | Large historical scans compete with current targets for API quota, sockets, host memory and database writes. “All history” is not a single shared mode and remote history may be inaccessible. | Per-source page/batch/pass limits and queues/checkpoints; separate containers isolate process failures and permit per-source resource limits. Realtime messaging sources are exempt from zero-progress alarms when quiet. There is no global cross-platform quota arbiter, so independent services can still contend. |
-| **Media and vault I/O** | Downloading video/photos, writing blobs and sidecars, hashing bytes, and source URL/metadata bookkeeping dominate I/O. YouTube `yt-dlp`/ffmpeg and browser media upload are heavier than metadata-only rows. | Media type/size filters, bounded download concurrency, stable IDs, atomic writes, SHA-256 deduplication, partial media revisit queues, and a shared filesystem vault. TikTok gallery-dl files are copied and hashed from their temporary path with `write_atomic_artifact_from_path`, avoiding a full-file Python bytes allocation. YouTube is isolated in its own worker container; media paths have retry/status state. |
-| **Shared PostgreSQL** | All collector workers, bridges, dashboard, scheduler and realtime consumers share one Collector database. Per-media success can involve an insert plus sidecar/consistency metadata and queue-ledger updates; bulk dumps add storage reads and can delay DDL/migrations. | The `media_items(source, collected_at DESC)` index supports per-source freshness lookups. A partial `(source, entity_id)` DLQ index narrows active browser raw-archive cleanup. Browser candidate/revisit rows and X/TikTok/Lemon8 profile-target enqueues use `executemany` batches; `ON CONFLICT` preserves idempotency. Other controls include bounded async pools, `SKIP LOCKED` queue claims and singleton advisory locks. Host dumps use one job and compression level 1. |
-| **CPU / memory** | Parsing is generally small next to network waits, but video extraction/transcoding, image analysis, and SpiderFoot/Maigret can use substantial CPU/RAM. Many isolated containers can still peak together on cold start. | Resource caps and source-specific concurrency; startup staggering; one-worker SpiderFoot default; YouTube process isolation; async network I/O; source workers have hang/zero-progress recovery. The shared host remains a resource contention point. |
+| **Media and vault I/O** | Downloading video/photos, writing blobs and sidecars, hashing bytes, and source URL/metadata bookkeeping dominate I/O. YouTube `yt-dlp`/ffmpeg and browser media upload are heavier than metadata-only rows. | Media type/size filters, bounded download concurrency, stable IDs, atomic writes, SHA-256 deduplication, partial media revisit queues, and a shared filesystem vault. TikTok gallery-dl path streaming is implemented, avoiding a full-file Python bytes allocation. YouTube is isolated in its own worker container; media paths have retry/status state. |
+| **Shared PostgreSQL** | All collector workers, bridges, dashboard, scheduler and realtime consumers share one Collector database. Per-media success can involve an insert plus sidecar/consistency metadata and queue-ledger updates; bulk dumps add storage reads and can delay DDL/migrations. | The `(source, collected_at DESC)` index supports per-source freshness lookups. A partial `(source, entity_id)` DLQ index narrows active browser raw-archive cleanup. Browser candidate/revisit rows and X/TikTok/Lemon8 profile-target enqueues are batched; `ON CONFLICT` preserves idempotency. Other controls include bounded per-process pools, `SKIP LOCKED` queue claims and singleton advisory locks. Host dumps use one job and compression level 1. |
+| **CPU / memory** | Parsing is generally small next to network waits, but video extraction/transcoding, image analysis, browser processes, and SpiderFoot/Maigret can use substantial CPU/RAM. Many isolated containers can still peak together on cold start. | Resource caps, startup staggering, one-worker SpiderFoot default, YouTube process isolation, async network I/O, and worker recovery limit individual failures. The separate profile services and Instagram Playwright process churn remain sources of host pressure. |
 | **Dashboard/ops queries** | Freshness, coverage, target and graph views can scan large tables if indexes or query bounds are missing; operational pages compete for the same DB pool. | Dedicated lookup/partial indexes, cached coverage/health snapshots, bounded limits and a separate connection pool configuration. Confirm with query plans under real data before further denormalizing. |
 
 ### Efficiency priorities
 
-1. Measure per-source request quota, fetched rows, media bytes, DB write latency and queue age before tuning limits; rates vary by account and remote platform.
-2. Keep history/backfill bounded and scheduled around current realtime load. The existing independent containers make source-level throttling possible, but they do not reserve database capacity globally.
-3. Profile the per-media write path and PostgreSQL during large downloads/backups. The existing sidecar and consistency checks improve recoverability but add I/O; preserve those guarantees unless measurements identify the cost.
-4. Treat recommendation-feed and cross-platform graph expansion as explicit coverage work. They add API calls and target fan-out, so introduce quotas/eligibility caps alongside any broader implementation.
+1. **Done in `93d14759`:** enforce the shared social mutex, stream TikTok gallery-dl files from disk, batch browser candidate/revisit writes and profile-target enqueues, and add source-first freshness plus selective DLQ indexes.
+2. **Deferred:** decide whether to consolidate the five profile-only services; the runner supports it, but the separate services currently isolate failures and consolidation was outside the approved scope.
+3. **Measure before changing limits:** compare combined live application-pool demand with PostgreSQL's 200-connection ceiling and record DB write latency, queue age, and media bytes by source.
+4. **Review remaining hot paths:** Instagram author/post inserts, per-message WhatsApp/Beeper writes, and Instagram Playwright process startup remain candidates for measured optimization.
+5. Keep history/backfill bounded around current realtime load and treat recommendation-feed or graph expansion as explicit coverage work with quotas and eligibility caps.
 
 ## Code map
 
 - `src/collectors/` — source-specific fetch, parsing, backfill, and profile/post persistence.
 - `src/worker/__init__.py` — timed source loop and in-process supervision.
 - `src/scheduler/` and `src/watchdog/freshness.py` — due-target scheduling, periodic work, freshness/liveness recovery.
+- `src/tools/browser_cookie_vault.py` and `src/recon_spiderfoot_service.py` — managed Chrome cookie snapshots and the SpiderFoot/Maigret/GHunt recon service.
 - `extension/src/content.ts`, `extension/src/inject.ts`, `extension/src/background.ts` — browser capture and delivery.
 - `src/bridges/ig_ingest/` — multi-platform browser ingest API, profile/post/edge upserts, target queues.
 - `src/bridges/whatsapp/`, `src/collectors/whatsapp/` — Baileys event producer and RabbitMQ consumer.

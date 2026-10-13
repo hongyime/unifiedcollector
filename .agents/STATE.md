@@ -1,8 +1,11 @@
 # Agent State
-Current task: Apply Bryan-approved collection efficiency fixes and sweep repository Markdown documentation.
-Status: Complete and pushed to `main` through commit `c4b54f77`. TikTok gallery-dl files use the path writer; Instagram shares the TikTok/Lemon8 advisory lock; generic and TikTok candidate/revisit writes and X/TikTok/Lemon8 target enqueues are batched. The checksum-matched migration is recorded in live Postgres, both indexes are present, and EXPLAIN uses them. The profile-probe change remains excluded.
-Verification: AST/import and runtime smoke checks, Compose config, env-split verification, `git diff --check`, live migration/index/checksum checks and query plans passed. All 34 tracked Markdown files have no broken relative links. GitHub CI ran the full suite; all changed bridge tests pass. Five unrelated existing tests fail (extension bundle version, scheduler alert, two profile-anchor expectations, and Postgres healthcheck). Clean-volume boot fails earlier at `20260930_add_follow_edges_position.sql` because `follow_edges` does not exist. Ruff reports nine unused imports in untouched files. Compose Config passes after preparing runtime env files from tracked examples. WhatsApp bridge tests pass; npm audit fails on existing dependency advisories. No containers were restarted.
-Next steps: None for this task.
+Current task: Correct `docs/architecture.md` using the independent architecture and efficiency vetting reports.
+Status: Documentation changes and Mermaid validation are complete locally; commit and push are pending.
+Progress:
+- Corrected the System Map and sequence diagram for worker-to-Redis alerts, Beeper REST polling, WhatsApp bridge boundaries, Analyzer hint direction, and Instagram cycle timing; added watchdog, scheduler, browser cookie vault, and SpiderFoot service.
+- Marked the four approved efficiency workstreams from `93d14759` as complete and recorded remaining audit risks, including deferred profile-probe consolidation.
+- Mermaid CLI v12.0.0 rendered all three diagrams successfully; `git diff --check` passed. No application tests or service restarts were needed for this docs-only change.
+Next steps: Commit and push the verified documentation and state update, then record publication status.
 
 ## Prior handoff history
 
