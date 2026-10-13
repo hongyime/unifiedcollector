@@ -1,6 +1,6 @@
 # Agent State
 Current task: Execute the remaining Spider / For You plan phases (2–6) in order, with per-platform gates and bounded verification.
-Status: Phase 2 implementation is complete and focused smoke checks pass; Phase 2 commit/push is pending. `pytest` is unavailable on host and runtime, so in-container assertions and transaction-only Postgres checks were used. All four rollout flags are off.
+Status: Phase 2 is implemented, verified, and pushed as `e2238c33`. `pytest` is unavailable on host and runtime, so in-container assertions and transaction-only Postgres checks were used. All four rollout flags are off.
 Progress:
 - Read `AGENTS.md`, `.agents/STATE.md`, the Phase 1 handoff, and `docs/spider-foryou-plan.md`; confirmed current branch and clean worktree.
 - Scope includes Strava relationships in Phase 2 and X/Threads/Facebook bounded target queues in Phase 3 per the full plan. Keep old queues active until reconciliation supports a gated cutover; do not touch Beeper.
@@ -9,7 +9,7 @@ Progress:
 - The observation upsert's ambiguous VARCHAR parameter was fixed after the first transaction smoke failed. The live ledger contains matching lifecycle and graph migration checksums; no migration command was run in this session. The service runtime may have applied the new additive migration; no further live schema writes are planned.
 - Live DB ledger records matching checksums for `spider_queue_lifecycle_20261013.sql` and `20261013_add_spider_graph_observability.sql`. It also contains a `spider_queue_lifecycle_20261014.sql` record without a matching migration file in this checkout; left untouched.
 - Detailed scope and safety constraints: `.agents/handoffs/20261013-spider-phases-2-6.json`.
-Next: Stage the reviewed Phase 2 diff after hostname scrub verification, then commit/push it. Proceed to Phase 3 only after the Phase 2 commit is on main. Keep shared claims disabled until bounded shadow parity is measured; no platform traffic or credentials/tokens in durable state.
+Next: Implement Phase 3 discovery-source adapters, run focused unit and bounded smoke checks, then commit/push Phase 3. Keep shared claims disabled until bounded shadow parity is measured; no platform traffic or credentials/tokens in durable state.
 
 Previous task: YouTube cookies were exported locally. The active collector yt-dlp `2026.03.17` hit a bot-related sign-in challenge; official yt-dlp `2026.08.19` returned no metadata on two public probes without a bot-related message (one age/unavailable, one generic failure). No media was downloaded; see the journal and never include cookie values.
 

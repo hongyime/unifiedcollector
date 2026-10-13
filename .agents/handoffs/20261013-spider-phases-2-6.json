@@ -44,10 +44,10 @@
   "phase_2_status": {
     "implementation": "complete; legacy queues remain active and rollout flags remain disabled",
     "validation": "compileall, focused assertions, adapter stubs, and rollback-only live database checks passed; pytest unavailable",
-    "commit_push": "pending"
+    "commit_push": "pushed to main as e2238c33"
   },
   "next_steps": [
-    "Commit and push the reviewed Phase 2 implementation before starting Phase 3.",
+    "Implement Phase 3 discovery-source adapters and bounded verification.",
     "Update STATE.md and append JOURNAL.md after each meaningful milestone.",
     "Before each commit touching .agents, replace any real hostname in staged state/journal blobs with dev-host-3.example and verify staged blobs."
   ]
