@@ -90,11 +90,10 @@ ticketremaster-b, ctfsolver) — is:
 | `.github/scripts/ghcr-retention.cjs` | Prunes old GHCR package versions to control storage. |
 | `Dockerfile` (and variants) | Image build definition(s). |
 
-Opt-in scaffolding for these files is maintained in the shared source-of-truth
-template repository. It is intentionally not copied into target repositories,
-so this repository does not contain a local `.github/optional/` directory.
-Adopt the packaging pattern from the template repository's optional scaffolding
-and follow its accompanying enable steps.
+Opt-in scaffolding for these files lives under
+[`.github/optional/`](.github/optional/) so a new repository can adopt the
+packaging pattern by copying them into place rather than hand-rolling each time.
+See [`.github/optional/README.md`](.github/optional/README.md) for enable steps.
 
 **Package visibility:** package visibility (private vs public) is governed by the
 organization's package-creation policy (Org Settings → Packages). Individual
@@ -114,8 +113,8 @@ pipeline.
 ## How to use this document
 
 - **Creating a new repo:** start from `theprawntemplate`; you inherit sections
-  1–4 automatically. If it will publish containers, adopt section 5 from the
-  shared template repository's optional scaffolding.
+  1–4 automatically. If it will publish containers, adopt section 5 from
+  `.github/optional/`.
 - **Auditing an existing repo:** check it against sections 1–4 (all repos) and
   section 5 (container repos). Missing required items are compliance gaps to fix
   via a reviewed PR.
