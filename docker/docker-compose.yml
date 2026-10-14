@@ -675,6 +675,7 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
       COLLECTOR_STARTUP_DELAY_SECONDS: "30"
       SNAPCHAT_PROBE_ENABLED: "${SNAPCHAT_PROBE_ENABLED:-1}"
+      SNAPCHAT_NATIVE_ENABLED: "${SNAPCHAT_NATIVE_ENABLED:-1}"
       PROFILE_ROUND_ROBIN_INTERVAL_SECONDS: "${PROFILE_ROUND_ROBIN_INTERVAL_SECONDS:-60}"
   collector_paypal:
     <<: *profile-probe
@@ -692,6 +693,8 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
       COLLECTOR_STARTUP_DELAY_SECONDS: "60"
       AIRBNB_PROBE_ENABLED: "${AIRBNB_PROBE_ENABLED:-1}"
+      AIRBNB_NATIVE_ENABLED: "${AIRBNB_NATIVE_ENABLED:-1}"
+      AIRBNB_PUBLIC_API_KEY: "${AIRBNB_PUBLIC_API_KEY:-}"
       PROFILE_ROUND_ROBIN_INTERVAL_SECONDS: "${PROFILE_ROUND_ROBIN_INTERVAL_SECONDS:-60}"
   collector_bluesky:
     <<: *profile-probe
@@ -706,10 +709,12 @@ services:
     <<: *profile-probe
     container_name: unifiedcollector_collector_pinterest
     command: python -m src.collectors.profile_only_runner --source pinterest
+    mem_limit: 512m
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
       COLLECTOR_STARTUP_DELAY_SECONDS: "90"
       PINTEREST_PROBE_ENABLED: "${PINTEREST_PROBE_ENABLED:-1}"
+      PINTEREST_NATIVE_ENABLED: "${PINTEREST_NATIVE_ENABLED:-1}"
       PROFILE_ROUND_ROBIN_INTERVAL_SECONDS: "${PROFILE_ROUND_ROBIN_INTERVAL_SECONDS:-60}"
 
   collector_telegram:

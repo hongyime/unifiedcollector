@@ -100,6 +100,11 @@ async def run() -> None:
                 summary = await c.run_cycle()
                 if summary.get("processed", 0) or summary.get("skipped"):
                     logger.info("%s: %s", c.SOURCE_NAME, summary)
+                native_cycle = getattr(c, "run_native_cycle", None)
+                if callable(native_cycle):
+                    native_summary = await native_cycle()
+                    if native_summary and native_summary.get("processed", 0):
+                        logger.info("%s native scrape: %s", c.SOURCE_NAME, native_summary)
             except Exception:
                 logger.exception("%s: cycle failed", c.SOURCE_NAME)
         try:

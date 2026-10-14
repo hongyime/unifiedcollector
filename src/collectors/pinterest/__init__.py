@@ -17,11 +17,21 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import time
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
 from src.core.profile_only_collector import ProfileOnlyCollector, ProfileResult
+from src.collectors.native_platform_scrape import (
+    claim_native_target,
+    finish_native_target,
+    seed_native_targets,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +41,15 @@ _AVATAR_RE = re.compile(r'"image_xlarge_url"\s*:\s*"((?:[^"\\]|\\.)*?)"')
 _FOLLOWER_RE = re.compile(r'"follower_count"\s*:\s*(\d+)')
 _PIN_COUNT_RE = re.compile(r'"pin_count"\s*:\s*(\d+)')
 _BOARD_COUNT_RE = re.compile(r'"board_count"\s*:\s*(\d+)')
+_PIN_PATH_RE = re.compile(r"^/pin/(\d+)(?:/|$)", re.IGNORECASE)
+_BOARD_EXCLUDED = {"_created", "_saved", "pin", "search", "explore"}
+_PRIVATE_MARKER_RE = re.compile(
+    r"secret\s+board|private\s+board|(?:[\"']?is_secret[\"']?|[\"']?isSecret[\"']?)\s*[:=]\s*true",
+    re.IGNORECASE,
+)
+_PINTEREST_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+_MAX_PINTEREST_REDIRECTS = 5
+_MAX_PINTEREST_PAGE_BYTES = 5 * 1024 * 1024
 
 
 def _decode_json_str(s: str) -> str:
@@ -38,6 +57,179 @@ def _decode_json_str(s: str) -> str:
         return json.loads(f'"{s}"')
     except Exception:
         return s
+
+
+def _load_pinterest_storage_state(path: Path | None = None) -> dict | None:
+    """Load only Pinterest cookies from the shared browser-cookie snapshot."""
+    if path is None:
+        root = Path(os.getenv("BROWSER_COOKIE_VAULT_DIR", "credentials/browser_cookies"))
+        path = root / "latest.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    raw_cookies = payload if isinstance(payload, list) else payload.get("cookies", [])
+    if not isinstance(raw_cookies, list):
+        return None
+
+    cookies = []
+    for raw in raw_cookies:
+        if not isinstance(raw, dict):
+            continue
+        domain = str(raw.get("domain") or "").lstrip(".").lower()
+        name = str(raw.get("name") or "")
+        value = str(raw.get("value") or "")
+        if not name or not value or not (domain == "pinterest.com" or domain.endswith(".pinterest.com")):
+            continue
+        cookie = {
+            "name": name,
+            "value": value,
+            "domain": str(raw.get("domain") or ".pinterest.com"),
+            "path": str(raw.get("path") or "/"),
+            "httpOnly": bool(raw.get("httpOnly", False)),
+            "secure": bool(raw.get("secure", True)),
+        }
+        expires = raw.get("expires", raw.get("expirationDate"))
+        if expires not in (None, "", -1, "-1"):
+            try:
+                expiry = int(float(expires))
+            except (TypeError, ValueError, OverflowError):
+                expiry = 0
+            if expiry > 0:
+                cookie["expires"] = expiry
+        same_site = str(raw.get("sameSite") or "").lower()
+        if same_site in {"strict", "lax", "none"}:
+            cookie["sameSite"] = same_site.title()
+        cookies.append(cookie)
+    return {"cookies": cookies, "origins": []} if cookies else None
+
+
+def _pinterest_page_kind(url: str) -> tuple[str, str | None, str | None] | None:
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower().removeprefix("www.")
+    if parsed.scheme != "https" or host != "pinterest.com":
+        return None
+    parts = [part for part in parsed.path.split("/") if part]
+    if not 1 <= len(parts) <= 2 or any(part.lower() in _BOARD_EXCLUDED for part in parts):
+        return None
+    username = parts[0]
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,100}", username):
+        return None
+    if len(parts) == 1:
+        return "profile", username, None
+    board_slug = parts[1]
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,150}", board_slug):
+        return None
+    return "board", username, board_slug
+
+
+def _contains_private_marker(data: dict[str, Any]) -> bool:
+    return bool(_PRIVATE_MARKER_RE.search(
+        f"{data.get('body_text') or ''} {data.get('serialized_state') or ''}"
+    ))
+
+
+def _same_pinterest_page_kind(url: str, target_kind: tuple[str, str | None, str | None]) -> bool:
+    actual_kind = _pinterest_page_kind(url)
+    return (
+        actual_kind is not None
+        and tuple((part or "").lower() for part in actual_kind)
+        == tuple((part or "").lower() for part in target_kind)
+    )
+
+
+def _pin_membership_matches(
+    url: str,
+    page_kind: str,
+    owner_username: str,
+    board_slug: str | None,
+) -> bool:
+    membership = _pinterest_page_kind(url)
+    if membership is None:
+        return False
+    membership_kind, membership_owner, membership_board = membership
+    if (membership_owner or "").lower() != owner_username.lower():
+        return False
+    if page_kind == "profile":
+        return membership_kind in {"profile", "board"}
+    return (
+        page_kind == "board"
+        and membership_kind == "board"
+        and (membership_board or "").lower() == (board_slug or "").lower()
+    )
+
+
+def _verified_board_link_conflict(column: str) -> str:
+    if column not in {"board_id", "board_url"}:
+        raise ValueError("unsupported_board_link_column")
+    return f"""CASE
+        WHEN EXCLUDED.metadata->>'owner_verified'='true' AND EXCLUDED.{column} IS NOT NULL
+            THEN EXCLUDED.{column}
+        WHEN EXCLUDED.metadata->>'owner_verified'='true'
+            AND pinterest_pins.metadata->>'owner_verified'='true'
+            AND pinterest_pins.username IS NOT DISTINCT FROM EXCLUDED.username
+            THEN pinterest_pins.{column}
+        WHEN EXCLUDED.metadata->>'owner_verified'='true' THEN NULL
+        WHEN pinterest_pins.metadata->>'owner_verified'='true' THEN pinterest_pins.{column}
+        ELSE NULL END"""
+
+
+def _checked_pinterest_redirect(
+    current_url: str,
+    location: str,
+    target_kind: tuple[str, str | None, str | None],
+) -> str:
+    next_url = httpx.URL(current_url).join(location)
+    if not _same_pinterest_page_kind(str(next_url), target_kind):
+        raise RuntimeError("public_redirect_rejected")
+    return str(next_url)
+
+
+async def _fetch_pinterest_html(
+    target_url: str,
+    target_kind: tuple[str, str | None, str | None],
+    storage_state: dict | None,
+) -> tuple[str, str]:
+    cookies = httpx.Cookies()
+    for cookie in (storage_state or {}).get("cookies", []):
+        expires = cookie.get("expires")
+        if expires and float(expires) <= time.time():
+            continue
+        cookies.set(
+            cookie["name"], cookie["value"],
+            domain=cookie.get("domain"), path=cookie.get("path") or "/",
+        )
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    async with httpx.AsyncClient(
+        follow_redirects=False, cookies=cookies, timeout=30.0,
+    ) as client:
+        current_url = target_url
+        for redirect_count in range(_MAX_PINTEREST_REDIRECTS + 1):
+            async with client.stream("GET", current_url, headers=headers) as response:
+                if response.status_code in _PINTEREST_REDIRECT_STATUSES:
+                    if redirect_count >= _MAX_PINTEREST_REDIRECTS:
+                        raise RuntimeError("public_redirect_limit")
+                    location = response.headers.get("location")
+                    if not location:
+                        raise RuntimeError("public_redirect_missing_location")
+                    current_url = _checked_pinterest_redirect(
+                        current_url, location, target_kind,
+                    )
+                    continue
+                if response.status_code >= 400:
+                    raise RuntimeError(f"public_http_{response.status_code}")
+                chunks = bytearray()
+                async for chunk in response.aiter_bytes():
+                    chunks.extend(chunk)
+                    if len(chunks) > _MAX_PINTEREST_PAGE_BYTES:
+                        raise RuntimeError("public_page_too_large")
+                encoding = response.encoding or "utf-8"
+                return str(response.url), bytes(chunks).decode(encoding, "replace")
+    raise RuntimeError("public_redirect_limit")
 
 
 class PinterestCollector(ProfileOnlyCollector):
@@ -87,6 +279,379 @@ class PinterestCollector(ProfileOnlyCollector):
                 "board_count": int(board_count_m.group(1)) if board_count_m else None,
             },
         )
+
+    async def _scrape_public_page(self, target_url: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        target_kind = _pinterest_page_kind(target_url)
+        if target_kind is None:
+            raise ValueError("unsupported_public_page")
+
+        from playwright.async_api import async_playwright
+
+        storage_state = _load_pinterest_storage_state()
+        playwright = await async_playwright().start()
+        browser = None
+        contexts = []
+        try:
+            browser = await playwright.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--no-zygote",
+                ],
+            )
+            anonymous_context = await browser.new_context(
+                locale="en-US", service_workers="block",
+            )
+            contexts.append(anonymous_context)
+            anonymous_url, anonymous_html = await _fetch_pinterest_html(
+                target_url, target_kind, storage_state=None,
+            )
+            anonymous_data = await self._read_public_page(
+                anonymous_context, anonymous_url, target_kind, anonymous_html,
+            )
+            if target_kind[0] == "profile" and not anonymous_data.get("profile_identity_verified"):
+                raise RuntimeError("public_profile_identity_unconfirmed")
+            public_boards, public_pins = self._parse_native_page(target_url, anonymous_data)
+            if not self._has_public_content(target_kind, public_boards, public_pins):
+                raise RuntimeError("public_visibility_unconfirmed")
+
+            # Cookie-rendered content is eligible only when the same board/pin
+            # identifiers were visible in the clean anonymous context.
+            if not storage_state:
+                return public_boards, public_pins
+            try:
+                authenticated_context = await browser.new_context(
+                    locale="en-US", storage_state=storage_state,
+                    service_workers="block",
+                )
+            except Exception:
+                return public_boards, public_pins
+            contexts.append(authenticated_context)
+            authenticated_url, authenticated_html = await _fetch_pinterest_html(
+                target_url, target_kind, storage_state,
+            )
+            authenticated_data = await self._read_public_page(
+                authenticated_context, authenticated_url, target_kind, authenticated_html,
+            )
+            if target_kind[0] == "profile" and not authenticated_data.get("profile_identity_verified"):
+                return public_boards, public_pins
+            auth_boards, auth_pins = self._parse_native_page(target_url, authenticated_data)
+            return self._intersect_public_content(
+                public_boards, public_pins, auth_boards, auth_pins,
+            )
+        finally:
+            try:
+                for context in reversed(contexts):
+                    await context.close()
+            finally:
+                try:
+                    if browser is not None:
+                        await browser.close()
+                finally:
+                    await playwright.stop()
+
+    async def _read_public_page(
+        self,
+        context: Any,
+        target_url: str,
+        target_kind: tuple[str, str | None, str | None],
+        page_html: str,
+    ) -> dict[str, Any]:
+        page = await context.new_page()
+        first_navigation = True
+
+        async def guard_navigation(route: Any) -> None:
+            nonlocal first_navigation
+            request = route.request
+            if request.is_navigation_request() and request.frame == page.main_frame:
+                if first_navigation and _same_pinterest_page_kind(request.url, target_kind):
+                    first_navigation = False
+                    await route.fulfill(
+                        status=200,
+                        headers={"content-type": "text/html; charset=utf-8"},
+                        body=page_html,
+                    )
+                    return
+                await route.abort()
+                return
+            await route.continue_()
+
+        await page.route("**/*", guard_navigation)
+        response = await page.goto(
+            target_url,
+            wait_until="domcontentloaded",
+            timeout=30_000,
+        )
+        if response is None or response.status >= 400:
+            status = response.status if response is not None else 0
+            raise RuntimeError(f"public_http_{status}")
+        await page.wait_for_timeout(1500)
+        data = await page.evaluate(
+            """(expectedUsername) => {
+              const text = (value) => String(value || '').replace(/\\s+/g, ' ').trim().slice(0, 500);
+              const fullText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+              const heading = document.querySelector('h1');
+              let boardHeader = heading;
+              for (let depth = 0; boardHeader && depth < 3 && boardHeader.parentElement; depth++) {
+                boardHeader = boardHeader.parentElement;
+              }
+              const anchors = Array.from(document.querySelectorAll('a[href]')).slice(0, 1200).map((a) => {
+                const image = a.querySelector('img');
+                const card = a.closest('[data-test-id="pin"], [data-pin-id], [data-pinid]');
+                const membershipLinks = Array.from(new Set([
+                  a.href,
+                  ...Array.from((card || a).querySelectorAll('a[href]')).map((link) => link.href),
+                ]));
+                return {
+                  href: a.href,
+                  text: text(a.innerText || a.getAttribute('aria-label')),
+                  image_alt: text(image?.alt),
+                  image_url: image?.currentSrc || image?.src || null,
+                  pin_id: card?.getAttribute('data-pin-id') || card?.getAttribute('data-pinid') || null,
+                  membership_links: membershipLinks,
+                };
+              });
+              const identityRegion = boardHeader;
+              const identityText = fullText(identityRegion?.innerText);
+              const expectedHandle = String(expectedUsername || '').toLowerCase();
+              const identityLinks = Array.from(identityRegion?.querySelectorAll('a[href]') || [])
+                .map((link) => link.href);
+              const identityByLink = identityLinks.some((href) => {
+                const parsed = new URL(href, location.href);
+                const parts = parsed.pathname.split('/').filter(Boolean);
+                return parsed.protocol === 'https:'
+                  && parsed.hostname.replace(/^www\\./, '') === 'pinterest.com'
+                  && parts.length === 1
+                  && parts[0].toLowerCase() === expectedHandle;
+              });
+              const identityTokens = identityText.toLowerCase().match(/@[a-z0-9._-]+/g) || [];
+              const profileIdentityVerified = identityByLink || identityTokens.includes('@' + expectedHandle);
+              return {
+                url: location.href,
+                title: text(heading?.innerText || document.title),
+                primary_heading: text(heading?.innerText),
+                board_header_text: fullText(boardHeader?.innerText).slice(0, 2000),
+                profile_identity_verified: profileIdentityVerified,
+                description: text(document.querySelector('meta[name="description"]')?.content),
+                body_text: fullText(document.body?.innerText).slice(0, 12000),
+                serialized_state: Array.from(document.scripts)
+                  .map((script) => script.textContent || '').join(' ').slice(0, 2000000),
+                anchors,
+              };
+            }""",
+            target_kind[1],
+        )
+        if not _same_pinterest_page_kind(str(data.get("url") or ""), target_kind):
+            raise RuntimeError("public_target_redirected")
+        if _contains_private_marker(data):
+            raise RuntimeError("private_content_rejected")
+        return data
+
+    @staticmethod
+    def _has_public_content(
+        target_kind: tuple[str, str | None, str | None],
+        boards: list[dict[str, Any]],
+        pins: list[dict[str, Any]],
+    ) -> bool:
+        if target_kind[0] == "board":
+            # The requested URL alone creates a board-shaped parse result. Only
+            # an anonymous heading and count from that heading's own DOM region
+            # establish that the board itself is public.
+            return any(
+                board.get("public_header_visible") is True
+                and board.get("pin_count") is not None
+                for board in boards
+            )
+        return bool(boards or pins)
+
+    @staticmethod
+    def _intersect_public_content(
+        public_boards: list[dict[str, Any]],
+        public_pins: list[dict[str, Any]],
+        authenticated_boards: list[dict[str, Any]],
+        authenticated_pins: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        authenticated_board_ids = {str(board["id"]) for board in authenticated_boards}
+        public_pin_ids = {str(pin["id"]) for pin in public_pins}
+        boards = [board for board in public_boards if str(board["id"]) in authenticated_board_ids]
+        authenticated_pin_ids = {str(pin["id"]) for pin in authenticated_pins}
+        pins = [pin for pin in public_pins if str(pin["id"]) in authenticated_pin_ids]
+        return boards or public_boards, pins or public_pins
+
+    @staticmethod
+    def _parse_native_page(target_url: str, data: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        page_kind = _pinterest_page_kind(target_url)
+        if page_kind is None:
+            return [], []
+        kind, username, board_slug = page_kind
+        owner_username = str(username or "").lower()
+        title = str(data.get("title") or "").strip()[:500] or None
+        body_text = str(data.get("body_text") or "")[:12_000]
+        board_header_text = str(data.get("board_header_text") or "")[:2_000]
+        pin_count_source = board_header_text if kind == "board" else body_text
+        pin_count_match = re.search(r"([\d,]+)\s+pins?\b", pin_count_source, re.IGNORECASE)
+        pin_count = int(pin_count_match.group(1).replace(",", "")) if pin_count_match else None
+        primary_heading = str(data.get("primary_heading") or "").strip()[:500]
+        boards: dict[str, dict[str, Any]] = {}
+        if kind == "board" and board_slug:
+            board_id = f"{username}/{board_slug}".lower()
+            board_url = f"https://www.pinterest.com/{username}/{board_slug}/"
+            boards[board_id] = {
+                "id": board_id,
+                "username": username,
+                "name": title or board_slug.replace("_", " "),
+                "url": board_url,
+                "pin_count": pin_count,
+                "public_header_visible": bool(
+                    primary_heading
+                    and primary_heading.lower() not in {"pinterest", "home", "log in", "sign up"}
+                    and pin_count is not None
+                ),
+            }
+
+        pins: dict[str, dict[str, Any]] = {}
+        for anchor in data.get("anchors", [])[:1200]:
+            if not isinstance(anchor, dict):
+                continue
+            href = str(anchor.get("href") or "")
+            parsed = urlparse(href)
+            host = (parsed.hostname or "").lower().removeprefix("www.")
+            if parsed.scheme != "https" or host != "pinterest.com":
+                continue
+            pin_match = _PIN_PATH_RE.match(parsed.path)
+            raw_id = str(anchor.get("pin_id") or "")
+            pin_id = pin_match.group(1) if pin_match else (raw_id if raw_id.isdigit() else "")
+            if not pin_id:
+                continue
+            page_identity_verified = (
+                kind != "profile" or data.get("profile_identity_verified") is True
+            )
+            ownership_verified = page_identity_verified and any(
+                _pin_membership_matches(link, kind, owner_username, board_slug)
+                for link in anchor.get("membership_links", [])
+                if isinstance(link, str)
+            )
+            pin_url = f"https://www.pinterest.com/pin/{pin_id}/"
+            pins[pin_id] = {
+                "id": pin_id,
+                "username": username if ownership_verified else None,
+                "board_id": f"{username}/{board_slug}".lower() if ownership_verified and board_slug else None,
+                "board_url": f"https://www.pinterest.com/{username}/{board_slug}/" if ownership_verified and board_slug else None,
+                "owner_verified": ownership_verified,
+                "title": str(anchor.get("image_alt") or anchor.get("text") or "").strip()[:500] or None,
+                "description": str(anchor.get("text") or "").strip()[:4000] or None,
+                "image_url": str(anchor.get("image_url") or "")[:2000] or None,
+                "url": pin_url,
+            }
+
+        if kind == "profile":
+            for anchor in data.get("anchors", [])[:1200]:
+                if not isinstance(anchor, dict):
+                    continue
+                parsed = urlparse(str(anchor.get("href") or ""))
+                host = (parsed.hostname or "").lower().removeprefix("www.")
+                parts = [part for part in parsed.path.split("/") if part]
+                if (
+                    parsed.scheme != "https"
+                    or host != "pinterest.com"
+                    or len(parts) != 2
+                    or parts[0].lower() != username.lower()
+                    or parts[1].lower() in _BOARD_EXCLUDED
+                    or not re.fullmatch(r"[A-Za-z0-9._-]{1,150}", parts[1])
+                ):
+                    continue
+                board_id = f"{username}/{parts[1]}".lower()
+                boards[board_id] = {
+                    "id": board_id,
+                    "username": username,
+                    "name": str(anchor.get("text") or parts[1].replace("_", " ")).strip()[:500],
+                    "url": f"https://www.pinterest.com/{username}/{parts[1]}/",
+                    "pin_count": None,
+                }
+        return list(boards.values())[:100], list(pins.values())[:200]
+
+    async def run_native_cycle(self) -> dict[str, Any]:
+        summary: dict[str, Any] = {"processed": 0, "boards": 0, "pins": 0}
+        if os.getenv("PINTEREST_NATIVE_ENABLED", "1").strip().lower() not in {"1", "true", "yes", "on"}:
+            summary["skipped"] = "disabled"
+            return summary
+        if self.pool is None:
+            summary["skipped"] = "no_pool"
+            return summary
+
+        await seed_native_targets(self.pool, self.SOURCE_NAME)
+        target = await claim_native_target(self.pool, self.SOURCE_NAME)
+        if target is None:
+            return summary
+        summary["processed"] = 1
+        try:
+            boards, pins = await self._scrape_public_page(str(target["target_url"]))
+            if not boards and not pins:
+                raise RuntimeError("empty_public_page")
+            async with self.pool.acquire() as conn:
+                async with conn.transaction():
+                    for board in boards:
+                        await conn.execute(
+                            """
+                            INSERT INTO pinterest_boards
+                                (board_id,username,name,board_url,pin_count,collected_at,metadata)
+                            VALUES ($1,$2,$3,$4,$5,now(),$6::jsonb)
+                            ON CONFLICT (board_id) DO UPDATE SET
+                                username=COALESCE(EXCLUDED.username,pinterest_boards.username),
+                                name=COALESCE(EXCLUDED.name,pinterest_boards.name),
+                                board_url=EXCLUDED.board_url,
+                                pin_count=COALESCE(EXCLUDED.pin_count,pinterest_boards.pin_count),
+                                collected_at=now(),metadata=pinterest_boards.metadata||EXCLUDED.metadata
+                            """,
+                            board["id"], board["username"], board["name"], board["url"],
+                            board["pin_count"], json.dumps({"collector": "playwright"}),
+                        )
+                    for pin in pins:
+                        await conn.execute(
+                            f"""
+                            INSERT INTO pinterest_pins
+                                (pin_id,username,board_id,board_url,title,description,image_url,
+                                 destination_url,pin_url,collected_at,metadata)
+                            VALUES ($1,$2,$3,$4,$5,$6,$7,NULL,$8,now(),$9::jsonb)
+                            ON CONFLICT (pin_id) DO UPDATE SET
+                                username=CASE
+                                    WHEN EXCLUDED.metadata->>'owner_verified'='true' THEN EXCLUDED.username
+                                    WHEN pinterest_pins.metadata->>'owner_verified'='true' THEN pinterest_pins.username
+                                    ELSE NULL END,
+                                board_id={_verified_board_link_conflict('board_id')},
+                                board_url={_verified_board_link_conflict('board_url')},
+                                title=COALESCE(EXCLUDED.title,pinterest_pins.title),
+                                description=COALESCE(EXCLUDED.description,pinterest_pins.description),
+                                image_url=COALESCE(EXCLUDED.image_url,pinterest_pins.image_url),
+                                pin_url=EXCLUDED.pin_url,collected_at=now(),
+                                metadata=COALESCE(pinterest_pins.metadata,'{{}}'::jsonb)||EXCLUDED.metadata||
+                                    jsonb_build_object('owner_verified',
+                                        (pinterest_pins.metadata->>'owner_verified'='true') OR
+                                        (EXCLUDED.metadata->>'owner_verified'='true'))
+                            """,
+                            pin["id"], pin["username"], pin["board_id"], pin["board_url"],
+                            pin["title"], pin["description"], pin["image_url"], pin["url"],
+                            json.dumps({
+                                "collector": "playwright",
+                                "owner_verified": pin["owner_verified"],
+                            }),
+                        )
+            await finish_native_target(
+                self.pool, self.SOURCE_NAME, int(target["id"]), success=True,
+            )
+            summary["boards"] = len(boards)
+            summary["pins"] = len(pins)
+        except Exception as exc:
+            retry_hours = 24 if str(exc) == "empty_public_page" else 2
+            await finish_native_target(
+                self.pool, self.SOURCE_NAME, int(target["id"]), success=False,
+                error=type(exc).__name__.lower(), retry_after_hours=retry_hours,
+            )
+            logger.warning("Pinterest native scrape failed: %s", type(exc).__name__)
+            summary["error"] = type(exc).__name__
+        return summary
 
     async def _upsert_profile(self, username: str, result: ProfileResult) -> None:
         """Override to also emit a low-confidence Google email heuristic per

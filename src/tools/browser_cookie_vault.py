@@ -118,7 +118,7 @@ _BACKOFF_MULT = 2.0
 
 # ─── Domain filter ───────────────────────────────────────────────────────────
 
-# Primary hosts + first-party CDN suffixes for the 7 social platforms. Storing
+# Primary hosts + first-party CDN suffixes for the 8 social platforms. Storing
 # CDN cookies matters for Instagram/Meta/X where imagery + video servers set
 # their own auth cookies (fbcdn, cdninstagram, twimg) that die alongside the
 # main login when the profile SQLite is rewritten.
@@ -132,6 +132,7 @@ SOCIAL_COOKIE_DOMAINS: tuple[str, ...] = (
     "twitter.com",
     "facebook.com",
     "strava.com",
+    "pinterest.com",
     "cdninstagram.com",
     "twimg.com",
     "fbcdn.net",

@@ -32,19 +32,25 @@ def test_profile_services_do_not_enable_the_other_probes() -> None:
 
 def test_profile_services_share_one_compose_anchor() -> None:
     text = COMPOSE.read_text(encoding="utf-8")
+    common_match = re.search(r"^x-collector-common: &collector-common\n(.*?)(?=^\S|\Z)", text, re.M | re.S)
     match = re.search(
         r"^x-profile-probe: &profile-probe\n(.*?)(?=^\S|\Z)",
         text,
         re.M | re.S,
     )
+    assert common_match is not None
     assert match is not None
+    common = common_match.group(1)
     anchor = match.group(1)
-    assert "image: unifiedcollector-collector:latest" in anchor
+    assert "image: unifiedcollector-collector:latest" in common
     assert "mem_limit: 192m" in anchor
     assert "./env/common.env" in anchor
     assert "PROBE_ENABLED" not in anchor
     for source in _SOURCES:
         block = _service_block(f"collector_{source}")
         assert "<<: *profile-probe" in block
-        assert "mem_limit:" not in block
+        if source == "pinterest":
+            assert "mem_limit: 512m" in block
+        else:
+            assert "mem_limit:" not in block
         assert "image:" not in block

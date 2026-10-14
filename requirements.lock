@@ -24,6 +24,7 @@ asyncpg==0.31.0
 fastapi==0.136.3
 uvicorn[standard]==0.48.0
 httpx[socks]==0.28.1
+requests==2.34.2
 aiofiles==24.1.0
 python-dotenv==1.2.2
 beautifulsoup4==4.14.3

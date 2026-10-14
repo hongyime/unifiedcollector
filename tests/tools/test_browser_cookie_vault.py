@@ -119,7 +119,7 @@ def _mk_cookie(name: str, domain: str, **extra) -> dict:
 
 
 def _mixed_jar() -> list[dict]:
-    """A representative mix: 8 social cookies + 4 non-social ones."""
+    """A representative mix: 9 social cookies + 4 non-social ones."""
     return [
         _mk_cookie("sessionid", ".instagram.com"),
         _mk_cookie("ds_user_id", ".instagram.com"),
@@ -129,6 +129,7 @@ def _mixed_jar() -> list[dict]:
         _mk_cookie("auth_token", ".x.com"),
         _mk_cookie("token", ".threads.com"),
         _mk_cookie("_strava4_session", ".strava.com"),
+        _mk_cookie("session", ".pinterest.com"),
         # Non-social — must be dropped by the filter.
         _mk_cookie("SID", ".google.com"),
         _mk_cookie("session", ".claude.ai"),
@@ -149,7 +150,7 @@ def test_filter_drops_non_social_cookies():
     assert ".cloudflare.com" not in domains
     assert ".example.com" not in domains
     # Every social cookie retained.
-    assert len(filtered) == 8
+    assert len(filtered) == 9
     assert domains == {
         ".instagram.com",
         ".tiktok.com",
@@ -157,6 +158,7 @@ def test_filter_drops_non_social_cookies():
         ".x.com",
         ".threads.com",
         ".strava.com",
+        ".pinterest.com",
     }
 
 
@@ -231,8 +233,8 @@ async def test_backup_writes_latest_json_with_expected_shape(tmp_path: Path):
     assert latest.is_file()
     disk = json.loads(latest.read_text(encoding="utf-8"))
     # Payload shape contract.
-    assert disk["cookie_count"] == 8
-    assert disk["total_seen"] == 12
+    assert disk["cookie_count"] == 9
+    assert disk["total_seen"] == 13
     assert disk["cdp_url"] == cdp_url
     assert disk["auth_summary"] == {
         "facebook": ["c_user"],
@@ -243,12 +245,12 @@ async def test_backup_writes_latest_json_with_expected_shape(tmp_path: Path):
     }
     assert disk["quality_score"] > 0
     assert isinstance(disk["ts"], str) and disk["ts"].endswith("Z")
-    assert len(disk["cookies"]) == 8
+    assert len(disk["cookies"]) == 9
     # And a timestamped snapshot is written alongside.
     snapshots = list(tmp_path.glob("snapshot_*.json"))
     assert len(snapshots) == 1
     # In-memory state reflects the write.
-    assert vault.last_backup_count == 8
+    assert vault.last_backup_count == 9
     assert vault.last_error is None
     assert payload == disk
 
@@ -482,7 +484,7 @@ async def test_health_endpoint_reports_last_backup(tmp_path: Path, aiohttp_unuse
         await fake.stop()
 
     assert data["ok"] is True
-    assert data["count"] == 8
+    assert data["count"] == 9
     assert data["error"] is None
     assert data["last_backup"] is not None
     assert data["cdp_url"] == cdp_url
