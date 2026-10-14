@@ -22,18 +22,18 @@ so a bad snapshot can never silently clobber a working live session.
 
 Runtime
 -------
-- Docker service ``browser_cookie_vault`` (preferred, ``extra_hosts:
-  host.docker.internal:host-gateway``).
+- Docker service ``browser_cookie_vault`` runs on the host network so it can
+  reach the active extension-capable Chrome profile through host loopback.
 - Fallback: ``scripts/register-cookie-vault-task.ps1`` registers a Windows
   Scheduled Task on the host if the container cannot reach Chrome.
 
 CDP quirks handled here
 -----------------------
 - Chrome ≥ 128 enforces DNS-rebinding protection on the DevTools HTTP endpoint
-  and returns HTTP 500 unless the ``Host`` header is ``localhost:<port>``. When
-  we hit ``http://host.docker.internal:9222`` from a container we still send
-  ``Host: localhost:9222`` so the fetch succeeds. WebSocket upgrades honour
-  ``--remote-allow-origins=*`` so any Origin is accepted.
+  and returns HTTP 500 unless the ``Host`` header is ``localhost:<port>``. The
+  client sends that header even when dialing loopback by IP. Chrome may reject
+  WebSocket upgrades with HTTP 403 when an Origin header is present, so the
+  client omits Origin for the local DevTools connection.
 - ``Storage.getCookies`` returns cookies with read-only fields (``size``,
   ``session``) that ``Storage.setCookies`` rejects; we strip those before
   round-tripping.
@@ -64,13 +64,12 @@ logger = logging.getLogger(__name__)
 
 # ─── Config ──────────────────────────────────────────────────────────────────
 
-# CDP endpoint. When the daemon runs in Docker it must talk to Chrome on the
-# host. `extra_hosts: host.docker.internal:host-gateway` in compose gives us
-# that name; the DNS-rebinding guard forces us to keep the URL's Host header
-# as "localhost:<port>" — see `_HOST_HEADER` below.
+# CDP endpoint. Production Compose runs the vault on the host network so it can
+# reach the active extension browser on host loopback. The DNS-rebinding guard
+# still requires a `localhost:<port>` Host header; see `_HOST_HEADER` below.
 CHROME_CDP_URL: str = os.getenv(
     "CHROME_CDP_URL",
-    "http://host.docker.internal:9222",
+    "http://127.0.0.1:9223",
 ).rstrip("/")
 
 _DEFAULT_BACKUP_DIR = "/app/credentials/browser_cookies"
@@ -315,7 +314,6 @@ class CDPClient:
         # session-level timeout still bounds the initial handshake.
         ws_kwargs: dict[str, Any] = {
             "headers": {
-                "Origin": f"http://localhost:{port}",
                 "Host": self._host_header,
             },
             "max_msg_size": 0,  # unbounded; cookie payloads can be >1 MiB.

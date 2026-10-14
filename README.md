@@ -46,9 +46,10 @@ ownership, see [the architecture review](docs/architecture.md).
   `.env.example` default is `Z:/unifiedcollector`; set
   `UNIFIEDCOLLECTOR_HOST_ROOT` to the actual host path. Compose mounts its
   `media/` subdirectory and vault root into collector containers.
-- **Chrome (host-side)**: Chrome or Chromium configured for the CDP URL in
-  `CHROME_CDP_URL`. Use a dedicated automation profile and load the Bridge
-  extension from `extension/`; see [Chrome/CDP setup](docs/chrome-setup.md).
+- **Chrome (host-side)**: the cookie vault reads the active extension profile
+  through its loopback CDP endpoint, defaulting to `http://127.0.0.1:9223`.
+  Use a dedicated automation profile and load the Bridge extension from
+  `extension/`; see [Chrome/CDP setup](docs/chrome-setup.md).
 
 ## Installation
 
@@ -129,7 +130,7 @@ The full variable catalogue (names, purposes) lives in the tracked
 | `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` | Only if telegram | none | Telethon MTProto credentials |
 | `WHATSAPP_MEDIA_BRIDGE_SECRET` | Only if whatsapp | none | Shared secret between bridge and consumer |
 | `NOTIFY_TELEGRAM_BOT_TOKEN` | For alerts | none | Bot that posts operational alerts |
-| `CHROME_CDP_URL` | Yes | `http://host.docker.internal:9336` | Browser cookie vault + extension coordination |
+| `CHROME_CDP_URL` | Yes | `http://127.0.0.1:9223` | Active extension browser used by the cookie vault |
 | `UC_EXTENSION_ID` | For extension path | none | Installed extension ID (from `chrome://extensions`) |
 | `UC_EXTENSION_EXPECTED_VERSION` | For dashboard | current manifest version | Dashboard flags mismatch |
 | `WA_CONTACT_BATCH_MAX` | No | `100` | Contact-event batch size |

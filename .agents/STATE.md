@@ -1,7 +1,7 @@
 # Agent State
 Current task: UnifiedCollector Batch 2 fixes, one item/commit at a time.
-Status: Item 1 is committed as `8197d1bd`. Item 2 fixes Beeper chat pagination to follow `hasMore` and `oldestCursor`, and runs its worker on host networking so it can reach Beeper's loopback API and Postgres's configured host port. Live API requests returned 200; the database gained 25 message rows and 76 sync-state updates in the first ten minutes. Item 2 verification is complete.
-Next: Start Item 3 browser detail queue fixes. Preserve unrelated in-progress edits; do not touch spider files or WhatsApp bridge 1.
+Status: Items 1–2 are complete. Item 3 follow-up adds stalled/closed tab recovery, TikTok canonical-permalink guarding, and the active Chrome cookie-vault connection. The vault is healthy and captured 86 cookies; compile, Compose, extension assertions, and bounded permalink smoke passed. Live queue verification is pending a manual reload of the active extension: recent events still report 1.23.105 while the rebuilt bundle is 1.23.107. Chrome’s internal Extensions page was blocked by browser-use policy, which also prohibits reloading through CDP or another browser command.
+Next: Bryan reloads the UnifiedCollector extension in Chrome; then verify completed/pending queue trends before proceeding to Item 4. Keep Item 4 changes separate and do not touch spider files or WhatsApp bridge 1.
 
 ## Prior handoff history
 

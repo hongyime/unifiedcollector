@@ -1661,6 +1661,43 @@
       const tabId = response && Number(response.tab_id);
       return Number.isInteger(tabId) && tabId >= 0 ? tabId : null;
     }
+    async function browserRevisitTabState(tabId, platform, url) {
+      const id = Number(tabId);
+      if (!Number.isInteger(id) || id < 0) return null;
+      const response = await send({
+        type: "getBrowserRevisitTabState",
+        tab_id: id,
+        platform,
+        url
+      }, { retries: 0, timeoutMs: 5e3 }).catch(() => null);
+      return response && response.ok ? response : null;
+    }
+    function browserMediaRevisitPageMatches(platform, actualUrl, targetUrl) {
+      try {
+        const actual = new URL(actualUrl);
+        const target = new URL(targetUrl);
+        if (actual.pathname.replace(/\/$/, "") !== target.pathname.replace(/\/$/, "")) return false;
+        const hosts = {
+          instagram: /* @__PURE__ */ new Set(["instagram.com", "www.instagram.com"]),
+          threads: /* @__PURE__ */ new Set(["threads.com", "www.threads.com", "threads.net", "www.threads.net"]),
+          tiktok: /* @__PURE__ */ new Set(["tiktok.com", "www.tiktok.com"]),
+          x: /* @__PURE__ */ new Set(["x.com", "www.x.com", "twitter.com", "www.twitter.com"]),
+          facebook: /* @__PURE__ */ new Set(["facebook.com", "www.facebook.com", "m.facebook.com"]),
+          lemon8: /* @__PURE__ */ new Set(["lemon8-app.com", "www.lemon8-app.com", "lemon8.com", "www.lemon8.com"])
+        }[platform];
+        const hostOk = (hostname) => {
+          const host = hostname.toLowerCase();
+          if (hosts && hosts.has(host)) return true;
+          if (platform === "instagram") return host === "instagram.com" || host.endsWith(".instagram.com");
+          if (platform === "facebook") return host === "facebook.com" || host.endsWith(".facebook.com");
+          return false;
+        };
+        return hostOk(actual.hostname) && hostOk(target.hostname);
+      } catch (e) {
+        return false;
+      }
+    }
+    const BROWSER_REVISIT_RESULT_TIMEOUT_MS = 10 * 60 * 1e3;
     async function armBrowserRevisitWatchdog(queue, platform, active) {
       if (!active || !active.content_id) return;
       await send({
@@ -1724,10 +1761,26 @@
         const tabId2 = await browserRevisitTabId();
         if (tabId2 === null) return { ...active, navigating: true };
         if (active.tab_id != null && Number(active.tab_id) !== tabId2) {
+          const owner2 = await browserRevisitTabState(active.tab_id, "tiktok", activeUrl);
+          const heartbeat = Number(active.owner_heartbeat_at || active.navigation_started_at || active.claimed_at || 0);
+          const age = Date.now() - heartbeat;
+          const ownerAtTarget = Boolean(owner2 && owner2.exists && owner2.at_target);
+          const timeout = owner2 ? ownerAtTarget ? BROWSER_REVISIT_RESULT_TIMEOUT_MS : BROWSER_REVISIT_NAVIGATION_TIMEOUT_MS : BROWSER_REVISIT_RESULT_TIMEOUT_MS;
+          const reason = owner2 && owner2.exists === false ? "detail_tab_closed" : age > timeout ? owner2 ? ownerAtTarget ? "detail_result_timeout" : "detail_navigation_timeout" : "detail_tab_owner_unresponsive" : null;
+          if (reason) {
+            await sendTikTokRevisitResult(active, {
+              type: "tiktokRevisitResult",
+              content_id: active.content_id,
+              claim_attempt: active.attempts ?? null,
+              status: "failed",
+              reason,
+              username: active.username || null
+            });
+          }
           return { ...active, navigating: true };
         }
         if (active.tab_id == null) {
-          if (location.href !== activeUrl) {
+          if (!browserMediaRevisitPageMatches("tiktok", location.href, activeUrl)) {
             await sendTikTokRevisitResult(active, {
               type: "tiktokRevisitResult",
               content_id: active.content_id,
@@ -1739,10 +1792,11 @@
             return { ...active, navigating: true };
           }
           active.tab_id = tabId2;
-          localStorage.setItem(tiktokRevisitKey(), JSON.stringify(active));
         }
+        active.owner_heartbeat_at = Date.now();
+        localStorage.setItem(tiktokRevisitKey(), JSON.stringify(active));
         await armBrowserRevisitWatchdog("tiktok", "tiktok", active);
-        if (location.href !== activeUrl && Date.now() - Number(active.navigation_started_at || active.claimed_at || Date.now()) > BROWSER_REVISIT_NAVIGATION_TIMEOUT_MS) {
+        if (!browserMediaRevisitPageMatches("tiktok", location.href, activeUrl) && Date.now() - Number(active.navigation_started_at || active.claimed_at || Date.now()) > BROWSER_REVISIT_NAVIGATION_TIMEOUT_MS) {
           await sendTikTokRevisitResult(active, {
             type: "tiktokRevisitResult",
             content_id: active.content_id,
@@ -1754,7 +1808,7 @@
           clog("warn", `TikTok detail navigation timed out for ${active.content_id}`, "tiktok");
           return { ...active, navigating: true };
         }
-        if (location.href !== activeUrl) {
+        if (!browserMediaRevisitPageMatches("tiktok", location.href, activeUrl)) {
           await sleep(jitter(900));
           location.href = activeUrl;
           return { ...active, url: activeUrl, navigating: true };
@@ -1785,7 +1839,13 @@
         return { ...target, navigating: true };
       }
       const now = Date.now();
-      const state = { ...claim, url, claimed_at: now, navigation_started_at: now };
+      const state = {
+        ...claim,
+        url,
+        claimed_at: now,
+        navigation_started_at: now,
+        owner_heartbeat_at: now
+      };
       localStorage.setItem(tiktokRevisitKey(), JSON.stringify(state));
       await armBrowserRevisitWatchdog("tiktok", "tiktok", state);
       if (location.href !== url) {
@@ -1953,10 +2013,27 @@
         const tabId2 = await browserRevisitTabId();
         if (tabId2 === null) return { ...active, navigating: true };
         if (active.tab_id != null && Number(active.tab_id) !== tabId2) {
+          const ownerTab = await browserRevisitTabState(active.tab_id, platform, activeUrl);
+          const heartbeat = Number(active.owner_heartbeat_at || active.navigation_started_at || active.claimed_at || 0);
+          const age = Date.now() - heartbeat;
+          const ownerAtTarget = Boolean(ownerTab && ownerTab.exists && ownerTab.at_target);
+          const timeout = ownerTab ? ownerAtTarget ? BROWSER_REVISIT_RESULT_TIMEOUT_MS : BROWSER_REVISIT_NAVIGATION_TIMEOUT_MS : BROWSER_REVISIT_RESULT_TIMEOUT_MS;
+          const reason = ownerTab && ownerTab.exists === false ? "detail_tab_closed" : age > timeout ? ownerTab ? ownerAtTarget ? "detail_result_timeout" : "detail_navigation_timeout" : "detail_tab_owner_unresponsive" : null;
+          if (reason) {
+            await sendBrowserMediaRevisitResult(platform, active, {
+              type: "browserMediaRevisitResult",
+              platform,
+              content_id: active.content_id,
+              claim_attempt: active.attempts ?? null,
+              status: "failed",
+              reason,
+              username: active.username || owner || null
+            });
+          }
           return { ...active, navigating: true };
         }
         if (active.tab_id == null) {
-          if (location.href !== activeUrl) {
+          if (!browserMediaRevisitPageMatches(platform, location.href, activeUrl)) {
             await sendBrowserMediaRevisitResult(platform, active, {
               type: "browserMediaRevisitResult",
               platform,
@@ -1969,10 +2046,11 @@
             return { ...active, navigating: true };
           }
           active.tab_id = tabId2;
-          localStorage.setItem(browserMediaRevisitKey(platform), JSON.stringify(active));
         }
+        active.owner_heartbeat_at = Date.now();
+        localStorage.setItem(browserMediaRevisitKey(platform), JSON.stringify(active));
         await armBrowserRevisitWatchdog("browser", platform, active);
-        if (location.href !== activeUrl && Date.now() - Number(active.navigation_started_at || active.claimed_at || Date.now()) > BROWSER_REVISIT_NAVIGATION_TIMEOUT_MS) {
+        if (!browserMediaRevisitPageMatches(platform, location.href, activeUrl) && Date.now() - Number(active.navigation_started_at || active.claimed_at || Date.now()) > BROWSER_REVISIT_NAVIGATION_TIMEOUT_MS) {
           await sendBrowserMediaRevisitResult(platform, active, {
             type: "browserMediaRevisitResult",
             platform,
@@ -1985,7 +2063,7 @@
           clog("warn", `${platform.toUpperCase()} detail navigation timed out for ${active.content_id}`, platform);
           return { ...active, navigating: true };
         }
-        if (location.href !== activeUrl) {
+        if (!browserMediaRevisitPageMatches(platform, location.href, activeUrl)) {
           clog("info", `${platform.toUpperCase()} detail revisit resuming for ${active.content_id}`, platform);
           await sleep(jitter(900));
           location.href = activeUrl;
@@ -2033,7 +2111,8 @@
         ...claim,
         url,
         claimed_at: now,
-        navigation_started_at: now
+        navigation_started_at: now,
+        owner_heartbeat_at: now
       };
       localStorage.setItem(browserMediaRevisitKey(platform), JSON.stringify(state));
       await armBrowserRevisitWatchdog("browser", platform, state);

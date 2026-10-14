@@ -240,9 +240,19 @@
       const hosts = {
         instagram: /* @__PURE__ */ new Set(["instagram.com", "www.instagram.com"]),
         threads: /* @__PURE__ */ new Set(["threads.com", "www.threads.com", "threads.net", "www.threads.net"]),
-        tiktok: /* @__PURE__ */ new Set(["tiktok.com", "www.tiktok.com"])
+        tiktok: /* @__PURE__ */ new Set(["tiktok.com", "www.tiktok.com"]),
+        x: /* @__PURE__ */ new Set(["x.com", "www.x.com", "twitter.com", "www.twitter.com"]),
+        facebook: /* @__PURE__ */ new Set(["facebook.com", "www.facebook.com", "m.facebook.com"]),
+        lemon8: /* @__PURE__ */ new Set(["lemon8-app.com", "www.lemon8-app.com", "lemon8.com", "www.lemon8.com"])
       }[platform];
-      return !!hosts && hosts.has(actual.hostname.toLowerCase()) && hosts.has(target.hostname.toLowerCase());
+      const hostOk = (hostname) => {
+        const host = hostname.toLowerCase();
+        if (hosts && hosts.has(host)) return true;
+        if (platform === "instagram") return host === "instagram.com" || host.endsWith(".instagram.com");
+        if (platform === "facebook") return host === "facebook.com" || host.endsWith(".facebook.com");
+        return false;
+      };
+      return hostOk(actual.hostname) && hostOk(target.hostname);
     } catch (_) {
       return false;
     }
@@ -2365,6 +2375,26 @@
       const tabId = sender && sender.tab && Number.isInteger(sender.tab.id) ? sender.tab.id : null;
       sendResponse({ ok: true, tab_id: tabId });
       return false;
+    }
+    if (msg && msg.type === "getBrowserRevisitTabState") {
+      const tabId = Number(msg.tab_id);
+      if (!Number.isInteger(tabId) || tabId < 0) {
+        sendResponse({ ok: true, exists: false, at_target: false });
+        return false;
+      }
+      chrome.tabs.get(tabId, (tab) => {
+        const missing = Boolean(chrome.runtime.lastError) || !tab;
+        sendResponse({
+          ok: true,
+          exists: !missing,
+          at_target: !missing && browserRevisitPageMatches(
+            String(msg.platform || "").toLowerCase(),
+            tab.url || tab.pendingUrl || "",
+            String(msg.url || "")
+          )
+        });
+      });
+      return true;
     }
     const fastReplyTypes = /* @__PURE__ */ new Set(["log", "tabReady", "loopStatus", "cycleReport"]);
     if (msg && fastReplyTypes.has(msg.type)) {

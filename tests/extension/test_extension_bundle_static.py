@@ -645,6 +645,18 @@ def test_browser_revisit_checks_instagram_budget_before_claim_and_uses_page_url_
     assert "result_pending" in revisit_block
 
 
+def test_browser_revisit_owner_recovers_closed_or_stalled_tab():
+    content = _read("extension/content.js")
+    background = _read("extension/background.js")
+    assert 'type: "getBrowserRevisitTabState"' in content
+    assert "owner_heartbeat_at" in content
+    assert "detail_tab_closed" in content
+    assert "detail_tab_owner_unresponsive" in content
+    assert "detail_result_timeout" in content
+    assert 'msg.type === "getBrowserRevisitTabState"' in background
+    assert "chrome.tabs.get(tabId" in background
+
+
 def test_browser_revisit_background_watchdog_releases_abandoned_navigation():
     background = _read("extension/background.js")
     assert "BROWSER_REVISIT_WATCHDOG_PREFIX" in background

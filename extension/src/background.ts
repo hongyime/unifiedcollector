@@ -191,7 +191,14 @@ function browserRevisitPageMatches(platform, actualUrl, targetUrl) {
       facebook: new Set(["facebook.com", "www.facebook.com", "m.facebook.com"]),
       lemon8: new Set(["lemon8-app.com", "www.lemon8-app.com", "lemon8.com", "www.lemon8.com"]),
     }[platform];
-    return !!hosts && hosts.has(actual.hostname.toLowerCase()) && hosts.has(target.hostname.toLowerCase());
+    const hostOk = (hostname) => {
+      const host = hostname.toLowerCase();
+      if (hosts && hosts.has(host)) return true;
+      if (platform === "instagram") return host === "instagram.com" || host.endsWith(".instagram.com");
+      if (platform === "facebook") return host === "facebook.com" || host.endsWith(".facebook.com");
+      return false;
+    };
+    return hostOk(actual.hostname) && hostOk(target.hostname);
   } catch (_) {
     return false;
   }

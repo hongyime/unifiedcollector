@@ -60,6 +60,8 @@ class FakeChrome:
         )
 
     async def _ws(self, request: web.Request) -> web.WebSocketResponse:
+        if request.headers.get("Origin"):
+            return web.Response(status=403, text="Origin is not allowed")
         ws = web.WebSocketResponse(max_msg_size=0)
         await ws.prepare(request)
         async for msg in ws:
