@@ -372,3 +372,5 @@ Machine-specific values in this document use privacy placeholders.
 2026-10-14: Final Pinterest follow-up review found no remaining issues. Focused validation passes (44 tests), Python compileall, Compose config, env parity across 30 services, and diff check. Shared collector image rebuilt from the latest Phase 5 source; commit/push and targeted deploy remain.
 
 2026-10-14: Phase 5 committed as `8c38459e` and pushed with the pending Phase 4 fix `ff263967`; `origin/main` now points to `8c38459e`. Shared image was rebuilt from current source. Next: apply migrations, recreate Pinterest/Snapchat/Airbnb only, and verify live behavior.
+
+2026-10-14: Applied and verified the Airbnb reviews migration. Recreated only Pinterest/Snapchat/Airbnb; all were running with zero restarts and no 429/traceback logs at 15:52 UTC. Live rows: Pinterest 75 boards/0 pins, Snapchat 0 stories, Airbnb 4 listings/1 host/0 reviews. Pinterest has an active shared claim through 16:06 UTC; Snapchat live public targets are 404/empty; Airbnb GraphQL returns no data. Fifteen-minute soak started at 15:48:51 UTC.
