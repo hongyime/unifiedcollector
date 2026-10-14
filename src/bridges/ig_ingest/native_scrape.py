@@ -1,8 +1,9 @@
-"""Public-page browser scraping for Pinterest, Snapchat, and Airbnb.
+"""Browser-page ingestion for Pinterest, Snapchat, and Airbnb.
 
-The extension reads only content rendered in its active tab. This bridge owns
-the small, paced target queue and writes each platform's public records to its
-native tables; it does not fetch media or call private platform APIs.
+The extension can submit records read from its active tab, while the Python
+source collectors own target discovery and collection for these platforms.
+This bridge validates and stores submitted public records; it does not fetch
+media or call private platform APIs.
 """
 from __future__ import annotations
 
@@ -164,185 +165,16 @@ def _same_target(platform: str, page_url: str, target_url: str) -> bool:
         return False
 
 
-async def _seed_targets(conn, platform: str) -> None:
-    if platform == "pinterest":
-        await conn.execute(
-            """
-            INSERT INTO browser_native_scrape_queue (platform, target_url, username, source)
-            SELECT 'pinterest', 'https://www.pinterest.com/' || btrim(username) || '/',
-                   btrim(username), 'pinterest_profiles'
-              FROM pinterest_profiles p
-             WHERE btrim(p.username) ~ '^[A-Za-z0-9._-]{1,100}$'
-               AND NOT EXISTS (
-                    SELECT 1 FROM browser_native_scrape_queue q
-                     WHERE q.platform='pinterest'
-                       AND q.username=btrim(p.username)
-               )
-             ORDER BY p.probed_at DESC NULLS LAST
-             LIMIT GREATEST(0, 10 - (
-                 SELECT count(*) FROM browser_native_scrape_queue
-                  WHERE platform='pinterest' AND status IN ('pending','claimed')
-             ))
-            ON CONFLICT (platform, target_url) DO NOTHING
-            """
-        )
-        await conn.execute(
-            """
-            INSERT INTO browser_native_scrape_queue
-                (platform, target_url, username, source, priority)
-            SELECT 'pinterest', b.board_url, b.username, 'pinterest_boards', 15
-              FROM pinterest_boards b
-             WHERE b.board_url ~* '^https://([^/]+\\.)?pinterest\\.com/'
-               AND b.board_url !~* '/_(created|saved)/?$'
-               AND NOT EXISTS (
-                    SELECT 1 FROM browser_native_scrape_queue q
-                     WHERE q.platform='pinterest' AND q.target_url=b.board_url
-               )
-             ORDER BY b.collected_at DESC NULLS LAST, b.board_id
-             LIMIT GREATEST(0, 10 - (
-                 SELECT count(*) FROM browser_native_scrape_queue
-                  WHERE platform='pinterest' AND source='pinterest_boards'
-                    AND status IN ('pending','claimed')
-             ))
-            ON CONFLICT (platform, target_url) DO NOTHING
-            """
-        )
-    elif platform == "snapchat":
-        await conn.execute(
-            """
-            INSERT INTO browser_native_scrape_queue (platform, target_url, username, source)
-            SELECT 'snapchat', 'https://www.snapchat.com/@' || btrim(username),
-                   btrim(username), 'snapchat_profiles'
-              FROM snapchat_profiles p
-             WHERE btrim(p.username) ~ '^[A-Za-z0-9._-]{1,100}$'
-               AND NOT EXISTS (
-                    SELECT 1 FROM browser_native_scrape_queue q
-                     WHERE q.platform='snapchat'
-                       AND q.username=btrim(p.username)
-               )
-             ORDER BY p.probed_at DESC NULLS LAST
-             LIMIT GREATEST(0, 10 - (
-                 SELECT count(*) FROM browser_native_scrape_queue
-                  WHERE platform='snapchat' AND status IN ('pending','claimed')
-             ))
-            ON CONFLICT (platform, target_url) DO NOTHING
-            """
-        )
-        await conn.execute(
-            """
-            INSERT INTO browser_native_scrape_queue (platform, target_url, username, source, priority)
-            VALUES ('snapchat', 'https://www.snapchat.com/discover', NULL, 'snapchat_discover', 15)
-            ON CONFLICT (platform, target_url) DO NOTHING
-            """
-        )
-    else:
-        await conn.execute(
-            """
-            INSERT INTO browser_native_scrape_queue (platform, target_url, username, source, priority)
-            SELECT 'airbnb', l.url, NULL, 'discovered_links', 10
-              FROM discovered_links l
-             WHERE l.domain ~* '(^|\\.)airbnb\\.(com|com\\.sg|co\\.uk|co\\.kr)$'
-               AND l.url ~* '^https://([^/]+\\.)?airbnb\\.(com|com\\.sg|co\\.uk|co\\.kr)/rooms/[0-9]+'
-               AND COALESCE(l.status, '') NOT IN ('404', 'error', 'ignored')
-               AND NOT EXISTS (
-                    SELECT 1 FROM browser_native_scrape_queue q
-                     WHERE q.platform='airbnb' AND q.target_url=l.url
-               )
-             ORDER BY l.discovered_at DESC NULLS LAST
-             LIMIT GREATEST(0, 10 - (
-                 SELECT count(*) FROM browser_native_scrape_queue
-                  WHERE platform='airbnb' AND status IN ('pending','claimed')
-             ))
-            ON CONFLICT (platform, target_url) DO NOTHING
-            """
-        )
-        await conn.execute(
-            """
-            INSERT INTO browser_native_scrape_queue (platform, target_url, username, source, priority)
-            SELECT 'airbnb', 'https://www.airbnb.com/users/show/' || btrim(username),
-                   btrim(username), 'airbnb_profiles', 5
-              FROM airbnb_profiles p
-             WHERE btrim(p.username) ~ '^[0-9]{1,20}$'
-               AND NOT EXISTS (
-                    SELECT 1 FROM browser_native_scrape_queue q
-                     WHERE q.platform='airbnb' AND q.username=btrim(p.username)
-               )
-             ORDER BY p.probed_at DESC NULLS LAST
-             LIMIT GREATEST(0, 10 - (
-                 SELECT count(*) FROM browser_native_scrape_queue
-                  WHERE platform='airbnb' AND status IN ('pending','claimed')
-             ))
-            ON CONFLICT (platform, target_url) DO NOTHING
-            """
-        )
-        await conn.execute(
-            """
-            INSERT INTO browser_native_scrape_queue (platform, target_url, username, source, priority)
-            SELECT 'airbnb', l.host_profile_url, l.host_id, 'airbnb_listing_hosts', 20
-              FROM airbnb_listings l
-             WHERE l.host_profile_url ~* '^https://([^/]+\\.)?airbnb\\.(com|com\\.sg|co\\.uk|co\\.kr)/users/(show|profile)/'
-               AND NOT EXISTS (
-                    SELECT 1 FROM browser_native_scrape_queue q
-                     WHERE q.platform='airbnb' AND q.target_url=l.host_profile_url
-               )
-             ORDER BY l.collected_at DESC NULLS LAST, l.host_id
-             LIMIT GREATEST(0, 10 - (
-                 SELECT count(*) FROM browser_native_scrape_queue
-                  WHERE platform='airbnb' AND source='airbnb_listing_hosts'
-                    AND status IN ('pending','claimed')
-             ))
-            ON CONFLICT (platform, target_url) DO NOTHING
-            """
-        )
-
-
 async def native_scrape_target(request: web.Request) -> web.Response:
-    from . import get_pool
-
     platform = str(request.query.get("platform") or "").strip().lower()
     if platform not in _PLATFORMS:
         return _cors(web.json_response({"ok": False, "error": "unsupported_platform"}, status=400))
-    try:
-        pool = await get_pool()
-        async with pool.acquire() as conn:
-            async with conn.transaction():
-                await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", f"browser-native-scrape:{platform}")
-                await _seed_targets(conn, platform)
-                row = await conn.fetchrow(
-                    """
-                    UPDATE browser_native_scrape_queue q
-                       SET status='claimed', attempts=q.attempts+1,
-                           claim_expires_at=now()+interval '20 minutes',
-                           updated_at=now(), last_error=NULL
-                     WHERE q.id=(
-                        SELECT due.id
-                          FROM browser_native_scrape_queue due
-                         WHERE due.platform=$1
-                           AND due.attempts < $2
-                           AND due.next_visit_at <= now()
-                           AND (due.status IN ('pending','failed')
-                                OR (due.status='claimed' AND due.claim_expires_at <= now()))
-                           AND NOT EXISTS (
-                                SELECT 1 FROM browser_native_scrape_queue active
-                                 WHERE active.platform=$1
-                                   AND active.status='claimed'
-                                   AND active.claim_expires_at > now()
-                           )
-                         ORDER BY due.priority DESC, due.next_visit_at, due.id
-                         LIMIT 1
-                         FOR UPDATE SKIP LOCKED
-                     )
-                    RETURNING q.id, q.target_url, q.username, q.attempts
-                    """,
-                    platform,
-                    _MAX_ATTEMPTS,
-                )
-        if row is None:
-            return _cors(web.json_response({"ok": True, "target": None}))
-        return _cors(web.json_response({"ok": True, "target": dict(row)}))
-    except Exception as exc:
-        logger.warning("native scrape target failed for %s: %s", platform, type(exc).__name__)
-        return _cors(web.json_response({"ok": False, "error": "target_unavailable"}, status=503))
+    # These platforms have source-specific Python collectors: Pinterest uses
+    # Playwright with scoped cookies, Snapchat uses Requests against public
+    # pages, and Airbnb uses its public GraphQL client. Returning a browser
+    # claim here would let the extension race those collectors for the same
+    # queue row and scrape it through a different method.
+    return _cors(web.json_response({"ok": True, "target": None}))
 
 
 def _validated_item(platform: str, item: object) -> tuple[str, tuple] | None:

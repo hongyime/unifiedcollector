@@ -1,5 +1,8 @@
+from types import SimpleNamespace
+
 import pytest
 
+from src.bridges.ig_ingest.native_scrape import native_scrape_target
 from src.bridges.ig_ingest.native_scrape import (
     _platform_url_allowed,
     _same_target,
@@ -13,6 +16,21 @@ def test_native_page_targets_allow_only_expected_platform_hosts():
     assert _platform_url_allowed("airbnb", "https://www.airbnb.com.sg/rooms/123")
     assert not _platform_url_allowed("airbnb", "http://www.airbnb.com/rooms/123")
     assert not _platform_url_allowed("snapchat", "https://example.com/add/alice")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", ["pinterest", "snapchat", "airbnb"])
+async def test_native_target_endpoint_leaves_claims_to_python_collectors(platform, monkeypatch):
+    import src.bridges.ig_ingest as bridge
+
+    async def unexpected_pool_access():
+        raise AssertionError("browser endpoint must not claim native collector work")
+
+    monkeypatch.setattr(bridge, "get_pool", unexpected_pool_access)
+    response = await native_scrape_target(SimpleNamespace(query={"platform": platform}))
+
+    assert response.status == 200
+    assert response.text == '{"ok": true, "target": null}'
 
 
 def test_native_target_matches_allow_airbnb_locale_redirects():

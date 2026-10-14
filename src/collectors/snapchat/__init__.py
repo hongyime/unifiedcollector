@@ -18,9 +18,11 @@ import logging
 import os
 import re
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Optional
 from urllib.parse import quote, urljoin, urlparse
 
+from bs4 import BeautifulSoup
 import httpx
 import requests
 
@@ -53,12 +55,39 @@ def _decode_json_str(s: str) -> str:
 
 def _allowed_public_page(url: str) -> bool:
     parsed = urlparse(url)
-    host = (parsed.hostname or "").lower().removeprefix("www.")
+    host = (parsed.hostname or "").lower().rstrip(".")
     return (
         parsed.scheme == "https"
-        and host == "snapchat.com"
+        and host in {"snapchat.com", "www.snapchat.com", "story.snapchat.com"}
         and _PUBLIC_PATH_RE.fullmatch(parsed.path) is not None
     )
+
+
+def _retry_after_seconds(value: Any, *, now: datetime | None = None) -> int | None:
+    """Parse either Retry-After delta-seconds or its HTTP-date form."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        seconds = int(text)
+    except ValueError:
+        try:
+            retry_at = parsedate_to_datetime(text)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=timezone.utc)
+        seconds = (retry_at - (now or datetime.now(timezone.utc))).total_seconds()
+    if seconds <= 0:
+        return 1
+    return min(7 * 24 * 60 * 60, max(1, int(seconds)))
+
+
+class _PublicPageHttpError(RuntimeError):
+    def __init__(self, status_code: int, retry_after_seconds: int | None = None):
+        self.status_code = int(status_code)
+        self.retry_after_seconds = retry_after_seconds
+        super().__init__(f"public_http_{self.status_code}")
 
 
 def _scalar(value: Any) -> str | None:
@@ -185,17 +214,134 @@ def _make_public_snap_item(
 
 
 def _extract_public_snap_items(html: str, target_url: str, username: str | None) -> list[dict[str, Any]]:
-    match = _NEXT_DATA_RE.search(html)
-    if not match:
-        return []
+    tag = BeautifulSoup(html, "html.parser").find("script", id="__NEXT_DATA__")
+    if tag is None:
+        match = _NEXT_DATA_RE.search(html)
+        if not match:
+            return []
+        raw_json = match.group(1)
+    else:
+        raw_json = tag.string or tag.get_text()
     try:
-        next_data = json.loads(match.group(1))
+        next_data = json.loads(raw_json)
     except (TypeError, ValueError):
         return []
-    page = next_data.get("props", {}).get("pageProps", {})
+    if not isinstance(next_data, dict):
+        return []
+    props = next_data.get("props")
+    page = props.get("pageProps", {}) if isinstance(props, dict) else {}
     if not isinstance(page, dict):
         return []
     items: dict[str, dict[str, Any]] = {}
+
+    # story.snapchat.com/@<username> carries public profiles, active stories,
+    # curated highlights, and Spotlight clips in the same __NEXT_DATA__ blob.
+    # Normalize every public Snap separately so multi-Snap stories are not
+    # collapsed to the first media URL.
+    user_profile = page.get("userProfile") if isinstance(page.get("userProfile"), dict) else {}
+    profile_info = (
+        user_profile.get("publicProfileInfo")
+        if isinstance(user_profile.get("publicProfileInfo"), dict) else {}
+    )
+    page_username = _public_profile_handle(profile_info, username)
+
+    def add_snap_list(
+        parent: Any,
+        *,
+        content_type: str,
+        surface: str,
+        parent_id: str | None = None,
+        parent_title: str | None = None,
+    ) -> None:
+        if not isinstance(parent, dict):
+            return
+        snap_list = parent.get("snapList")
+        if not isinstance(snap_list, list):
+            return
+        for index, snap in enumerate(snap_list[:25]):
+            if not isinstance(snap, dict):
+                continue
+            snap_urls = snap.get("snapUrls") if isinstance(snap.get("snapUrls"), dict) else {}
+            media_url = (
+                _public_media_url(snap_urls.get("mediaUrl"))
+                or _public_media_url(snap.get("contentUrl"))
+            )
+            if not media_url:
+                continue
+            provider_id = (
+                _scalar(snap.get("snapId"))
+                or _scalar(snap.get("id"))
+                or media_url
+            )
+            timestamp_value = _scalar(snap.get("timestampInSec"))
+            posted_at = _to_timestamp(timestamp_value)
+            if content_type == "public_story" and posted_at:
+                expires_at = (
+                    datetime.fromisoformat(posted_at) + timedelta(hours=24)
+                ).isoformat()
+            else:
+                expires_at = _to_timestamp(_scalar(snap.get("expiresAt")))
+            title = (
+                _scalar(snap.get("storyTitle"))
+                or _scalar(snap.get("title"))
+                or parent_title
+            )
+            thumb_urls = snap.get("snapUrls") if isinstance(snap.get("snapUrls"), dict) else {}
+            thumbnail = (
+                _public_media_url(thumb_urls.get("thumbnailUrl"))
+                or _public_media_url(snap.get("thumbnailUrl"))
+            )
+            stable_id = hashlib.sha256(
+                f"{surface}:{parent_id or ''}:{provider_id}".encode("utf-8")
+            ).hexdigest()[:40]
+            item = {
+                "id": stable_id,
+                "username": page_username,
+                "title": title[:500] if title else None,
+                "url": target_url,
+                "media_url": media_url,
+                "thumbnail_url": thumbnail,
+                "posted_at": posted_at,
+                "expires_at": expires_at,
+                "metadata": {
+                    "content_type": content_type,
+                    "surface": surface,
+                    "provider_id": str(provider_id)[:200],
+                    "parent_id": str(parent_id)[:200] if parent_id else None,
+                    "snap_media_type": _scalar(snap.get("snapMediaType")),
+                    "snap_index": index,
+                },
+            }
+            items[stable_id] = item
+
+    story = page.get("story")
+    add_snap_list(story, content_type="public_story", surface="profile_story")
+
+    highlights = page.get("curatedHighlights", [])
+    if isinstance(highlights, list):
+        for highlight in highlights[:25]:
+            if not isinstance(highlight, dict):
+                continue
+            add_snap_list(
+                highlight,
+                content_type="highlight",
+                surface="profile_highlight",
+                parent_id=_scalar(highlight.get("highlightId")),
+                parent_title=_scalar(highlight.get("storyTitle")),
+            )
+
+    spotlights = page.get("spotlightHighlights", [])
+    if isinstance(spotlights, list):
+        for spotlight in spotlights[:25]:
+            if not isinstance(spotlight, dict):
+                continue
+            add_snap_list(
+                spotlight,
+                content_type="spotlight",
+                surface="profile_spotlight",
+                parent_id=_scalar(spotlight.get("spotlightId") or spotlight.get("id")),
+                parent_title=_scalar(spotlight.get("storyTitle") or spotlight.get("title")),
+            )
 
     feed = page.get("spotlightFeed", {})
     spotlight = feed.get("spotlightStories", []) if isinstance(feed, dict) else []
@@ -242,7 +388,29 @@ def _extract_public_snap_items(html: str, target_url: str, username: str | None)
             )
             if item:
                 items[item["id"]] = item
-    return list(items.values())[:25]
+    # Keep the response bounded without letting a profile's active story list
+    # starve its Highlights or Spotlight items. Preserve source order within
+    # each content type and select one item per type per pass.
+    by_content_type: dict[str, list[dict[str, Any]]] = {}
+    for item in items.values():
+        content_type = str(item.get("metadata", {}).get("content_type") or "unknown")
+        by_content_type.setdefault(content_type, []).append(item)
+    selected: list[dict[str, Any]] = []
+    offsets = {content_type: 0 for content_type in by_content_type}
+    while len(selected) < 25:
+        added = False
+        for content_type, candidates in by_content_type.items():
+            offset = offsets[content_type]
+            if offset >= len(candidates):
+                continue
+            selected.append(candidates[offset])
+            offsets[content_type] = offset + 1
+            added = True
+            if len(selected) >= 25:
+                break
+        if not added:
+            break
+    return selected
 
 
 class SnapchatCollector(ProfileOnlyCollector):
@@ -331,7 +499,10 @@ class SnapchatCollector(ProfileOnlyCollector):
                             current_url = next_url
                             continue
                         if response.status_code >= 400:
-                            raise RuntimeError(f"public_http_{response.status_code}")
+                            raise _PublicPageHttpError(
+                                response.status_code,
+                                _retry_after_seconds(response.headers.get("Retry-After")),
+                            )
                         if not _allowed_public_page(getattr(response, "url", None) or current_url):
                             raise RuntimeError("public_redirect_rejected")
                         chunks = bytearray()
@@ -377,7 +548,7 @@ class SnapchatCollector(ProfileOnlyCollector):
                             INSERT INTO {table_name}
                                 ({id_column},username,title,story_url,media_url,thumbnail_url,
                                  posted_at,expires_at,collected_at,metadata)
-                            VALUES ($1,$2,$3,$4,$5,$6,$7::timestamptz,$8::timestamptz,now(),$9::jsonb)
+                            VALUES ($1,$2,$3,$4,$5,$6,$7::text::timestamptz,$8::text::timestamptz,now(),$9::jsonb)
                             ON CONFLICT ({id_column}) DO UPDATE SET
                                 username=COALESCE(EXCLUDED.username,{table_name}.username),
                                 title=COALESCE(EXCLUDED.title,{table_name}.title),
@@ -398,13 +569,28 @@ class SnapchatCollector(ProfileOnlyCollector):
             summary["items"] = len(items)
         except Exception as exc:
             is_empty = str(exc) == "empty_public_page"
+            attempts = int(target.get("attempts") or 1)
+            exponential_retry = min(24 * 60 * 60, 15 * 60 * (2 ** min(max(attempts - 1, 0), 6)))
+            retry_after_seconds = getattr(exc, "retry_after_seconds", None)
+            if isinstance(exc, _PublicPageHttpError) and exc.status_code == 429:
+                retry_after_seconds = max(
+                    exponential_retry,
+                    int(retry_after_seconds or 0),
+                )
+            elif retry_after_seconds is None and not is_empty:
+                retry_after_seconds = max(exponential_retry, 2 * 60 * 60)
+            elif is_empty:
+                retry_after_seconds = 24 * 60 * 60
+            error = str(exc) if str(exc).startswith("public_http_") else (
+                "empty_public_page" if is_empty else type(exc).__name__.lower()
+            )
             await finish_native_target(
                 self.pool, self.SOURCE_NAME, int(target["id"]), success=False,
-                error=(str(exc) if str(exc).startswith("public_http_") else type(exc).__name__.lower()),
-                retry_after_hours=24 if is_empty or "public_http_429" in str(exc) else 2,
+                error=error,
+                retry_after_seconds=retry_after_seconds,
             )
-            logger.warning("Snapchat public scrape failed: %s", type(exc).__name__)
-            summary["error"] = type(exc).__name__
+            logger.warning("Snapchat public scrape failed: %s", error)
+            summary["error"] = error
         return summary
 
 

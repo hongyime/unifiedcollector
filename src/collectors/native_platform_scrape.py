@@ -25,6 +25,37 @@ def _remaining_queue_capacity(active_count: int, cap: int = _AIRBNB_LISTING_QUEU
     return max(0, cap - max(0, int(active_count)))
 
 
+async def retarget_snapchat_profile_targets(conn: Any) -> None:
+    """Move queued public-profile fetches to Snapchat's story-page endpoint.
+
+    Keep each row's existing schedule so this endpoint correction does not
+    create a burst of requests. Reset attempts only for failed rows because
+    the old URL and the new public content endpoint are different targets.
+    """
+    await conn.execute(
+        """
+        UPDATE browser_native_scrape_queue q
+           SET target_url='https://story.snapchat.com/@' || btrim(q.username),
+               attempts=CASE
+                   WHEN q.status='failed'
+                     OR (q.status='claimed' AND q.claim_expires_at <= now()) THEN 0
+                   ELSE q.attempts END,
+               updated_at=now()
+         WHERE q.platform='snapchat'
+           AND q.source='snapchat_profiles'
+           AND (q.status <> 'claimed' OR q.claim_expires_at <= now())
+           AND btrim(q.username) ~ '^[A-Za-z0-9._-]{1,100}$'
+           AND q.target_url NOT LIKE 'https://story.snapchat.com/@%'
+           AND NOT EXISTS (
+                SELECT 1 FROM browser_native_scrape_queue existing
+                 WHERE existing.platform='snapchat'
+                   AND existing.target_url='https://story.snapchat.com/@' || btrim(q.username)
+                   AND existing.id <> q.id
+           )
+        """
+    )
+
+
 _SEED_QUERIES: dict[str, tuple[str, ...]] = {
     "pinterest": (
         """
@@ -68,7 +99,7 @@ _SEED_QUERIES: dict[str, tuple[str, ...]] = {
     "snapchat": (
         """
         INSERT INTO browser_native_scrape_queue (platform, target_url, username, source)
-        SELECT 'snapchat', 'https://www.snapchat.com/@' || btrim(p.username),
+        SELECT 'snapchat', 'https://story.snapchat.com/@' || btrim(p.username),
                btrim(p.username), 'snapchat_profiles'
           FROM snapchat_profiles p
          WHERE btrim(p.username) ~ '^[A-Za-z0-9._-]{1,100}$'
@@ -160,6 +191,8 @@ async def seed_native_targets(pool: Any, platform: str) -> None:
                 "SELECT pg_advisory_xact_lock(hashtext($1))",
                 f"browser-native-scrape:{platform}",
             )
+            if platform == "snapchat":
+                await retarget_snapchat_profile_targets(conn)
             for query in _SEED_QUERIES[platform]:
                 if platform == "airbnb" and "'airbnb_listings'" in query:
                     active_listings = await conn.fetchval(
@@ -228,6 +261,7 @@ async def finish_native_target(
     success: bool,
     error: str | None = None,
     retry_after_hours: int = 6,
+    retry_after_seconds: int | None = None,
 ) -> None:
     """Release a claim and either schedule a refresh or a bounded retry."""
     if platform not in _PLATFORMS:
@@ -246,16 +280,21 @@ async def finish_native_target(
                 platform,
             )
             return
+        delay_seconds = (
+            max(1, min(int(retry_after_seconds), 168 * 60 * 60))
+            if retry_after_seconds is not None
+            else max(1, min(int(retry_after_hours), 168)) * 60 * 60
+        )
         await conn.execute(
             """
             UPDATE browser_native_scrape_queue
                SET status='failed', last_error=$3,
-                   next_visit_at=now()+($4 * interval '1 hour'),
+                   next_visit_at=now()+($4 * interval '1 second'),
                    claim_expires_at=NULL, last_result_at=now(), updated_at=now()
              WHERE id=$1 AND platform=$2 AND status='claimed'
             """,
             target_id,
             platform,
             (error or "native_page_unavailable")[:120],
-            max(1, min(int(retry_after_hours), 168)),
+            delay_seconds,
         )

@@ -20,11 +20,14 @@ import logging
 import os
 import re
 import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 import httpx
+from bs4 import BeautifulSoup
 
 from src.core.profile_only_collector import ProfileOnlyCollector, ProfileResult
 from src.collectors.native_platform_scrape import (
@@ -41,7 +44,14 @@ _AVATAR_RE = re.compile(r'"image_xlarge_url"\s*:\s*"((?:[^"\\]|\\.)*?)"')
 _FOLLOWER_RE = re.compile(r'"follower_count"\s*:\s*(\d+)')
 _PIN_COUNT_RE = re.compile(r'"pin_count"\s*:\s*(\d+)')
 _BOARD_COUNT_RE = re.compile(r'"board_count"\s*:\s*(\d+)')
+_FOLLOWING_COUNT_RE = re.compile(
+    r'"(?:following_count|followingCount)"\s*:\s*["\']?(\d[\d,]*(?:\.\d+)?\s*[KMB]?)', re.I,
+)
+_MONTHLY_VIEWS_RE = re.compile(
+    r'"(?:monthly_views|monthlyViews)"\s*:\s*["\']?(\d[\d,]*(?:\.\d+)?\s*[KMB]?)', re.I,
+)
 _PIN_PATH_RE = re.compile(r"^/pin/(\d+)(?:/|$)", re.IGNORECASE)
+_COUNT_TOKEN = r"(\d[\d,]*(?:\.\d+)?\s*[KMB]?)"
 _BOARD_EXCLUDED = {"_created", "_saved", "pin", "search", "explore"}
 _PRIVATE_MARKER_RE = re.compile(
     r"secret\s+board|private\s+board|(?:[\"']?is_secret[\"']?|[\"']?isSecret[\"']?)\s*[:=]\s*true",
@@ -52,11 +62,62 @@ _MAX_PINTEREST_REDIRECTS = 5
 _MAX_PINTEREST_PAGE_BYTES = 5 * 1024 * 1024
 
 
+class _PinterestPublicHttpError(RuntimeError):
+    def __init__(self, status_code: int, retry_after_seconds: int | None = None):
+        self.status_code = int(status_code)
+        self.retry_after_seconds = retry_after_seconds
+        super().__init__(f"public_http_{self.status_code}")
+
+
+def _retry_after_seconds(value: Any, *, now: datetime | None = None) -> int | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        seconds = int(text)
+    except ValueError:
+        try:
+            retry_at = parsedate_to_datetime(text)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=timezone.utc)
+        seconds = int((retry_at - (now or datetime.now(timezone.utc))).total_seconds())
+    return min(7 * 24 * 60 * 60, max(1, seconds))
+
+
 def _decode_json_str(s: str) -> str:
     try:
         return json.loads(f'"{s}"')
     except Exception:
         return s
+
+
+def _compact_count(value: str | None) -> int | None:
+    if not value:
+        return None
+    match = re.fullmatch(r"\s*(\d[\d,]*(?:\.\d+)?)\s*([KMB]?)\s*", value, re.I)
+    if not match:
+        return None
+    try:
+        number = float(match.group(1).replace(",", ""))
+    except ValueError:
+        return None
+    multiplier = {"": 1, "K": 1_000, "M": 1_000_000, "B": 1_000_000_000}[match.group(2).upper()]
+    result = int(number * multiplier)
+    return result if 0 <= result <= 9_223_372_036_854_775_807 else None
+
+
+def _labeled_count(text: str, label_pattern: str) -> int | None:
+    patterns = (
+        re.compile(rf"\b{_COUNT_TOKEN}\s+{label_pattern}\b", re.I),
+        re.compile(rf"\b{label_pattern}\s*[:·]?\s*{_COUNT_TOKEN}\b", re.I),
+    )
+    for pattern in patterns:
+        match = pattern.search(text)
+        if match:
+            return _compact_count(match.group(1))
+    return None
 
 
 def _load_pinterest_storage_state(path: Path | None = None) -> dict | None:
@@ -221,7 +282,10 @@ async def _fetch_pinterest_html(
                     )
                     continue
                 if response.status_code >= 400:
-                    raise RuntimeError(f"public_http_{response.status_code}")
+                    raise _PinterestPublicHttpError(
+                        response.status_code,
+                        _retry_after_seconds(response.headers.get("Retry-After")),
+                    )
                 chunks = bytearray()
                 async for chunk in response.aiter_bytes():
                     chunks.extend(chunk)
@@ -266,6 +330,17 @@ class PinterestCollector(ProfileOnlyCollector):
         follower_m = _FOLLOWER_RE.search(html)
         pin_count_m = _PIN_COUNT_RE.search(html)
         board_count_m = _BOARD_COUNT_RE.search(html)
+        following_count_m = _FOLLOWING_COUNT_RE.search(html)
+        monthly_views_m = _MONTHLY_VIEWS_RE.search(html)
+        visible_text = BeautifulSoup(html, "html.parser").get_text(" ", strip=True)
+        following_count = (
+            _compact_count(following_count_m.group(1)) if following_count_m
+            else _labeled_count(visible_text, r"following")
+        )
+        monthly_views = (
+            _compact_count(monthly_views_m.group(1)) if monthly_views_m
+            else _labeled_count(visible_text, r"monthly\s+views?")
+        )
 
         return ProfileResult(
             exists=True,
@@ -277,6 +352,8 @@ class PinterestCollector(ProfileOnlyCollector):
                 "follower_count": int(follower_m.group(1)) if follower_m else None,
                 "pin_count": int(pin_count_m.group(1)) if pin_count_m else None,
                 "board_count": int(board_count_m.group(1)) if board_count_m else None,
+                "following_count": following_count,
+                "monthly_views": monthly_views,
             },
         )
 
@@ -388,8 +465,11 @@ class PinterestCollector(ProfileOnlyCollector):
             status = response.status if response is not None else 0
             raise RuntimeError(f"public_http_{status}")
         await page.wait_for_timeout(1500)
+        for _ in range(3):
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            await page.wait_for_timeout(500)
         data = await page.evaluate(
-            """(expectedUsername) => {
+            """({expectedUsername, expectedPageKind}) => {
               const text = (value) => String(value || '').replace(/\\s+/g, ' ').trim().slice(0, 500);
               const fullText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
               const heading = document.querySelector('h1');
@@ -411,6 +491,41 @@ class PinterestCollector(ProfileOnlyCollector):
                   image_url: image?.currentSrc || image?.src || null,
                   pin_id: card?.getAttribute('data-pin-id') || card?.getAttribute('data-pinid') || null,
                   membership_links: membershipLinks,
+                  card_text: fullText(card?.innerText || a.innerText || '').slice(0, 2000),
+                  control_labels: Array.from(card?.querySelectorAll('button,[role="button"]') || [])
+                    .map((control) => control.getAttribute('aria-label') || control.getAttribute('title') || '')
+                    .filter(Boolean).join(' ').slice(0, 1000),
+                };
+              });
+              const pinCards = Array.from(document.querySelectorAll(
+                '[data-test-id="pin"], [data-pin-id], [data-pinid]'
+              )).slice(0, 1200).map((card) => {
+                const pinElement = card.matches('[data-pin-id], [data-pinid]')
+                  ? card : card.querySelector('[data-pin-id], [data-pinid]');
+                const pinId = pinElement?.getAttribute('data-pin-id')
+                  || pinElement?.getAttribute('data-pinid') || null;
+                const links = Array.from(card.querySelectorAll('a[href]')).map((link) => link.href);
+                const pinHref = links.find((href) => {
+                  const parts = new URL(href).pathname.split('/').filter(Boolean);
+                  return parts.length >= 2 && parts[0].toLowerCase() === 'pin'
+                    && /^[0-9]+$/.test(parts[1]);
+                }) || (pinId && /^[0-9]+$/.test(pinId)
+                    ? `https://www.pinterest.com/pin/${pinId}/` : null);
+                const image = card.querySelector('img');
+                return {
+                  href: pinHref,
+                  pin_id: pinId,
+                  membership_links: Array.from(new Set([
+                    ...links,
+                    ...(expectedPageKind === 'board' ? [location.href] : []),
+                  ])),
+                  text: text(card.innerText || card.getAttribute('aria-label')),
+                  image_alt: text(image?.alt),
+                  image_url: image?.currentSrc || image?.src || null,
+                  card_text: fullText(card.innerText || '').slice(0, 2000),
+                  control_labels: Array.from(card.querySelectorAll('button,[role="button"]'))
+                    .map((control) => control.getAttribute('aria-label') || control.getAttribute('title') || '')
+                    .filter(Boolean).join(' ').slice(0, 1000),
                 };
               });
               const identityRegion = boardHeader;
@@ -439,9 +554,10 @@ class PinterestCollector(ProfileOnlyCollector):
                 serialized_state: Array.from(document.scripts)
                   .map((script) => script.textContent || '').join(' ').slice(0, 2000000),
                 anchors,
+                pin_cards: pinCards,
               };
             }""",
-            target_kind[1],
+            {"expectedUsername": target_kind[1], "expectedPageKind": target_kind[0]},
         )
         if not _same_pinterest_page_kind(str(data.get("url") or ""), target_kind):
             raise RuntimeError("public_target_redirected")
@@ -493,6 +609,8 @@ class PinterestCollector(ProfileOnlyCollector):
         pin_count_source = board_header_text if kind == "board" else body_text
         pin_count_match = re.search(r"([\d,]+)\s+pins?\b", pin_count_source, re.IGNORECASE)
         pin_count = int(pin_count_match.group(1).replace(",", "")) if pin_count_match else None
+        board_description = str(data.get("description") or "").strip()[:4000] or None
+        board_follower_count = _labeled_count(board_header_text, r"followers?")
         primary_heading = str(data.get("primary_heading") or "").strip()[:500]
         boards: dict[str, dict[str, Any]] = {}
         if kind == "board" and board_slug:
@@ -504,6 +622,8 @@ class PinterestCollector(ProfileOnlyCollector):
                 "name": title or board_slug.replace("_", " "),
                 "url": board_url,
                 "pin_count": pin_count,
+                "description": board_description,
+                "follower_count": board_follower_count,
                 "public_header_visible": bool(
                     primary_heading
                     and primary_heading.lower() not in {"pinterest", "home", "log in", "sign up"}
@@ -512,7 +632,11 @@ class PinterestCollector(ProfileOnlyCollector):
             }
 
         pins: dict[str, dict[str, Any]] = {}
-        for anchor in data.get("anchors", [])[:1200]:
+        candidates = [
+            *data.get("anchors", [])[:1200],
+            *data.get("pin_cards", [])[:1200],
+        ]
+        for anchor in candidates:
             if not isinstance(anchor, dict):
                 continue
             href = str(anchor.get("href") or "")
@@ -534,6 +658,10 @@ class PinterestCollector(ProfileOnlyCollector):
                 if isinstance(link, str)
             )
             pin_url = f"https://www.pinterest.com/pin/{pin_id}/"
+            card_text = " ".join((
+                str(anchor.get("card_text") or ""),
+                str(anchor.get("control_labels") or ""),
+            ))[:3000]
             pins[pin_id] = {
                 "id": pin_id,
                 "username": username if ownership_verified else None,
@@ -543,6 +671,8 @@ class PinterestCollector(ProfileOnlyCollector):
                 "title": str(anchor.get("image_alt") or anchor.get("text") or "").strip()[:500] or None,
                 "description": str(anchor.get("text") or "").strip()[:4000] or None,
                 "image_url": str(anchor.get("image_url") or "")[:2000] or None,
+                "repin_count": _labeled_count(card_text, r"re-?pins?"),
+                "comment_count": _labeled_count(card_text, r"comments?"),
                 "url": pin_url,
             }
 
@@ -596,25 +726,28 @@ class PinterestCollector(ProfileOnlyCollector):
                         await conn.execute(
                             """
                             INSERT INTO pinterest_boards
-                                (board_id,username,name,board_url,pin_count,collected_at,metadata)
-                            VALUES ($1,$2,$3,$4,$5,now(),$6::jsonb)
+                                (board_id,username,name,board_url,pin_count,description,follower_count,collected_at,metadata)
+                            VALUES ($1,$2,$3,$4,$5,$6,$7,now(),$8::jsonb)
                             ON CONFLICT (board_id) DO UPDATE SET
                                 username=COALESCE(EXCLUDED.username,pinterest_boards.username),
                                 name=COALESCE(EXCLUDED.name,pinterest_boards.name),
                                 board_url=EXCLUDED.board_url,
                                 pin_count=COALESCE(EXCLUDED.pin_count,pinterest_boards.pin_count),
+                                description=COALESCE(EXCLUDED.description,pinterest_boards.description),
+                                follower_count=COALESCE(EXCLUDED.follower_count,pinterest_boards.follower_count),
                                 collected_at=now(),metadata=pinterest_boards.metadata||EXCLUDED.metadata
                             """,
                             board["id"], board["username"], board["name"], board["url"],
-                            board["pin_count"], json.dumps({"collector": "playwright"}),
+                            board["pin_count"], board["description"], board["follower_count"],
+                            json.dumps({"collector": "playwright"}),
                         )
                     for pin in pins:
                         await conn.execute(
                             f"""
                             INSERT INTO pinterest_pins
                                 (pin_id,username,board_id,board_url,title,description,image_url,
-                                 destination_url,pin_url,collected_at,metadata)
-                            VALUES ($1,$2,$3,$4,$5,$6,$7,NULL,$8,now(),$9::jsonb)
+                                 destination_url,pin_url,repin_count,comment_count,collected_at,metadata)
+                            VALUES ($1,$2,$3,$4,$5,$6,$7,NULL,$8,$9,$10,now(),$11::jsonb)
                             ON CONFLICT (pin_id) DO UPDATE SET
                                 username=CASE
                                     WHEN EXCLUDED.metadata->>'owner_verified'='true' THEN EXCLUDED.username
@@ -625,6 +758,8 @@ class PinterestCollector(ProfileOnlyCollector):
                                 title=COALESCE(EXCLUDED.title,pinterest_pins.title),
                                 description=COALESCE(EXCLUDED.description,pinterest_pins.description),
                                 image_url=COALESCE(EXCLUDED.image_url,pinterest_pins.image_url),
+                                repin_count=COALESCE(EXCLUDED.repin_count,pinterest_pins.repin_count),
+                                comment_count=COALESCE(EXCLUDED.comment_count,pinterest_pins.comment_count),
                                 pin_url=EXCLUDED.pin_url,collected_at=now(),
                                 metadata=COALESCE(pinterest_pins.metadata,'{{}}'::jsonb)||EXCLUDED.metadata||
                                     jsonb_build_object('owner_verified',
@@ -633,6 +768,7 @@ class PinterestCollector(ProfileOnlyCollector):
                             """,
                             pin["id"], pin["username"], pin["board_id"], pin["board_url"],
                             pin["title"], pin["description"], pin["image_url"], pin["url"],
+                            pin["repin_count"], pin["comment_count"],
                             json.dumps({
                                 "collector": "playwright",
                                 "owner_verified": pin["owner_verified"],
@@ -644,10 +780,21 @@ class PinterestCollector(ProfileOnlyCollector):
             summary["boards"] = len(boards)
             summary["pins"] = len(pins)
         except Exception as exc:
-            retry_hours = 24 if str(exc) == "empty_public_page" else 2
+            attempts = int(target.get("attempts") or 1)
+            exponential_retry = min(24 * 60 * 60, 15 * 60 * (2 ** min(max(attempts - 1, 0), 6)))
+            retry_after_seconds = getattr(exc, "retry_after_seconds", None)
+            if isinstance(exc, _PinterestPublicHttpError) and exc.status_code == 429:
+                retry_after_seconds = max(exponential_retry, int(retry_after_seconds or 0))
+            elif isinstance(exc, _PinterestPublicHttpError) and exc.status_code == 403:
+                retry_after_seconds = max(24 * 60 * 60, int(retry_after_seconds or 0))
+            elif str(exc) == "empty_public_page":
+                retry_after_seconds = 24 * 60 * 60
+            elif retry_after_seconds is None:
+                retry_after_seconds = max(exponential_retry, 2 * 60 * 60)
             await finish_native_target(
                 self.pool, self.SOURCE_NAME, int(target["id"]), success=False,
-                error=type(exc).__name__.lower(), retry_after_hours=retry_hours,
+                error=str(exc) if str(exc).startswith("public_http_") else type(exc).__name__.lower(),
+                retry_after_seconds=retry_after_seconds,
             )
             logger.warning("Pinterest native scrape failed: %s", type(exc).__name__)
             summary["error"] = type(exc).__name__

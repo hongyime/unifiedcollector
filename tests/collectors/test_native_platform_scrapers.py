@@ -1,20 +1,29 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 
 import pytest
 
 from src.collectors.pinterest import (
     PinterestCollector,
+    _PinterestPublicHttpError,
     _contains_private_marker,
     _fetch_pinterest_html,
     _load_pinterest_storage_state,
     _pinterest_page_kind,
+    _retry_after_seconds as _pinterest_retry_after_seconds,
     _verified_board_link_conflict,
 )
 from src.collectors import pinterest as pinterest_mod
 from src.collectors import snapchat as snapchat_mod
-from src.collectors.snapchat import _allowed_public_page, _extract_public_snap_items
+from src.collectors.native_platform_scrape import _SEED_QUERIES, retarget_snapchat_profile_targets
+from src.collectors.snapchat import (
+    _PublicPageHttpError,
+    _allowed_public_page,
+    _extract_public_snap_items,
+    _retry_after_seconds,
+)
 
 
 def test_pinterest_cookie_snapshot_filters_to_pinterest_domain(tmp_path):
@@ -36,7 +45,8 @@ def test_pinterest_public_page_parser_extracts_board_and_pin_cards():
         {
             "title": "Travel",
             "primary_heading": "Travel",
-            "board_header_text": "Travel board 42 pins",
+            "board_header_text": "Travel board 42 pins · 3 followers",
+            "description": "Trips and routes",
             "body_text": "Travel board 42 pins",
             "anchors": [
                 {
@@ -44,6 +54,7 @@ def test_pinterest_public_page_parser_extracts_board_and_pin_cards():
                     "text": "Mountain route",
                     "image_alt": "Mountain route photo",
                     "image_url": "https://i.pinimg.com/image.jpg",
+                    "card_text": "2 repins 4 comments",
                 },
                 {
                     "href": "https://www.pinterest.com/alice/travel/",
@@ -56,9 +67,101 @@ def test_pinterest_public_page_parser_extracts_board_and_pin_cards():
     )
 
     assert boards[0]["pin_count"] == 42
+    assert boards[0]["description"] == "Trips and routes"
+    assert boards[0]["follower_count"] == 3
     assert {pin["id"] for pin in pins} == {"12345", "67890"}
+    assert next(pin for pin in pins if pin["id"] == "12345")["repin_count"] == 2
+    assert next(pin for pin in pins if pin["id"] == "12345")["comment_count"] == 4
     assert all(pin["username"] is None for pin in pins)
     assert all(pin["owner_verified"] is False for pin in pins)
+
+
+def test_pinterest_parser_extracts_pin_cards_without_anchor_links():
+    _boards, pins = PinterestCollector._parse_native_page(
+        "https://www.pinterest.com/alice/travel/",
+        {
+            "primary_heading": "Travel",
+            "board_header_text": "Travel board 42 pins",
+            "body_text": "Travel board 42 pins",
+            "pin_cards": [
+                {
+                    "href": "https://www.pinterest.com/pin/123456789/",
+                    "pin_id": "123456789",
+                    "membership_links": ["https://www.pinterest.com/alice/travel/"],
+                    "image_alt": "Mountain route photo",
+                    "image_url": "https://i.pinimg.com/image.jpg",
+                },
+            ],
+        },
+    )
+
+    assert len(pins) == 1
+    assert pins[0]["id"] == "123456789"
+    assert pins[0]["owner_verified"] is True
+    assert pins[0]["board_id"] == "alice/travel"
+
+
+@pytest.mark.asyncio
+async def test_pinterest_profile_probe_extracts_following_and_monthly_views(monkeypatch):
+    response = type("Response", (), {
+        "status_code": 200,
+        "text": (
+            '{"full_name":"Alice","follower_count":10,"pin_count":20,"board_count":3}'
+            "<main>1.2M monthly views · 35 following</main>"
+        ),
+    })()
+    class Client:
+        async def get(self, *_args, **_kwargs):
+            return response
+
+    client = Client()
+
+    class AsyncClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return client
+
+        async def __aexit__(self, *_args):
+            return None
+
+    monkeypatch.setattr(pinterest_mod.httpx, "AsyncClient", AsyncClient)
+    result = await PinterestCollector().probe_profile("alice")
+
+    assert result.exists is True
+    assert result.fields["following_count"] == 35
+    assert result.fields["monthly_views"] == 1_200_000
+
+
+@pytest.mark.asyncio
+async def test_pinterest_profile_probe_parses_compact_serialized_counts(monkeypatch):
+    response = type("Response", (), {
+        "status_code": 200,
+        "text": (
+            '{"full_name":"Alice","following_count":"1.4K",'
+            '"monthly_views":"2.3B"}'
+        ),
+    })()
+    class Client:
+        async def get(self, *_args, **_kwargs):
+            return response
+
+    class AsyncClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return Client()
+
+        async def __aexit__(self, *_args):
+            return None
+
+    monkeypatch.setattr(pinterest_mod.httpx, "AsyncClient", AsyncClient)
+    result = await PinterestCollector().probe_profile("alice")
+
+    assert result.fields["following_count"] == 1_400
+    assert result.fields["monthly_views"] == 2_300_000_000
 
 
 def test_pinterest_pin_ownership_requires_exact_visible_membership():
@@ -146,6 +249,51 @@ def test_pinterest_target_validation_rejects_nonpublic_routes():
     assert _pinterest_page_kind("https://evil.example/alice/") is None
 
 
+def test_pinterest_retry_after_supports_delta_and_http_date():
+    now = datetime(2026, 10, 14, 17, 0, tzinfo=timezone.utc)
+    assert _pinterest_retry_after_seconds("75", now=now) == 75
+    assert _pinterest_retry_after_seconds("Wed, 14 Oct 2026 17:02:00 GMT", now=now) == 120
+    assert _pinterest_retry_after_seconds("invalid", now=now) is None
+
+
+@pytest.mark.asyncio
+async def test_pinterest_http_error_preserves_retry_after_without_response_body(monkeypatch):
+    class Response:
+        status_code = 429
+        headers = {"Retry-After": "900"}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        def stream(self, *_args, **_kwargs):
+            return Response()
+
+    monkeypatch.setattr(pinterest_mod.httpx, "AsyncClient", Client)
+
+    with pytest.raises(_PinterestPublicHttpError) as exc_info:
+        await _fetch_pinterest_html(
+            "https://www.pinterest.com/alice/",
+            ("profile", "alice", None),
+            storage_state=None,
+        )
+
+    assert exc_info.value.status_code == 429
+    assert exc_info.value.retry_after_seconds == 900
+
+
 def test_pinterest_authenticated_content_is_limited_to_anonymous_public_ids():
     public_boards = [{"id": "alice/travel", "name": "Travel", "pin_count": 42}]
     public_pins = [{"id": "123"}]
@@ -229,9 +377,51 @@ def test_snapchat_allowlist_limits_requests_to_public_pages():
     assert _allowed_public_page("https://www.snapchat.com/discover")
     assert _allowed_public_page("https://www.snapchat.com/spotlight")
     assert _allowed_public_page("https://www.snapchat.com/@alice")
+    assert _allowed_public_page("https://story.snapchat.com/@alice")
     assert not _allowed_public_page("https://www.snapchat.com/chat/alice")
     assert not _allowed_public_page("http://www.snapchat.com/discover")
     assert not _allowed_public_page("https://evil.example/discover")
+
+
+def test_snapchat_native_seeds_global_public_discover_and_spotlight_pages():
+    queries = "\n".join(_SEED_QUERIES["snapchat"])
+
+    assert "https://www.snapchat.com/discover" in queries
+    assert "https://www.snapchat.com/spotlight" in queries
+    assert "'snapchat_discover', 15" in queries
+    assert "'snapchat_spotlight', 15" in queries
+
+
+def test_snapchat_retry_after_supports_delta_and_http_date():
+    now = datetime(2026, 10, 14, 17, 0, tzinfo=timezone.utc)
+    assert _retry_after_seconds("75", now=now) == 75
+    assert _retry_after_seconds("Wed, 14 Oct 2026 17:02:00 GMT", now=now) == 120
+    assert _retry_after_seconds("invalid", now=now) is None
+    assert _retry_after_seconds("inf", now=now) is None
+
+
+@pytest.mark.asyncio
+async def test_snapchat_queue_retarget_preserves_existing_schedule():
+    class Conn:
+        query = ""
+
+        async def execute(self, query, *_args):
+            self.query = query
+
+    conn = Conn()
+    await retarget_snapchat_profile_targets(conn)
+
+    assert "https://story.snapchat.com/@" in conn.query
+    assert "q.status <> 'claimed' OR q.claim_expires_at <= now()" in conn.query
+    assert "q.claim_expires_at <= now()) THEN 0" in conn.query
+    assert "next_visit_at" not in conn.query
+
+
+def test_snapchat_public_http_error_keeps_only_status_and_retry_hint():
+    error = _PublicPageHttpError(429, 900)
+    assert str(error) == "public_http_429"
+    assert error.status_code == 429
+    assert error.retry_after_seconds == 900
 
 
 def test_snapchat_rejects_unsafe_redirect_before_second_request(monkeypatch):
@@ -290,6 +480,93 @@ def test_snapchat_public_parser_reads_highlight_and_resolves_public_profile():
     assert items[0]["username"] == "alice"
     assert items[0]["media_url"] == "https://cf-st.sc-cdn.net/story.mp4"
     assert items[0]["metadata"]["content_type"] == "highlight"
+
+
+def test_snapchat_story_page_parser_emits_each_public_content_type():
+    html = '''<script id="__NEXT_DATA__" type="application/json">{
+      "props":{"pageProps":{
+        "userProfile":{"publicProfileInfo":{"username":"alice"}},
+        "story":{"storyId":{"value":"active-story"},"snapList":[
+          {"snapId":{"value":"story-snap"},"timestampInSec":{"value":1791997200},
+           "snapMediaType":{"value":1},"snapUrls":{"mediaUrl":"https://cf-st.sc-cdn.net/story.mp4"}}
+        ]},
+        "curatedHighlights":[{"highlightId":{"value":"highlight-1"},
+          "storyTitle":{"value":"Trip"},"snapList":[
+            {"snapId":{"value":"highlight-snap"},"timestampInSec":{"value":1791997200},
+             "snapUrls":{"mediaUrl":"https://cf-st.sc-cdn.net/highlight.mp4"}}
+          ]}],
+        "spotlightHighlights":[{"spotlightId":{"value":"spotlight-1"},
+          "snapList":[{"snapId":{"value":"spotlight-snap"},
+            "snapUrls":{"mediaUrl":"https://cf-st.sc-cdn.net/spotlight.mp4"}}]}
+        ]
+      }}
+    }</script>'''
+
+    items = _extract_public_snap_items(
+        html, "https://story.snapchat.com/@alice", "alice",
+    )
+
+    assert len(items) == 3
+    assert {item["metadata"]["content_type"] for item in items} == {
+        "public_story", "highlight", "spotlight",
+    }
+    assert {item["username"] for item in items} == {"alice"}
+    assert {item["media_url"] for item in items} == {
+        "https://cf-st.sc-cdn.net/story.mp4",
+        "https://cf-st.sc-cdn.net/highlight.mp4",
+        "https://cf-st.sc-cdn.net/spotlight.mp4",
+    }
+
+
+def test_snapchat_item_cap_gives_each_content_type_a_bounded_share():
+    story_snaps = [
+        {
+            "snapId": {"value": f"story-{index}"},
+            "snapUrls": {"mediaUrl": f"https://cf-st.sc-cdn.net/story-{index}.mp4"},
+        }
+        for index in range(25)
+    ]
+    payload = {"props": {"pageProps": {
+        "story": {"snapList": story_snaps},
+        "curatedHighlights": [{
+            "highlightId": {"value": "highlight-1"},
+            "snapList": [{
+                "snapId": {"value": "highlight-snap"},
+                "snapUrls": {"mediaUrl": "https://cf-st.sc-cdn.net/highlight.mp4"},
+            }],
+        }],
+        "spotlightHighlights": [{
+            "spotlightId": {"value": "spotlight-1"},
+            "snapList": [{
+                "snapId": {"value": "spotlight-snap"},
+                "snapUrls": {"mediaUrl": "https://cf-st.sc-cdn.net/spotlight.mp4"},
+            }],
+        }],
+    }}}
+    html = (
+        '<script id="__NEXT_DATA__" type="application/json">'
+        + json.dumps(payload)
+        + "</script>"
+    )
+
+    items = _extract_public_snap_items(
+        html, "https://story.snapchat.com/@alice", "alice",
+    )
+
+    types = [item["metadata"]["content_type"] for item in items]
+    assert len(items) == 25
+    assert types.count("public_story") == 23
+    assert types.count("highlight") == 1
+    assert types.count("spotlight") == 1
+
+
+@pytest.mark.parametrize("payload", ["[]", "null", "{\"props\":null}"])
+def test_snapchat_story_page_parser_ignores_unexpected_next_data_shapes(payload):
+    html = f'<script id="__NEXT_DATA__" type="application/json">{payload}</script>'
+
+    assert _extract_public_snap_items(
+        html, "https://story.snapchat.com/@alice", "alice",
+    ) == []
 
 
 @pytest.mark.parametrize(
