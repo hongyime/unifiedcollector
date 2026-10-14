@@ -1,10 +1,13 @@
 # Agent State
-Current task: Increase Beeper chat sync timeout to 300 seconds and restart only `collector_beeper`.
-Status: Timeout configured at 300 seconds; the requested `collector_beeper` restart succeeded and the change is committed on `main`.
+Current task: Complete the four-item UnifiedCollector fix list in order; item 1 is verified and items 2–4 remain.
+Status: YouTube media download is verified from live collector logs. Continue with rate-limit audit; do not touch Beeper or spider files.
 Progress:
-- Changed `BEEPER_CHAT_SYNC_TIMEOUT_SECONDS` from 180 to 300 in `docker/docker-compose.yml`.
-- Ran `docker compose -f docker/docker-compose.yml restart collector_beeper`; `unifiedcollector_collector_beeper` restarted successfully.
-- Compose restart does not recreate the container or apply changed environment values; the 300-second value takes effect when the container is recreated.
+- Item 1 complete: deployed fix `47c4e719` is on `origin/main`. In the last 30 minutes, collector logs showed 119 successful yt-dlp runs and 119 ingests with stored media; zero rate-limit markers appeared in that window. No container restart or probe request was needed.
+- Item 2 pending: audit `rate_limit_events`, all collector logs and pacing; then verify a 15-minute quiet window.
+- Item 3 pending: classify all 75 stale and 35 empty tables from `/tmp/table-audit-20261014.md`, fixing actual producer bugs one at a time. `docs/spider-foryou-plan.md` says spider phases 2–6 are done; do not redo them.
+- Item 4 pending: 15-minute soak and `/tmp/grind-summary-20261014.md`.
+
+Previous task: Beeper sync timeout was changed to 300 seconds and committed as `efd2a666`; the current run must not modify Beeper.
 
 Previous task: YouTube bot-check resolved. Cross-project survey (musicstream, healthkaki-pov, unifiedcollector) identified root cause as cookie jar writeback permissions: yt-dlp calls save_cookies() at exit, raising PermissionError on host-owned read-only cookie mount in the container (uid 1001), misclassified as a restricted/bot failure, compounded by negative-cache memoization in _usable_cookie_file(). Added ephemeral writable cookie snapshotting (_create_writable_cookie_snapshot) into operation tempdirs across video, thumbnail, transcript, comment, and playlist calls. Verified with public probe video jNQXAC9IVRw (RC 0, metadata and 11 formats extracted, zero bot check). No media was bulk-downloaded; never include cookie values.
 
