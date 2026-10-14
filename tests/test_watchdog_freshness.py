@@ -621,9 +621,9 @@ async def test_container_sweep_does_not_restart_removed_compose_services(monkeyp
     async def fake_list():
         return [
             {
-                "Names": ["/unifiedcollector_collector_light"],
+                "Names": ["/unifiedcollector_collector_retired"],
                 "State": "exited",
-                "Labels": {"com.docker.compose.service": "collector_light"},
+                "Labels": {"com.docker.compose.service": "collector_retired"},
             },
             {
                 "Names": ["/unifiedcollector_collector_exposure"],
