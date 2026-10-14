@@ -611,6 +611,34 @@ def test_threads_revisit_requires_canonical_page_url():
     ) == "https://www.tiktok.com/@alice/video/123456789"
 
 
+def test_tiktok_revisit_queue_requires_canonical_page_url():
+    _, no_permalink = ig_ingest._prepare_tiktok_browser_candidate(
+        "alice",
+        {
+            "content_id": "opaque_video_hash",
+            "content_type": "video",
+            "url": "https://v16m.tiktokcdn.com/video.mp4",
+        },
+        ingest_mode="browser_upload",
+        browser_result={"reason": "http_403"},
+    )
+    assert no_permalink is None
+
+    _, with_permalink = ig_ingest._prepare_tiktok_browser_candidate(
+        "alice",
+        {
+            "content_id": "opaque_video_hash",
+            "content_type": "video",
+            "url": "https://v16m.tiktokcdn.com/video.mp4",
+            "meta": {"page_url": "https://www.tiktok.com/@alice/video/7012345678901234567"},
+        },
+        ingest_mode="browser_upload",
+        browser_result={"reason": "http_403"},
+    )
+    assert with_permalink is not None
+    assert with_permalink[2] == "https://www.tiktok.com/@alice/video/7012345678901234567"
+
+
 def test_browser_revisit_target_serializes_per_platform_lease(monkeypatch):
     pool = _FakePool()
     pool.conn.fetchrow_result = None

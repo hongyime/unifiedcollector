@@ -1121,7 +1121,7 @@ def _prepare_tiktok_browser_candidate(
         json.dumps(metadata, default=str),
     )
     revisit_args = None
-    if needs_revisit:
+    if needs_revisit and post_url:
         revisit_args = (
             content_id,
             username,
