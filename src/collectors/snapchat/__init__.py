@@ -29,6 +29,7 @@ from src.collectors.native_platform_scrape import (
     claim_native_target,
     finish_native_target,
     seed_native_targets,
+    snapchat_storage_target as _snapchat_storage_target,
 )
 
 logger = logging.getLogger(__name__)
@@ -369,21 +370,23 @@ class SnapchatCollector(ProfileOnlyCollector):
             async with self.pool.acquire() as conn:
                 async with conn.transaction():
                     for item in items:
+                        content_type = str(item.get("metadata", {}).get("content_type") or "public_story")
+                        table_name, id_column = _snapchat_storage_target(content_type)
                         await conn.execute(
-                            """
-                            INSERT INTO snapchat_stories
-                                (story_id,username,title,story_url,media_url,thumbnail_url,
+                            f"""
+                            INSERT INTO {table_name}
+                                ({id_column},username,title,story_url,media_url,thumbnail_url,
                                  posted_at,expires_at,collected_at,metadata)
                             VALUES ($1,$2,$3,$4,$5,$6,$7::timestamptz,$8::timestamptz,now(),$9::jsonb)
-                            ON CONFLICT (story_id) DO UPDATE SET
-                                username=COALESCE(EXCLUDED.username,snapchat_stories.username),
-                                title=COALESCE(EXCLUDED.title,snapchat_stories.title),
+                            ON CONFLICT ({id_column}) DO UPDATE SET
+                                username=COALESCE(EXCLUDED.username,{table_name}.username),
+                                title=COALESCE(EXCLUDED.title,{table_name}.title),
                                 story_url=EXCLUDED.story_url,
-                                media_url=COALESCE(EXCLUDED.media_url,snapchat_stories.media_url),
-                                thumbnail_url=COALESCE(EXCLUDED.thumbnail_url,snapchat_stories.thumbnail_url),
-                                posted_at=COALESCE(EXCLUDED.posted_at,snapchat_stories.posted_at),
-                                expires_at=COALESCE(EXCLUDED.expires_at,snapchat_stories.expires_at),
-                                collected_at=now(),metadata=snapchat_stories.metadata||EXCLUDED.metadata
+                                media_url=COALESCE(EXCLUDED.media_url,{table_name}.media_url),
+                                thumbnail_url=COALESCE(EXCLUDED.thumbnail_url,{table_name}.thumbnail_url),
+                                posted_at=COALESCE(EXCLUDED.posted_at,{table_name}.posted_at),
+                                expires_at=COALESCE(EXCLUDED.expires_at,{table_name}.expires_at),
+                                collected_at=now(),metadata={table_name}.metadata||EXCLUDED.metadata
                             """,
                             item["id"], item["username"], item["title"], item["url"],
                             item["media_url"], item["thumbnail_url"], item["posted_at"],

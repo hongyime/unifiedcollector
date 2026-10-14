@@ -14,6 +14,8 @@ from urllib.parse import urlparse
 
 from aiohttp import web
 
+from src.collectors.native_platform_scrape import snapchat_storage_target
+
 from .cors import _cors
 
 logger = logging.getLogger("social_ingest")
@@ -78,6 +80,23 @@ def _metadata(value: object) -> str:
     }
     encoded = json.dumps(safe, ensure_ascii=False, default=str)
     return encoded if len(encoded) <= 8000 else "{}"
+
+
+def _snapchat_upsert_statement(content_type: str) -> str:
+    table_name, id_column = snapchat_storage_target(content_type)
+    return f"""
+        INSERT INTO {table_name}
+            ({id_column},username,title,story_url,media_url,thumbnail_url,posted_at,expires_at,collected_at,metadata)
+        VALUES ($1,$2,$3,$4,$5,$6,$7::timestamptz,$8::timestamptz,now(),$9::jsonb)
+        ON CONFLICT ({id_column}) DO UPDATE SET
+            username=COALESCE(EXCLUDED.username,{table_name}.username),
+            title=COALESCE(EXCLUDED.title,{table_name}.title),story_url=EXCLUDED.story_url,
+            media_url=COALESCE(EXCLUDED.media_url,{table_name}.media_url),
+            thumbnail_url=COALESCE(EXCLUDED.thumbnail_url,{table_name}.thumbnail_url),
+            posted_at=COALESCE(EXCLUDED.posted_at,{table_name}.posted_at),
+            expires_at=COALESCE(EXCLUDED.expires_at,{table_name}.expires_at),
+            collected_at=now(),metadata={table_name}.metadata||EXCLUDED.metadata
+    """
 
 
 def _https_url(value: object, limit: int = 2048) -> str | None:
@@ -353,12 +372,26 @@ def _validated_item(platform: str, item: object) -> tuple[str, tuple] | None:
             board_id, username, _text(item.get("title"), 500), board_url,
             _integer(item.get("pin_count")), meta,
         )
-    if platform == "snapchat" and item_type == "story":
+    if platform == "snapchat" and item_type in {"story", "spotlight", "highlight", "public_story"}:
+        raw_metadata = item.get("metadata")
+        content_type = item_type if item_type != "story" else (
+            str(raw_metadata.get("content_type") or "public_story").strip().lower()
+            if isinstance(raw_metadata, dict) else "public_story"
+        )
+        try:
+            table_name, _id_column = snapchat_storage_target(content_type)
+        except ValueError:
+            return None
+        kind = {
+            "snapchat_stories": "story",
+            "snapchat_spotlights": "spotlight",
+            "snapchat_highlights": "highlight",
+        }[table_name]
         story_id = _text(item.get("id"), 200)
         story_url = _https_url(item.get("url"))
         if not story_id or not _ID_RE.fullmatch(story_id) or not story_url or not _platform_url_allowed(platform, story_url):
             return None
-        return "story", (
+        return kind, (
             story_id, username, _text(item.get("title"), 500), story_url,
             _https_url(item.get("media_url")), _https_url(item.get("thumbnail_url")),
             _timestamp(item.get("posted_at")), _timestamp(item.get("expires_at")), meta,
@@ -398,7 +431,7 @@ async def native_scrape_ingest(request: web.Request) -> web.Response:
     status = str(body.get("status") or "success").strip().lower()
     raw_items = body.get("items") if isinstance(body.get("items"), list) else []
     valid = [row for row in (_validated_item(platform, item) for item in raw_items[:_MAX_ITEMS[platform]]) if row]
-    accepted = {"pin": 0, "board": 0, "story": 0, "listing": 0, "host": 0}
+    accepted = {"pin": 0, "board": 0, "story": 0, "spotlight": 0, "highlight": 0, "listing": 0, "host": 0}
 
     statements = {
         "pin": """
@@ -425,19 +458,9 @@ async def native_scrape_ingest(request: web.Request) -> web.Response:
                 board_url=EXCLUDED.board_url,pin_count=COALESCE(EXCLUDED.pin_count,pinterest_boards.pin_count),
                 collected_at=now(),metadata=pinterest_boards.metadata||EXCLUDED.metadata
         """,
-        "story": """
-            INSERT INTO snapchat_stories
-                (story_id,username,title,story_url,media_url,thumbnail_url,posted_at,expires_at,collected_at,metadata)
-            VALUES ($1,$2,$3,$4,$5,$6,$7::timestamptz,$8::timestamptz,now(),$9::jsonb)
-            ON CONFLICT (story_id) DO UPDATE SET
-                username=COALESCE(EXCLUDED.username,snapchat_stories.username),
-                title=COALESCE(EXCLUDED.title,snapchat_stories.title),story_url=EXCLUDED.story_url,
-                media_url=COALESCE(EXCLUDED.media_url,snapchat_stories.media_url),
-                thumbnail_url=COALESCE(EXCLUDED.thumbnail_url,snapchat_stories.thumbnail_url),
-                posted_at=COALESCE(EXCLUDED.posted_at,snapchat_stories.posted_at),
-                expires_at=COALESCE(EXCLUDED.expires_at,snapchat_stories.expires_at),
-                collected_at=now(),metadata=snapchat_stories.metadata||EXCLUDED.metadata
-        """,
+        "story": _snapchat_upsert_statement("public_story"),
+        "spotlight": _snapchat_upsert_statement("spotlight"),
+        "highlight": _snapchat_upsert_statement("highlight"),
         "listing": """
             INSERT INTO airbnb_listings
                 (listing_id,host_id,host_name,host_profile_url,title,listing_url,location,image_url,

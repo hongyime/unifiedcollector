@@ -290,3 +290,20 @@ def test_snapchat_public_parser_reads_highlight_and_resolves_public_profile():
     assert items[0]["username"] == "alice"
     assert items[0]["media_url"] == "https://cf-st.sc-cdn.net/story.mp4"
     assert items[0]["metadata"]["content_type"] == "highlight"
+
+
+@pytest.mark.parametrize(
+    ("content_type", "expected"),
+    [
+        ("public_story", ("snapchat_stories", "story_id")),
+        ("spotlight", ("snapchat_spotlights", "spotlight_id")),
+        ("highlight", ("snapchat_highlights", "highlight_id")),
+    ],
+)
+def test_snapchat_public_content_uses_its_own_table(content_type, expected):
+    assert snapchat_mod._snapchat_storage_target(content_type) == expected
+
+
+def test_snapchat_storage_rejects_unrecognized_content_types():
+    with pytest.raises(ValueError, match="unsupported_snapchat_content_type"):
+        snapchat_mod._snapchat_storage_target("private_story")

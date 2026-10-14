@@ -6,6 +6,19 @@ from typing import Any
 _PLATFORMS = frozenset({"pinterest", "snapchat", "airbnb"})
 _MAX_ATTEMPTS = 8
 _AIRBNB_LISTING_QUEUE_CAP = 10
+_SNAPCHAT_CONTENT_TABLES = {
+    "public_story": ("snapchat_stories", "story_id"),
+    "spotlight": ("snapchat_spotlights", "spotlight_id"),
+    "highlight": ("snapchat_highlights", "highlight_id"),
+}
+
+
+def snapchat_storage_target(content_type: str) -> tuple[str, str]:
+    """Return the fixed table/key pair for a public Snapchat content type."""
+    try:
+        return _SNAPCHAT_CONTENT_TABLES[content_type.strip().lower()]
+    except (AttributeError, KeyError) as exc:
+        raise ValueError("unsupported_snapchat_content_type") from exc
 
 
 def _remaining_queue_capacity(active_count: int, cap: int = _AIRBNB_LISTING_QUEUE_CAP) -> int:

@@ -1,3 +1,5 @@
+import pytest
+
 from src.bridges.ig_ingest.native_scrape import (
     _platform_url_allowed,
     _same_target,
@@ -65,6 +67,17 @@ def test_native_item_validation_builds_platform_rows():
     assert story is not None and story[0] == "story"
     assert listing is not None and listing[0] == "listing"
     assert listing[1][11] == 12.0
+
+
+@pytest.mark.parametrize("content_type", ["spotlight", "highlight"])
+def test_native_snapchat_item_routes_content_types_to_separate_tables(content_type):
+    item = _validated_item("snapchat", {
+        "type": "story", "id": "snap_1", "url": "https://www.snapchat.com/spotlight",
+        "metadata": {"content_type": content_type},
+    })
+
+    assert item is not None
+    assert item[0] == content_type
 
 
 def test_native_item_validation_rejects_untrusted_urls_and_ids():
