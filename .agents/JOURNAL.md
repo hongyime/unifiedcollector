@@ -314,3 +314,5 @@ Machine-specific values in this document use privacy placeholders.
 2026-10-14: Follow-up `14686dcd` closes a bare-handle validation gap in the Bluesky feeder. PostgreSQL verified bare handle rejection plus acceptance of full dotted handles and DIDs; scheduler restarted healthy.
 
 2026-10-14: Closed table-audit triage for all 75 stale and 35 empty tables. Fixed Airbnb numeric-ID routing/fan-out (`ab6c9d8c`), GitHub README repository linkage (`adbdf74d`; live table has one row), and Bluesky cross-platform handle fan-out/validation (`8a3f9d23`, `14686dcd`). Remaining tables are expected event-driven, control/cache/immutable, gated/unsupported, input-dependent, legacy, or analyzer-owned; no spider files changed. Bounded mocked, rollback-only SQL, and PostgreSQL regex probes passed; pytest is unavailable. Item 4 soak is now in progress.
+
+2026-10-14: Created `.agents/handoffs/2026-10-14-032921-unifiedcollector-fixlist.md` before the final production soak, recording the exact baseline, completed fixes, and resume checks without credentials.
