@@ -1005,6 +1005,126 @@ async def test_collect_chat_members_handles_flood_wait(monkeypatch):
     coll._handle_flood_wait.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+async def test_resolve_linked_discussion_reads_full_channel_response(monkeypatch):
+    coll = _make_collector(monkeypatch)
+    coll.wait_rate_limit = AsyncMock()
+    linked = SimpleNamespace(id=902, title="Discussion")
+    worker = SimpleNamespace(client=AsyncMock())
+    worker.client.return_value = SimpleNamespace(
+        full_chat=SimpleNamespace(linked_chat_id=902),
+        chats=[linked],
+    )
+    worker.client.get_entity = AsyncMock()
+    channel = SimpleNamespace(id=901)
+
+    linked_id, entity = await coll._resolve_linked_discussion_entity(
+        worker, channel, "901"
+    )
+
+    assert linked_id == 902
+    assert entity is linked
+    assert type(worker.client.await_args.args[0]).__name__ == "GetFullChannelRequest"
+    worker.client.get_entity.assert_not_awaited()
+    coll.wait_rate_limit.assert_awaited_once_with("telegram.org")
+
+
+@pytest.mark.asyncio
+async def test_resolve_linked_discussion_caches_channels_without_a_link(monkeypatch):
+    coll = _make_collector(monkeypatch)
+    coll.wait_rate_limit = AsyncMock()
+    worker = SimpleNamespace(client=AsyncMock())
+    worker.client.return_value = SimpleNamespace(
+        full_chat=SimpleNamespace(linked_chat_id=None),
+        chats=[],
+    )
+    channel = SimpleNamespace(id=901)
+
+    first = await coll._resolve_linked_discussion_entity(worker, channel, "901")
+    second = await coll._resolve_linked_discussion_entity(worker, channel, "901")
+
+    assert first == (None, None)
+    assert second == (None, None)
+    assert worker.client.await_count == 1
+    coll.wait_rate_limit.assert_awaited_once_with("telegram.org")
+
+
+@pytest.mark.asyncio
+async def test_discussion_join_budget_refusal_does_not_record_visit(monkeypatch):
+    coll = _make_collector(monkeypatch)
+    coll.pool.conn.fetchval = AsyncMock(return_value=None)
+    coll._resolve_linked_discussion_entity = AsyncMock(
+        return_value=(902, SimpleNamespace(id=902, title="Discussion"))
+    )
+    coll._upsert_chat = AsyncMock()
+    coll._consume_join_budget = AsyncMock(return_value=False)
+    worker = _make_worker(coll)
+    worker.client.get_me = AsyncMock(return_value=SimpleNamespace(id=1))
+    worker.client.get_permissions = AsyncMock(return_value=SimpleNamespace(left=True))
+
+    await coll._spider_discussion_group(worker, SimpleNamespace(id=901), "901")
+
+    assert not any(
+        "telegram_discussion_visits" in call.args[0]
+        for call in coll.pool.conn.execute.await_args_list
+    )
+
+
+def test_message_membership_event_specs_normalize_join_and_leave(monkeypatch):
+    coll = _make_collector(monkeypatch)
+    add_action = type("MessageActionChatAddUser", (), {"users": [101, 102]})()
+    delete_action = type("MessageActionChatDeleteUser", (), {"user_id": 103})()
+    link_action = type("MessageActionChatJoinedByLink", (), {})()
+
+    assert coll._message_membership_event_specs(add_action, 900) == [
+        ("join", 101, 900),
+        ("join", 102, 900),
+    ]
+    assert coll._message_membership_event_specs(delete_action, 901) == [
+        ("leave", 103, 901),
+    ]
+    assert coll._message_membership_event_specs(link_action, 104) == [
+        ("join", 104, None),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_message_membership_signals_write_deduplicated_event_rows(monkeypatch):
+    import uuid
+
+    coll = _make_collector(monkeypatch)
+    coll._ensure_telegram_user_stub = AsyncMock(
+        side_effect=lambda _conn, user_id: uuid.uuid5(uuid.NAMESPACE_OID, str(user_id))
+    )
+    coll._upsert_chat_member_observation = AsyncMock()
+    action = type("MessageActionChatAddUser", (), {"users": [101, 102]})()
+    message = SimpleNamespace(action=action, sender_id=900, date=datetime.now(timezone.utc))
+    message_uuid = uuid.uuid4()
+    chat_uuid = uuid.uuid4()
+    sender_uuid = uuid.uuid5(uuid.NAMESPACE_OID, "900")
+
+    await coll._record_message_membership_signals(
+        coll.pool.conn,
+        message,
+        chat_uuid,
+        sender_uuid,
+        message_uuid=message_uuid,
+        platform_chat_id="77",
+        platform_message_id="77:55",
+    )
+
+    event_calls = [
+        call for call in coll.pool.conn.execute.await_args_list
+        if "telegram_join_leave_events" in call.args[0]
+    ]
+    assert len(event_calls) == 2
+    assert [call.args[7] for call in event_calls] == ["join", "join"]
+    assert [call.args[8] for call in event_calls] == [
+        "MessageActionChatAddUser",
+        "MessageActionChatAddUser",
+    ]
+
+
 # ── collect_user_profile (UserChangeTracker hook safety) ──────────────────
 
 

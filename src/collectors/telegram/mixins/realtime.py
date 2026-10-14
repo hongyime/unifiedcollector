@@ -727,7 +727,13 @@ class RealtimeMixin:
             # hot realtime path; helper swallows all exceptions internally).
             await self._extract_message_event(message, chat_uuid, platform_msg_id, conn=conn)
             await self._record_message_membership_signals(
-                conn, message, chat_uuid, sender_uuid
+                conn,
+                message,
+                chat_uuid,
+                sender_uuid,
+                message_uuid=message_uuid,
+                platform_chat_id=str(chat_id),
+                platform_message_id=platform_msg_id,
             )
             await self._record_message_mentions(
                 conn,

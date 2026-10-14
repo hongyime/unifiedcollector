@@ -160,6 +160,7 @@ class TelegramCollector(
         self._bot_pool = BotPool()
         self._hub_notifier = HubNotifier()
         self._join_timestamps: deque = deque()
+        self._discussion_link_cache: dict[tuple[int, str], tuple[float, int | None, object | None]] = {}
         self._max_joins_per_hour = int(os.getenv("TELEGRAM_MAX_JOINS_PER_HOUR", "5"))
         self._join_min_delay = int(os.getenv("TELEGRAM_JOIN_MIN_DELAY", "30"))
         self._admin_log_enabled = (
@@ -269,11 +270,11 @@ class TelegramCollector(
         # Discussion-group dwell range — random jitter to look human (Q3 always-leave).
         self._discussion_dwell_min = int(os.getenv("TELEGRAM_DISCUSSION_DWELL_MIN", "60"))
         self._discussion_dwell_max = int(os.getenv("TELEGRAM_DISCUSSION_DWELL_MAX", "180"))
-        raw_discussion_limit = os.getenv("TELEGRAM_DISCUSSION_MESSAGE_LIMIT", "2000").strip()
+        raw_discussion_limit = os.getenv("TELEGRAM_DISCUSSION_MESSAGE_LIMIT", "200").strip()
         try:
             parsed_discussion_limit = int(raw_discussion_limit)
         except ValueError:
-            parsed_discussion_limit = 2000
+            parsed_discussion_limit = 200
         self._discussion_message_limit: int | None = (
             None if parsed_discussion_limit <= 0 else parsed_discussion_limit
         )
@@ -1642,6 +1643,73 @@ class TelegramCollector(
         logger.info("[_collect_chat] completed target=%s, calling mark_target_collected", target)
         await self.mark_target_collected(target)
 
+    async def _resolve_linked_discussion_entity(
+        self, worker: "TelegramWorker", channel_entity, channel_platform_id: str
+    ):
+        """Fetch the linked discussion peer from Telethon's full-channel response."""
+        from telethon.tl.functions.channels import GetFullChannelRequest
+
+        client = worker.client
+        cache_key = (int(getattr(worker, "worker_id", -1)), str(channel_platform_id))
+        cached = self._discussion_link_cache.get(cache_key)
+        if cached and time.monotonic() - cached[0] < 24 * 60 * 60:
+            linked_chat_id, discussion_entity = cached[1], cached[2]
+            if not linked_chat_id or discussion_entity is not None:
+                return linked_chat_id, discussion_entity
+        else:
+            cached = None
+            linked_chat_id = getattr(channel_entity, "linked_chat_id", None)
+        related_chats = []
+        if not linked_chat_id:
+            try:
+                await self.wait_rate_limit("telegram.org")
+                full = await client(GetFullChannelRequest(channel=channel_entity))
+                full_channel = getattr(full, "full_chat", None)
+                linked_chat_id = getattr(full_channel, "linked_chat_id", None)
+                related_chats = getattr(full, "chats", None) or []
+            except Exception as exc:
+                if _is_flood_wait(exc):
+                    await self._handle_flood_wait(worker, exc)
+                else:
+                    logger.debug(
+                        "Cannot load full channel metadata for discussion lookup channel=%s: %s",
+                        channel_platform_id,
+                        type(exc).__name__,
+                    )
+                return None, None
+        if not linked_chat_id:
+            self._discussion_link_cache[cache_key] = (time.monotonic(), None, None)
+            return None, None
+
+        discussion_platform_id = str(linked_chat_id)
+        discussion_entity = cached[2] if cached and cached[1] else next(
+            (
+                entity for entity in related_chats
+                if str(getattr(entity, "id", "")) == discussion_platform_id
+            ),
+            None,
+        )
+        if discussion_entity is None:
+            try:
+                await self.wait_rate_limit("telegram.org")
+                discussion_entity = await client.get_entity(int(linked_chat_id))
+            except Exception as exc:
+                if _is_flood_wait(exc):
+                    await self._handle_flood_wait(worker, exc)
+                else:
+                    logger.debug(
+                        "Cannot resolve discussion group %s: %s",
+                        linked_chat_id,
+                        type(exc).__name__,
+                    )
+                return None, None
+        self._discussion_link_cache[cache_key] = (
+            time.monotonic(),
+            int(linked_chat_id),
+            discussion_entity,
+        )
+        return linked_chat_id, discussion_entity
+
     async def _spider_discussion_group(
         self, worker: "TelegramWorker", channel_entity, channel_platform_id: str
     ) -> None:
@@ -1653,20 +1721,14 @@ class TelegramCollector(
              (within 24h) — if so, skip to avoid churn.
           3. If not already joined, call `JoinChannelRequest(linked_chat)`.
           4. Wait a random human-like dwell time (60-180s default).
-          5. Run `collect_chat_members()` + read discussion messages. Set
-             TELEGRAM_DISCUSSION_MESSAGE_LIMIT=0 for all available history.
+          5. Run `collect_chat_members()` + read a bounded recent message window.
           6. Call `LeaveChannelRequest` only if this pass joined the discussion.
           7. Record the visit in `telegram_discussion_visits`.
         """
         import random
         from telethon.tl.functions.channels import JoinChannelRequest, LeaveChannelRequest
 
-        linked_chat_id = getattr(channel_entity, "linked_chat_id", None)
-        if not linked_chat_id:
-            return
-
         client = worker.client
-        discussion_platform_id = str(linked_chat_id)
 
         # Resolve channel UUID for FK.
         async with self.pool.acquire() as conn:
@@ -1694,12 +1756,12 @@ class TelegramCollector(
                 )
                 return
 
-        # Get discussion group entity.
-        try:
-            discussion_entity = await client.get_entity(int(linked_chat_id))
-        except Exception as exc:
-            logger.debug("Cannot resolve discussion group %s: %s", linked_chat_id, exc)
+        linked_chat_id, discussion_entity = await self._resolve_linked_discussion_entity(
+            worker, channel_entity, channel_platform_id
+        )
+        if not linked_chat_id or discussion_entity is None:
             return
+        discussion_platform_id = str(linked_chat_id)
 
         await self._upsert_chat(discussion_entity)
         discussion_title = (
@@ -1731,11 +1793,13 @@ class TelegramCollector(
         abort_reason: str | None = None
         members_collected = 0
         messages_collected = 0
+        record_visit = True
 
         try:
             if not already_member:
                 if not await self._consume_join_budget():
                     abort_reason = "join_budget"
+                    record_visit = False
                     return
                 logger.info(
                     "[worker=%d] Joining discussion group %s (%s) for channel %s",
@@ -1816,7 +1880,7 @@ class TelegramCollector(
                 )
 
             # Record the visit.
-            if discussion_uuid is not None:
+            if discussion_uuid is not None and record_visit:
                 async with self.pool.acquire() as conn:
                     await conn.execute(
                         """
@@ -2110,7 +2174,13 @@ class TelegramCollector(
             # Tier 6: venue/event extraction (best effort — never breaks flow).
             await self._extract_message_event(message, chat_uuid, platform_msg_id, conn=conn)
             await self._record_message_membership_signals(
-                conn, message, chat_uuid, sender_uuid
+                conn,
+                message,
+                chat_uuid,
+                sender_uuid,
+                message_uuid=message_uuid,
+                platform_chat_id=str(chat_id),
+                platform_message_id=platform_msg_id,
             )
             await self._record_message_mentions(
                 conn,
@@ -2426,6 +2496,7 @@ class TelegramCollector(
             while users_seen < self._poll_vote_user_cap:
                 limit = min(100, self._poll_vote_user_cap - users_seen)
                 try:
+                    await self.wait_rate_limit("telegram.org")
                     resp = await client(GetPollVotesRequest(
                         peer=message.peer_id,
                         id=message.id,
@@ -2433,10 +2504,14 @@ class TelegramCollector(
                         offset=offset or None,
                     ))
                 except Exception as exc:
-                    logger.debug(
-                        "GetPollVotesRequest failed for msg=%s: %s",
-                        getattr(message, "id", "?"), exc,
-                    )
+                    if _is_flood_wait(exc):
+                        await self._handle_flood_wait(worker, exc)
+                    else:
+                        logger.debug(
+                            "GetPollVotesRequest failed for msg=%s: %s",
+                            getattr(message, "id", "?"),
+                            type(exc).__name__,
+                        )
                     break
 
                 votes = getattr(resp, "votes", None) or []
@@ -4118,12 +4193,51 @@ class TelegramCollector(
             last_seen_at,
         )
 
+    def _message_membership_event_specs(self, action, sender_id) -> list[tuple[str, int, int | None]]:
+        """Return normalized join/leave events represented by one service action."""
+        action_name = type(action).__name__
+        sender_ids = self._coerce_telegram_user_ids(sender_id)
+        member_ids = self._coerce_telegram_user_ids(getattr(action, "users", None))
+        member_ids.extend(self._coerce_telegram_user_ids(getattr(action, "user_id", None)))
+
+        if action_name == "MessageActionChatAddUser":
+            event_type = "join"
+            targets = member_ids
+            actors = sender_ids or self._coerce_telegram_user_ids(getattr(action, "inviter_id", None))
+        elif action_name == "MessageActionChatDeleteUser":
+            event_type = "leave"
+            targets = member_ids
+            actors = sender_ids or self._coerce_telegram_user_ids(getattr(action, "from_id", None))
+        elif action_name in {
+            "MessageActionChatJoinedByLink",
+            "MessageActionChatJoinedByRequest",
+        }:
+            event_type = "join"
+            targets = sender_ids
+            actors = (
+                self._coerce_telegram_user_ids(getattr(action, "inviter_id", None))
+                or self._coerce_telegram_user_ids(getattr(action, "from_id", None))
+            )
+        elif action_name == "MessageActionChatCreate":
+            event_type = "join"
+            targets = sender_ids
+            actors = []
+        else:
+            return []
+
+        actor_id = actors[0] if actors else None
+        return [(event_type, user_id, actor_id) for user_id in dict.fromkeys(targets)]
+
     async def _record_message_membership_signals(
         self,
         conn,
         message,
         chat_uuid,
         sender_uuid,
+        *,
+        message_uuid=None,
+        platform_chat_id: str | None = None,
+        platform_message_id: str | None = None,
     ) -> None:
         """Normalize weak member evidence from messages and service actions."""
         if chat_uuid is None:
@@ -4194,6 +4308,48 @@ class TelegramCollector(
                     role="left",
                     last_seen_at=message_at,
                 )
+
+            if message_uuid is not None and platform_message_id:
+                action_payload = _tg_jsonb({
+                    "service_action": action_name,
+                    "message_sender_platform_id": str(sender_id) if sender_id is not None else None,
+                })
+                for event_type, user_id, actor_platform_id in self._message_membership_event_specs(
+                    action, sender_id
+                ):
+                    user_uuid = await self._ensure_telegram_user_stub(conn, user_id)
+                    if user_uuid is None:
+                        continue
+                    if actor_platform_id is None:
+                        actor_uuid = None
+                    elif actor_platform_id == sender_id and sender_uuid is not None:
+                        actor_uuid = sender_uuid
+                    else:
+                        actor_uuid = await self._ensure_telegram_user_stub(conn, actor_platform_id)
+                    await conn.execute(
+                        """
+                        INSERT INTO telegram_join_leave_events (
+                            chat_id, message_id, platform_chat_id, platform_message_id,
+                            user_id, actor_user_id, event_type, action_type, event_at, metadata
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)
+                        ON CONFLICT (message_id, user_id, event_type) DO UPDATE SET
+                            actor_user_id = COALESCE(EXCLUDED.actor_user_id, telegram_join_leave_events.actor_user_id),
+                            action_type = EXCLUDED.action_type,
+                            event_at = COALESCE(EXCLUDED.event_at, telegram_join_leave_events.event_at),
+                            metadata = telegram_join_leave_events.metadata || EXCLUDED.metadata,
+                            collected_at = NOW()
+                        """,
+                        chat_uuid,
+                        message_uuid,
+                        platform_chat_id,
+                        platform_message_id,
+                        user_uuid,
+                        actor_uuid,
+                        event_type,
+                        action_name,
+                        message_at,
+                        action_payload,
+                    )
         except Exception as exc:
             logger.debug("_record_message_membership_signals failed: %s", exc)
 

@@ -725,13 +725,12 @@ services:
       # available for hot-added accounts, but the startup heuristic can misread
       # old accounts as new and churn Telegram sessions.
       TELEGRAM_AUTO_BACKFILL_NEW_ACCOUNTS: "false"
-      # Only these lower-risk accounts may process spider/join work. Other
-      # Telegram accounts still collect existing dialogs and realtime messages.
+      # Optional spider/join account allowlist. Empty (the env-file default)
+      # permits all configured accounts; join work remains capped at 5/hour.
       TELEGRAM_SPIDER_ACCOUNTS: "${TELEGRAM_SPIDER_ACCOUNTS:-}"
-      # Discussion groups: 0 means read all available history, not just the old
-      # 2,000-message recent window. Member collection is already full-list when
-      # Telegram allows participant enumeration.
-      TELEGRAM_DISCUSSION_MESSAGE_LIMIT: "0"
+      # Keep each linked-discussion visit bounded; member collection still
+      # enumerates the full roster when Telegram allows participant access.
+      TELEGRAM_DISCUSSION_MESSAGE_LIMIT: "200"
       # Per-message identity enumeration caps for public reactions/polls.
       TELEGRAM_REACTION_USER_CAP: "500"
       TELEGRAM_POLL_VOTE_USER_CAP: "500"
