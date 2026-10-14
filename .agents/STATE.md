@@ -3,6 +3,8 @@ Current task: UnifiedCollector Full Plan (2026-10-14), one phase/commit at a tim
 Status: Phase 1 inventory confirms production Compose still combines Strava+search and exposure+Lemon8, while dev/watch Compose and watchdog still use the old service names. `browser_ingest` references already exist in application telemetry; service rename and remaining documentation/config updates are pending. Existing Batch 2 browser queue live verification still awaits a manual extension reload.
 Next: Split the four collectors and rename the browser bridge in production/dev/watch Compose, watchdog, env templates, tests, and active docs. Keep all Spider files untouched; then verify Compose and per-container runtime/log isolation before committing Phase 1.
 
+Batch 2 Item 3 blocker (2026-10-14): code is committed in `86dc357a`, `a863ab93`, and `cd4339e9`. The 15-minute live observation kept pending counts flat (Threads 949, Instagram 5,424) but added no completions; recent activity still reports extension 1.23.105 instead of rebuilt 1.23.107. Browser-use policy rejected Chrome internal Extensions controls and explicitly prohibits CDP/browser-command reload. Bryan was asked to reload manually; after 30+ minutes, proceeding without live completion verification.
+
 ## Prior handoff history
 
 Progress:
