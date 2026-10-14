@@ -916,6 +916,34 @@ async def test_dynamic_term_refresh_runs_before_base_collect_mutex(monkeypatch):
     assert calls == ["refresh", "base_run"]
 
 
+@pytest.mark.asyncio
+async def test_search_query_holds_shared_mutex_for_one_query(monkeypatch):
+    _set_clean_env(monkeypatch)
+    coll = SearchCollector()
+    events = []
+
+    async def acquire(source):
+        events.append(("acquire", source))
+        return "lock-handle"
+
+    async def release(handle):
+        events.append(("release", handle))
+
+    coll._collect_mutex_acquire = acquire
+    coll._collect_mutex_release = release
+    coll._DDGS = None
+    coll._BS = None
+    coll._serper_api_key = ""
+    coll._finalise_query = AsyncMock(return_value=[{"url": "https://example.org/"}])
+    coll._search_query_unlocked = AsyncMock(return_value=[{"url": "https://example.org/"}])
+
+    result = await coll.search_query("public term")
+
+    assert result == [{"url": "https://example.org/"}]
+    assert events == [("acquire", "search"), ("release", "lock-handle")]
+    coll._search_query_unlocked.assert_awaited_once()
+
+
 def test_document_text_extraction_handles_text_rtf_and_docx():
     import io
     import zipfile

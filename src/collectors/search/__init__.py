@@ -87,6 +87,7 @@ TOR_PROXY_ENABLED              '1' to route HTTP through the Tor sidecar.
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 import hashlib
 import io
 import json
@@ -425,6 +426,9 @@ class SearchCollector(BaseCollector):
     """
 
     SOURCE_NAME = "search"
+    # Search and exposure share public providers, so lock each operation rather
+    # than holding the provider mutex for an entire large target batch.
+    COLLECT_MUTEX_SCOPE = "operation"
 
     # Engines we know how to drive. Order matters — the waterfall consults
     # them in this sequence and short-circuits when ``max_results`` is met.
@@ -498,6 +502,7 @@ class SearchCollector(BaseCollector):
         self._search_scope_cooldowns: dict[str, float] = {}
         self._search_rate_limit_streaks: dict[str, int] = {}
         self._last_search_query_rate_limited = False
+        self._last_search_query_lock_skipped = False
 
         # Register Serper quota with the unified tracker if available.
         self._register_serper_quota()
@@ -1052,6 +1057,30 @@ class SearchCollector(BaseCollector):
         except Exception as exc:
             logger.debug("dynamic search result schedule update skipped: %s", type(exc).__name__)
 
+    @asynccontextmanager
+    async def _shared_search_engine_mutex(self):
+        acquire = self._collect_mutex_acquire
+        release = self._collect_mutex_release
+        if not callable(acquire):
+            yield True
+            return
+
+        logged_wait = False
+        while not self._stop.is_set():
+            handle = await acquire(self.SOURCE_NAME)
+            if handle is not False:
+                try:
+                    yield True
+                finally:
+                    if callable(release) and handle is not None:
+                        await release(handle)
+                return
+            if not logged_wait:
+                logger.info("%s waiting for the shared search-engine mutex", self.SOURCE_NAME)
+                logged_wait = True
+            await asyncio.sleep(random.uniform(0.5, 1.5))
+        yield False
+
     async def run(self, targets: list[str]) -> None:
         """Refresh dynamic terms before competing for the search-engine mutex.
 
@@ -1087,19 +1116,24 @@ class SearchCollector(BaseCollector):
         queries = list(dict.fromkeys([*(item["query"] for item in dynamic_items), *static_queries]))
         if direct:
             logger.info("Crawling %d direct seed URL(s) (open dir / bucket)", len(direct))
-            try:
-                await self.expand_paste_sites(direct)
-                for u in direct:
-                    await self.checkpoint.save_progress(u)
-                await self.heartbeat_source_health()
-            except Exception as e:
-                logger.exception("direct seed crawl failed: %s", e)
+            async with self._shared_search_engine_mutex() as acquired:
+                if not acquired:
+                    return
+                try:
+                    await self.expand_paste_sites(direct)
+                    for u in direct:
+                        await self.checkpoint.save_progress(u)
+                    await self.heartbeat_source_health()
+                except Exception as e:
+                    logger.exception("direct seed crawl failed: %s", e)
         for query in queries:
             if self._stop.is_set():
                 break
             logger.info("Collecting search/%s", query)
             try:
                 results = await self.search_query(query)
+                if self._last_search_query_lock_skipped:
+                    break
                 if query in dynamic_by_query:
                     succeeded = bool(results) or not self._last_search_query_rate_limited
                     await self._mark_dynamic_search_query(
@@ -1120,6 +1154,18 @@ class SearchCollector(BaseCollector):
     # ------------------------------------------------------------------ #
 
     async def search_query(
+        self,
+        query: str,
+        engines: Optional[Iterable[str]] = None,
+    ) -> list[dict]:
+        self._last_search_query_lock_skipped = False
+        async with self._shared_search_engine_mutex() as acquired:
+            if not acquired:
+                self._last_search_query_lock_skipped = True
+                return []
+            return await self._search_query_unlocked(query, engines=engines)
+
+    async def _search_query_unlocked(
         self,
         query: str,
         engines: Optional[Iterable[str]] = None,

@@ -273,6 +273,8 @@ class ExposureCollector(SearchCollector):
             logger.info("Collecting exposure/%s", cursor_id)
             try:
                 await self.search_query(query)
+                if self._last_search_query_lock_skipped:
+                    break
                 await self.checkpoint.save_progress(cursor_id)
                 await self.heartbeat_source_health()
             except Exception as exc:  # noqa: BLE001 - one bad dork must not kill the lane.

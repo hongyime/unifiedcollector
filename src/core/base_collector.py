@@ -280,7 +280,8 @@ class BaseCollector(ABC):
         try:
             acquire_mutex = self._collect_mutex_acquire
             release_mutex = self._collect_mutex_release
-            if callable(acquire_mutex):
+            mutex_scope = getattr(self, "COLLECT_MUTEX_SCOPE", "cycle")
+            if callable(acquire_mutex) and mutex_scope != "operation":
                 mutex_handle = await acquire_mutex(self.SOURCE_NAME)
                 if mutex_handle is False:
                     self._intentional_idle_reason = (

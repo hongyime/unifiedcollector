@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from src.core import base_collector
+from src.core import vault as vault_module
 from src.core.base_collector import BaseCollector
 
 
@@ -207,7 +208,31 @@ async def test_run_skips_collect_when_shared_scrape_mutex_busy(monkeypatch, tmp_
     coll.checkpoint.mark_idle.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+async def test_run_leaves_operation_scoped_mutex_to_the_collector(monkeypatch, tmp_path):
+    monkeypatch.setattr(base_collector, "check_drive", lambda: True)
+    monkeypatch.setattr(base_collector, "assert_media_write_allowed", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(base_collector, "DRIVE_PATH", str(tmp_path))
+    coll = _Collector()
+    coll.pool = _Pool()
+    coll.COLLECT_MUTEX_SCOPE = "operation"
+    _prepare_run(coll)
+    coll.collect = AsyncMock()
+    coll.run_backfill = AsyncMock()
+    coll._collect_mutex_acquire = AsyncMock(return_value="handle")
+    coll._collect_mutex_release = AsyncMock()
+
+    await coll.run(["target"])
+
+    coll.collect.assert_awaited_once_with(["target"])
+    coll._collect_mutex_acquire.assert_not_awaited()
+    coll._collect_mutex_release.assert_not_awaited()
+
+
 def test_save_file_writes_canonical_vault_blob(tmp_path, monkeypatch):
+    # Compose's common.env may set this option to an empty string, which is
+    # intentionally parsed as disabled. This test verifies the enabled writer.
+    monkeypatch.setattr(vault_module, "SIDECARS_ENABLED", True)
     vault_root = tmp_path / "vault"
     drive_root = tmp_path / "media"
     vault_root.mkdir()
