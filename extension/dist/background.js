@@ -175,6 +175,9 @@
   var PAGE_RECOVERY_LIMIT_COOLDOWN_MS_BY_PLATFORM = {
     x: 10 * 60 * 1e3
   };
+  var BROWSER_REVISIT_WATCHDOG_PREFIX = "uc-browser-revisit-watchdog:";
+  var BROWSER_REVISIT_NAVIGATION_TIMEOUT_MS = 12e4;
+  var BROWSER_REVISIT_RESULT_TIMEOUT_MS = 10 * 60 * 1e3;
   var RELOAD_INTENT_KEY = "ucReloadIntent";
   var LOADED_VERSION_KEY = "ucLoadedExtensionVersion";
   var SCRAPER_HEARTBEAT_TIMEOUT_MS = 12e3;
@@ -192,6 +195,125 @@
   async function getStatus() {
     const { ucStatus = {} } = await chrome.storage.local.get("ucStatus");
     return ucStatus;
+  }
+  function browserRevisitWatchdogKey(queue, platform) {
+    return `ucBrowserRevisitWatchdog:${queue}:${platform}`;
+  }
+  function browserRevisitWatchdogAlarm(queue, platform) {
+    return `${BROWSER_REVISIT_WATCHDOG_PREFIX}${queue}:${platform}`;
+  }
+  async function armBrowserRevisitWatchdog(msg, sender) {
+    const queue = msg && msg.queue === "tiktok" ? "tiktok" : "browser";
+    const platform = queue === "tiktok" ? "tiktok" : String(msg && msg.platform || "").toLowerCase();
+    const contentId = String(msg && msg.content_id || "").trim();
+    const tabId = sender && sender.tab && Number.isInteger(sender.tab.id) ? sender.tab.id : null;
+    if (!platform || !contentId || tabId == null) return { ok: false };
+    const key = browserRevisitWatchdogKey(queue, platform);
+    const alarmName = browserRevisitWatchdogAlarm(queue, platform);
+    const values = await chrome.storage.local.get(key);
+    const existing = values && values[key];
+    const claimAttempt = msg.claim_attempt == null ? null : Number(msg.claim_attempt);
+    if (existing && existing.content_id === contentId && existing.claim_attempt === claimAttempt && existing.tab_id === tabId && existing.url === msg.url) {
+      await chrome.alarms.create(alarmName, { when: existing.deadline_at || Date.now() + BROWSER_REVISIT_NAVIGATION_TIMEOUT_MS });
+      return { ok: true };
+    }
+    const startedAt = Number(msg.navigation_started_at || Date.now());
+    const state = {
+      queue,
+      platform,
+      content_id: contentId,
+      claim_attempt: claimAttempt,
+      tab_id: tabId,
+      url: String(msg.url || ""),
+      phase: "navigation",
+      deadline_at: startedAt + BROWSER_REVISIT_NAVIGATION_TIMEOUT_MS
+    };
+    await chrome.storage.local.set({ [key]: state });
+    await chrome.alarms.create(alarmName, { when: state.deadline_at });
+    return { ok: true };
+  }
+  function browserRevisitPageMatches(platform, actualUrl, targetUrl) {
+    try {
+      const actual = new URL(actualUrl);
+      const target = new URL(targetUrl);
+      if (actual.pathname.replace(/\/$/, "") !== target.pathname.replace(/\/$/, "")) return false;
+      const hosts = {
+        instagram: /* @__PURE__ */ new Set(["instagram.com", "www.instagram.com"]),
+        threads: /* @__PURE__ */ new Set(["threads.com", "www.threads.com", "threads.net", "www.threads.net"]),
+        tiktok: /* @__PURE__ */ new Set(["tiktok.com", "www.tiktok.com"])
+      }[platform];
+      return !!hosts && hosts.has(actual.hostname.toLowerCase()) && hosts.has(target.hostname.toLowerCase());
+    } catch (_) {
+      return false;
+    }
+  }
+  async function clearBrowserRevisitWatchdog(queue, platform, contentId, claimAttempt) {
+    const key = browserRevisitWatchdogKey(queue, platform);
+    const alarmName = browserRevisitWatchdogAlarm(queue, platform);
+    const values = await chrome.storage.local.get(key);
+    const existing = values && values[key];
+    if (!existing || existing.content_id !== contentId || existing.claim_attempt !== claimAttempt) return;
+    await chrome.storage.local.remove(key);
+    await chrome.alarms.clear(alarmName);
+  }
+  async function runBrowserRevisitWatchdog(alarmName) {
+    const suffix = alarmName.slice(BROWSER_REVISIT_WATCHDOG_PREFIX.length);
+    const [queue, ...platformParts] = suffix.split(":");
+    const platform = platformParts.join(":");
+    if (!(/* @__PURE__ */ new Set(["browser", "tiktok"])).has(queue) || !platform) return;
+    const key = browserRevisitWatchdogKey(queue, platform);
+    const values = await chrome.storage.local.get(key);
+    const state = values && values[key];
+    if (!state || !state.content_id) return;
+    if (Number(state.deadline_at || 0) > Date.now()) {
+      await chrome.alarms.create(alarmName, { when: state.deadline_at });
+      return;
+    }
+    let tab = null;
+    try {
+      tab = await chrome.tabs.get(state.tab_id);
+    } catch (_) {
+    }
+    if (tab && browserRevisitPageMatches(platform, tab.url || "", state.url || "")) {
+      if (state.phase === "navigation") {
+        const next2 = { ...state, phase: "result", deadline_at: Date.now() + BROWSER_REVISIT_RESULT_TIMEOUT_MS };
+        await chrome.storage.local.set({ [key]: next2 });
+        await chrome.alarms.create(alarmName, { when: next2.deadline_at });
+        return;
+      }
+    }
+    const reason = !tab ? "detail_tab_closed" : state.phase === "navigation" ? "detail_navigation_timeout" : "detail_result_timeout";
+    try {
+      const base = await ingestBase();
+      const endpoint = queue === "tiktok" ? "/social/tiktok-revisit-result" : "/social/browser-revisit-result";
+      const body = {
+        content_id: state.content_id,
+        claim_attempt: state.claim_attempt,
+        status: "failed",
+        reason,
+        username: null
+      };
+      if (queue === "browser") body.platform = platform;
+      const result = await postJsonWithTimeout(
+        base + endpoint,
+        withExtensionVersion(body),
+        SCRAPER_HEARTBEAT_TIMEOUT_MS
+      );
+      const responseBody = JSON.parse(result.body || "{}");
+      if (result.response && result.response.ok && responseBody.accepted === false) {
+        await clearBrowserRevisitWatchdog(queue, platform, state.content_id, state.claim_attempt);
+        return;
+      }
+      if (result.response && result.response.ok && responseBody.accepted === true) {
+        await clearBrowserRevisitWatchdog(queue, platform, state.content_id, state.claim_attempt);
+        await log("warn", `${platform} browser revisit lease released after ${reason}`);
+        return;
+      }
+    } catch (_) {
+    }
+    const next = { ...state, deadline_at: Date.now() + 2 * 60 * 1e3 };
+    await chrome.storage.local.set({ [key]: next });
+    await chrome.alarms.create(alarmName, { when: next.deadline_at });
   }
   var _scrapeConfigDisabled = /* @__PURE__ */ new Set();
   var _scrapeConfigFetchedAt = 0;
@@ -1623,7 +1745,9 @@
     runStartupRecovery("startup", { force: false, refreshTabs: true, refreshGapMs: 1500, retries: 2 });
   });
   chrome.alarms.onAlarm.addListener(async (a) => {
-    if (a.name && a.name.startsWith(PAGE_RECOVERY_PREFIX)) {
+    if (a.name && a.name.startsWith(BROWSER_REVISIT_WATCHDOG_PREFIX)) {
+      await runBrowserRevisitWatchdog(a.name);
+    } else if (a.name && a.name.startsWith(PAGE_RECOVERY_PREFIX)) {
       await runPageRecovery(a.name.slice(PAGE_RECOVERY_PREFIX.length));
     } else if (a.name === EXTENSION_AUTO_RELOAD_ALARM) {
       try {
@@ -2237,6 +2361,11 @@
     }
   }
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    if (msg && msg.type === "getBrowserTabId") {
+      const tabId = sender && sender.tab && Number.isInteger(sender.tab.id) ? sender.tab.id : null;
+      sendResponse({ ok: true, tab_id: tabId });
+      return false;
+    }
     const fastReplyTypes = /* @__PURE__ */ new Set(["log", "tabReady", "loopStatus", "cycleReport"]);
     if (msg && fastReplyTypes.has(msg.type)) {
       sendResponse({ ok: true });
@@ -2367,6 +2496,10 @@
             }
             break;
           }
+          case "browserRevisitNavigationStarted": {
+            sendResponse(await armBrowserRevisitWatchdog(msg, sender));
+            break;
+          }
           case "getBrowserMediaRevisitTarget": {
             try {
               const platform = String(msg.platform || "").trim();
@@ -2391,6 +2524,7 @@
                 body: JSON.stringify(withExtensionVersion({
                   platform: msg.platform,
                   content_id: msg.content_id,
+                  claim_attempt: msg.claim_attempt ?? null,
                   status: msg.status || "success",
                   reason: msg.reason || null,
                   observed: msg.observed ?? null,
@@ -2399,6 +2533,9 @@
                 }))
               });
               const j = await r.json().catch(() => ({}));
+              if (r.ok && typeof j.accepted === "boolean") {
+                await clearBrowserRevisitWatchdog("browser", String(msg.platform || "").toLowerCase(), String(msg.content_id || ""), msg.claim_attempt == null ? null : Number(msg.claim_attempt));
+              }
               sendResponse({ ok: r.ok, ...j });
             } catch (e) {
               sendResponse({ ok: false, error: String(e.message || e) });
@@ -2412,6 +2549,7 @@
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(withExtensionVersion({
                   content_id: msg.content_id,
+                  claim_attempt: msg.claim_attempt ?? null,
                   status: msg.status || "success",
                   reason: msg.reason || null,
                   observed: msg.observed ?? null,
@@ -2420,6 +2558,9 @@
                 }))
               });
               const j = await r.json().catch(() => ({}));
+              if (r.ok && typeof j.accepted === "boolean") {
+                await clearBrowserRevisitWatchdog("tiktok", "tiktok", String(msg.content_id || ""), msg.claim_attempt == null ? null : Number(msg.claim_attempt));
+              }
               sendResponse({ ok: r.ok, ...j });
             } catch (e) {
               sendResponse({ ok: false, error: String(e.message || e) });

@@ -10,10 +10,38 @@ here -- they require a watched live login cycle (see skill collector-package-ref
 """
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 
 def parse_browser_cookies(filepath: str) -> dict[str, str]:
+    path = Path(filepath)
+    if path.suffix.lower() == ".json":
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except (OSError, json.JSONDecodeError):
+            return {}
+        raw_cookies = payload.get("cookies", []) if isinstance(payload, dict) else []
+        if not isinstance(raw_cookies, list):
+            return {}
+        cookies = {}
+        for cookie in raw_cookies:
+            if not isinstance(cookie, dict):
+                continue
+            domain = str(cookie.get("domain") or "").lower().lstrip(".").rstrip(".")
+            name = str(cookie.get("name") or "").strip()
+            value = cookie.get("value")
+            if (
+                name
+                and value is not None
+                and (domain == "instagram.com" or domain.endswith(".instagram.com"))
+            ):
+                cookies[name] = str(value)
+        return cookies
+
     cookies = {}
-    with open(filepath, "r") as f:
+    with path.open("r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line or line.startswith("#"):

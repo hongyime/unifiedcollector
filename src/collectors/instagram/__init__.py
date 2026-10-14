@@ -327,8 +327,9 @@ class InstagramCollector(BaseCollector):
     def _auto_discover_cookies(self) -> dict:
         """Auto-discover cookie files for all accounts.
 
-        Searches both credentials/instagram/cookies/ (legacy) and
-        credentials/instagram/ (current layout). Files are mapped by:
+        Searches credentials/instagram/cookies/ (legacy), credentials/instagram/
+        (current layout), and the browser cookie vault's latest snapshot. Files
+        are mapped by:
           1. exact account NAME match (e.g. shotsbyseah234.txt -> shotsbyseah234)
           2. account_<N> pattern -> ACCOUNT_<N>
           3. fallback: stem of filename
@@ -358,6 +359,29 @@ class InstagramCollector(BaseCollector):
                     continue
                 discovered[account_name] = full
                 logger.info("Auto-discovered cookie file for %s: %s", account_name, full)
+        vault_path = os.path.join(
+            os.getenv("BROWSER_COOKIE_VAULT_DIR", "credentials/browser_cookies"),
+            "latest.json",
+        )
+        if os.path.isfile(vault_path):
+            try:
+                vault_cookies = self._parse_browser_cookies(vault_path)
+            except Exception:
+                vault_cookies = {}
+            if {"sessionid", "csrftoken"}.issubset(vault_cookies):
+                account_name = next(
+                    (
+                        os.getenv(f"INSTA_ACCOUNT_{i}_NAME", "").strip()
+                        or os.getenv(f"INSTA_ACCOUNT_{i}_USER", "").strip()
+                        for i in range(1, 20)
+                        if os.getenv(f"INSTA_ACCOUNT_{i}_NAME", "").strip()
+                        or os.getenv(f"INSTA_ACCOUNT_{i}_USER", "").strip()
+                    ),
+                    "browser-vault-cookie",
+                )
+                if account_name not in discovered:
+                    discovered[account_name] = vault_path
+                    logger.info("Auto-discovered Instagram browser vault snapshot")
         return discovered
 
     @staticmethod
@@ -4290,6 +4314,8 @@ class InstagramCollector(BaseCollector):
                  float(os.getenv("INSTA_MULTI_GRAPH_DELAY_MAX", "12")))
         for acct_name, cookie_path in list((self._account_browser_cookies or {}).items()):
             owner_account = self._canonical_instagram_username(acct_name) or acct_name
+            if not self._canonical_instagram_username(acct_name):
+                continue
             if self._stop.is_set():
                 break
             if acct_name in self._dead_cookie_accounts:
