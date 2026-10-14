@@ -2,7 +2,7 @@
 Current task: UnifiedCollector Full Plan (2026-10-14), one phase/commit at a time.
 Status (2026-10-15): Phase 1–5 base work and live follow-ups are pushed: watchdog allowlist `5a88905a`, Beeper fix `22acfcef`, Snapchat content tables `efa6a2c5`, and search mutex fairness `ea8791b5`. Phase 1 orphan soak passed; all 30 current Compose services are running.
 - Beeper is flowing: 1,132 messages in 12h and 255 in the 15m window ending 17:28 UTC; recent Beeper logs had no errors/HTTP 500s.
-- Lemon8 has 15 posts and 33 media rows in 12h. Extension 1.23.108 was last seen at 17:32:59 UTC; candidates remain at 0. Bryan said he is reloading the extension; post-reload capture is pending.
+- Lemon8 has 15 posts and 33 media rows in 12h. Reload is confirmed by `content_script_boot` at 17:36:10 UTC (v1.23.108); the page then reported `recoverable_error_shell` and an empty media event. Candidates remain at 0; For You capture is unverified.
 - Telegram has 11,893 messages, 1,648 member refreshes, and 1 join/leave event in 12h. All 16 refreshed polls were anonymous; no recent voter rows. Discussion visits are 0 because `TELEGRAM_SPIDER_ACCOUNTS` is unset.
 - Search has 7,513 results, 10 unsearched dynamic terms, and 0 indexed documents in the rolling window. Exposure still holds the shared mutex after about 4h; do not stop it. Restart exposure only after natural release.
 - Native tables remain empty for Pinterest pins, Snapchat stories/Spotlights/Highlights, and Airbnb reviews; public Airbnb GraphQL calls return errors.
