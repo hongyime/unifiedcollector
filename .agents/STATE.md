@@ -1,7 +1,7 @@
 # Agent State
-Current task: UnifiedCollector Batch 2 fixes, one item/commit at a time.
-Status: Items 1–2 are complete. Item 3 follow-up adds stalled/closed tab recovery, TikTok canonical-permalink guarding, and the active Chrome cookie-vault connection. The vault is healthy and captured 86 cookies; compile, Compose, extension assertions, and bounded permalink smoke passed. Live queue verification is pending a manual reload of the active extension: recent events still report 1.23.105 while the rebuilt bundle is 1.23.107. Chrome’s internal Extensions page was blocked by browser-use policy, which also prohibits reloading through CDP or another browser command.
-Next: Bryan reloads the UnifiedCollector extension in Chrome; then verify completed/pending queue trends before proceeding to Item 4. Keep Item 4 changes separate and do not touch spider files or WhatsApp bridge 1.
+Current task: UnifiedCollector Full Plan (2026-10-14), one phase/commit at a time.
+Status: Phase 1 inventory confirms production Compose still combines Strava+search and exposure+Lemon8, while dev/watch Compose and watchdog still use the old service names. `browser_ingest` references already exist in application telemetry; service rename and remaining documentation/config updates are pending. Existing Batch 2 browser queue live verification still awaits a manual extension reload.
+Next: Split the four collectors and rename the browser bridge in production/dev/watch Compose, watchdog, env templates, tests, and active docs. Keep all Spider files untouched; then verify Compose and per-container runtime/log isolation before committing Phase 1.
 
 ## Prior handoff history
 

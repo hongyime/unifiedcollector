@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import re
 
-from src.scheduler.handlers.profile_probe_feeder import _FEED_SQL
+from src.scheduler.handlers.profile_probe_feeder import (
+    _BLUESKY_CANDIDATES_SQL,
+    _FEED_SQL,
+)
 
 
 def test_airbnb_feeder_requires_a_direct_numeric_user_id_link():
@@ -21,17 +24,13 @@ def test_cross_platform_probe_budget_counts_only_supported_social_targets():
     assert "('bluesky')" not in social_candidates
 
 
-def test_bluesky_feeder_accepts_only_direct_full_handles_or_dids():
+def test_bluesky_candidates_are_resolved_before_they_reach_the_probe_queue():
     bluesky_rule = next(
         line for line in _FEED_SQL.splitlines() if "('bluesky'" in line
     )
     assert "bsky\\.app/profile/" in bluesky_rule
     assert "did:plc:" in bluesky_rule
-    validation = re.search(
-        r"source = 'bluesky' AND username ~ '([^']+)'", _FEED_SQL,
-    )
-    assert validation is not None
-    pattern = validation.group(1)
-    assert re.fullmatch(pattern, "alice") is None
-    assert re.fullmatch(pattern, "alice.bsky.social")
-    assert re.fullmatch(pattern, "did:plc:abcdefghijklmnopqrstuvwx")
+    assert "WHERE source <> 'bluesky'" in _FEED_SQL
+    assert "FROM failed_queue_candidates" in _BLUESKY_CANDIDATES_SQL
+    assert "FROM social_candidates" in _BLUESKY_CANDIDATES_SQL
+    assert "bluesky_handle_resolution_cache" in _BLUESKY_CANDIDATES_SQL
