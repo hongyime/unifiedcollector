@@ -111,7 +111,8 @@ function pinterestItems(doc: Document, pageUrl: string): NativeScrapeItem[] {
 
 function snapchatUsername(pageUrl: string): string | null {
   try {
-    const match = new URL(pageUrl).pathname.match(/^\/(?:add|profile)\/([^/]+)/i);
+    const pathname = new URL(pageUrl).pathname;
+    const match = pathname.match(/^\/(?:add|profile)\/([^/]+)/i) || pathname.match(/^\/@([^/]+)/);
     return match ? cleanText(decodeURIComponent(match[1]), 100) : null;
   } catch {
     return null;
@@ -120,10 +121,11 @@ function snapchatUsername(pageUrl: string): string | null {
 
 function snapchatStoryItems(doc: Document, pageUrl: string): NativeScrapeItem[] {
   const parsed = new URL(pageUrl);
-  if (!/^\/(?:add|profile)\//i.test(parsed.pathname)) return [];
+  if (!/^\/(?:add|profile)\//i.test(parsed.pathname) && !/^\/@[^/]+/.test(parsed.pathname) &&
+      !/^\/discover(?:\/|$)/i.test(parsed.pathname)) return [];
   const username = snapchatUsername(pageUrl);
   const nodes = Array.from(doc.querySelectorAll<HTMLElement>(
-    '[data-story-id], [data-testid*="story" i], a[href*="/story/"], [aria-label*="public story" i]',
+    '[data-story-id], [data-testid*="story" i], a[href*="/story/"], [aria-label*="public story" i], main [data-testid*="discover-card" i]',
   ));
   const stories: NativeScrapeItem[] = [];
   const seen = new Set<string>();
@@ -134,16 +136,20 @@ function snapchatStoryItems(doc: Document, pageUrl: string): NativeScrapeItem[] 
     const storyUrl = absoluteHttps(anchor?.href, pageUrl) || pageUrl;
     const mediaUrl = absoluteHttps(media?.currentSrc || media?.src || image?.currentSrc || image?.src, pageUrl);
     const title = cleanText(node.getAttribute("aria-label") || visibleText(node, 500), 500);
+    const linkedUsername = Array.from(node.querySelectorAll<HTMLAnchorElement>('a[href*="/@"], a[href*="/add/"]'))
+      .map((link) => snapchatUsername(link.href))
+      .find((value) => value) || null;
     const rawId = node.getAttribute("data-story-id") || node.getAttribute("data-item-id") ||
       storyUrl.match(/\/story\/([^/?#]+)/i)?.[1] || "";
-    const id = cleanText(rawId, 200) || stableId("story", `${username || "public"}|${storyUrl}|${mediaUrl || ""}|${title || ""}`);
+    const storyUsername = username || linkedUsername;
+    const id = cleanText(rawId, 200) || stableId("story", `${storyUsername || "public"}|${storyUrl}|${mediaUrl || ""}|${title || ""}`);
     if (seen.has(id) || (!mediaUrl && !title)) continue;
     seen.add(id);
     const time = node.querySelector<HTMLTimeElement>("time[datetime]")?.dateTime || null;
     stories.push({
       type: "story",
       id,
-      username,
+      username: storyUsername,
       title,
       url: storyUrl,
       media_url: mediaUrl,
@@ -292,6 +298,24 @@ export function nativePageMatchesTarget(platform: NativeScrapePlatform, pageUrl:
       const pageId = page.pathname.match(/\/(rooms|users\/(?:show|profile))\/([^/?#]+)/i);
       const targetId = target.pathname.match(/\/(rooms|users\/(?:show|profile))\/([^/?#]+)/i);
       return Boolean(pageId && targetId && pageId[1].toLowerCase() === targetId[1].toLowerCase() && pageId[2] === targetId[2]);
+    }
+    if (platform === "snapchat") {
+      const identity = (pathname: string) => {
+        const match = pathname.match(/^\/(?:add|profile)\/([^/]+)/i) || pathname.match(/^\/@([^/]+)/);
+        return match ? `profile:${decodeURIComponent(match[1]).replace(/^@/, "").toLowerCase()}` :
+          (pathname.replace(/\/+$/, "") || "/").toLowerCase();
+      };
+      const pageHost = page.hostname.toLowerCase().replace(/^www\./, "");
+      const targetHost = target.hostname.toLowerCase().replace(/^www\./, "");
+      return pageHost === targetHost && identity(page.pathname) === identity(target.pathname);
+    }
+    if (platform === "pinterest") {
+      const pageHost = page.hostname.toLowerCase().replace(/^www\./, "");
+      const targetHost = target.hostname.toLowerCase().replace(/^www\./, "");
+      const targetPath = target.pathname.replace(/\/+$/, "") || "/";
+      const pagePath = page.pathname.replace(/\/+$/, "") || "/";
+      const profileRedirect = pagePath.match(/^(\/[^/]+)\/(?:_created|_saved)$/i);
+      return pageHost === targetHost && (pagePath === targetPath || profileRedirect?.[1] === targetPath);
     }
     const pageHost = page.hostname.toLowerCase().replace(/^www\./, "");
     const targetHost = target.hostname.toLowerCase().replace(/^www\./, "");

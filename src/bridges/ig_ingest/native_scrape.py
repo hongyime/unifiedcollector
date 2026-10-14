@@ -116,6 +116,28 @@ def _same_target(platform: str, page_url: str, target_url: str) -> bool:
                 and page_match.group(1).lower() == target_match.group(1).lower()
                 and page_match.group(2) == target_match.group(2)
             )
+        if platform == "snapchat":
+            def snap_identity(path: str) -> str:
+                profile = re.match(r"^/(?:add|profile)/([^/]+)", path, re.IGNORECASE)
+                public_profile = re.match(r"^/@([^/]+)", path)
+                match = profile or public_profile
+                if match:
+                    return "profile:" + match.group(1).lstrip("@").lower()
+                clean = path.rstrip("/") or "/"
+                return clean.lower()
+
+            page_host = (page.hostname or "").lower().removeprefix("www.")
+            target_host = (target.hostname or "").lower().removeprefix("www.")
+            return page_host == target_host and snap_identity(page.path) == snap_identity(target.path)
+        if platform == "pinterest":
+            page_host = (page.hostname or "").lower().removeprefix("www.")
+            target_host = (target.hostname or "").lower().removeprefix("www.")
+            target_path = target.path.rstrip("/") or "/"
+            page_path = page.path.rstrip("/") or "/"
+            created_match = re.match(r"^(/[^/]+)/_created$", page_path, re.IGNORECASE)
+            saved_match = re.match(r"^(/[^/]+)/_saved$", page_path, re.IGNORECASE)
+            canonical_profile = (created_match or saved_match).group(1) if (created_match or saved_match) else page_path
+            return page_host == target_host and (page_path == target_path or canonical_profile == target_path)
         page_host = (page.hostname or "").lower().removeprefix("www.")
         target_host = (target.hostname or "").lower().removeprefix("www.")
         return page_host == target_host and page.path.rstrip("/") == target.path.rstrip("/")
@@ -138,7 +160,30 @@ async def _seed_targets(conn, platform: str) -> None:
                        AND q.username=btrim(p.username)
                )
              ORDER BY p.probed_at DESC NULLS LAST
-             LIMIT 100
+             LIMIT GREATEST(0, 10 - (
+                 SELECT count(*) FROM browser_native_scrape_queue
+                  WHERE platform='pinterest' AND status IN ('pending','claimed')
+             ))
+            ON CONFLICT (platform, target_url) DO NOTHING
+            """
+        )
+        await conn.execute(
+            """
+            INSERT INTO browser_native_scrape_queue
+                (platform, target_url, username, source, priority)
+            SELECT 'pinterest', b.board_url, b.username, 'pinterest_boards', 15
+              FROM pinterest_boards b
+             WHERE b.board_url ~* '^https://([^/]+\\.)?pinterest\\.com/'
+               AND NOT EXISTS (
+                    SELECT 1 FROM browser_native_scrape_queue q
+                     WHERE q.platform='pinterest' AND q.target_url=b.board_url
+               )
+             ORDER BY b.collected_at DESC NULLS LAST, b.board_id
+             LIMIT GREATEST(0, 10 - (
+                 SELECT count(*) FROM browser_native_scrape_queue
+                  WHERE platform='pinterest' AND source='pinterest_boards'
+                    AND status IN ('pending','claimed')
+             ))
             ON CONFLICT (platform, target_url) DO NOTHING
             """
         )
@@ -156,7 +201,17 @@ async def _seed_targets(conn, platform: str) -> None:
                        AND q.username=btrim(p.username)
                )
              ORDER BY p.probed_at DESC NULLS LAST
-             LIMIT 100
+             LIMIT GREATEST(0, 10 - (
+                 SELECT count(*) FROM browser_native_scrape_queue
+                  WHERE platform='snapchat' AND status IN ('pending','claimed')
+             ))
+            ON CONFLICT (platform, target_url) DO NOTHING
+            """
+        )
+        await conn.execute(
+            """
+            INSERT INTO browser_native_scrape_queue (platform, target_url, username, source, priority)
+            VALUES ('snapchat', 'https://www.snapchat.com/discover', NULL, 'snapchat_discover', 15)
             ON CONFLICT (platform, target_url) DO NOTHING
             """
         )
@@ -174,7 +229,10 @@ async def _seed_targets(conn, platform: str) -> None:
                      WHERE q.platform='airbnb' AND q.target_url=l.url
                )
              ORDER BY l.discovered_at DESC NULLS LAST
-             LIMIT 100
+             LIMIT GREATEST(0, 10 - (
+                 SELECT count(*) FROM browser_native_scrape_queue
+                  WHERE platform='airbnb' AND status IN ('pending','claimed')
+             ))
             ON CONFLICT (platform, target_url) DO NOTHING
             """
         )
@@ -190,7 +248,29 @@ async def _seed_targets(conn, platform: str) -> None:
                      WHERE q.platform='airbnb' AND q.username=btrim(p.username)
                )
              ORDER BY p.probed_at DESC NULLS LAST
-             LIMIT 100
+             LIMIT GREATEST(0, 10 - (
+                 SELECT count(*) FROM browser_native_scrape_queue
+                  WHERE platform='airbnb' AND status IN ('pending','claimed')
+             ))
+            ON CONFLICT (platform, target_url) DO NOTHING
+            """
+        )
+        await conn.execute(
+            """
+            INSERT INTO browser_native_scrape_queue (platform, target_url, username, source, priority)
+            SELECT 'airbnb', l.host_profile_url, l.host_id, 'airbnb_listing_hosts', 20
+              FROM airbnb_listings l
+             WHERE l.host_profile_url ~* '^https://([^/]+\\.)?airbnb\\.(com|com\\.sg|co\\.uk|co\\.kr)/users/(show|profile)/'
+               AND NOT EXISTS (
+                    SELECT 1 FROM browser_native_scrape_queue q
+                     WHERE q.platform='airbnb' AND q.target_url=l.host_profile_url
+               )
+             ORDER BY l.collected_at DESC NULLS LAST, l.host_id
+             LIMIT GREATEST(0, 10 - (
+                 SELECT count(*) FROM browser_native_scrape_queue
+                  WHERE platform='airbnb' AND source='airbnb_listing_hosts'
+                    AND status IN ('pending','claimed')
+             ))
             ON CONFLICT (platform, target_url) DO NOTHING
             """
         )

@@ -29,6 +29,21 @@ def test_native_target_matches_allow_airbnb_locale_redirects():
         "https://www.snapchat.com/add/alice/",
         "https://snapchat.com/add/alice",
     )
+    assert _same_target(
+        "snapchat",
+        "https://www.snapchat.com/@alice",
+        "https://www.snapchat.com/add/alice/",
+    )
+    assert _same_target(
+        "snapchat",
+        "https://www.snapchat.com/discover?web_client_id=public",
+        "https://www.snapchat.com/discover",
+    )
+    assert _same_target(
+        "pinterest",
+        "https://www.pinterest.com/alice/_created/",
+        "https://www.pinterest.com/alice/",
+    )
 
 
 def test_native_item_validation_builds_platform_rows():
