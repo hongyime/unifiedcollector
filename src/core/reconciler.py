@@ -26,13 +26,81 @@ from __future__ import annotations
 import logging
 import os
 import json
+import re
 from collections.abc import Callable
 from pathlib import Path
+from urllib.parse import urlparse
 
 from .drive_check import check_drive
 from .vault import VAULT_ROOT, verify_media_item_db_consistency, write_atomic_artifact
 
 logger = logging.getLogger(__name__)
+
+
+def _canonical_rescrape_permalink(
+    source: str,
+    content_id: str,
+    metadata: dict | str | None = None,
+    entity_name: str | None = None,
+) -> str | None:
+    """Resolve a first-party detail permalink; CDN media URLs are never targets."""
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except (TypeError, ValueError):
+            metadata = None
+    if not isinstance(metadata, dict):
+        metadata = {}
+    raw_meta = metadata.get("raw_meta")
+    candidates = [metadata]
+    if isinstance(raw_meta, dict):
+        candidates.append(raw_meta)
+    for container in candidates:
+        for key in ("post_url", "canonical_url", "page_url", "verify_url"):
+            value = str(container.get(key) or "").strip()
+            if _is_canonical_rescrape_permalink(source, value):
+                return value
+
+    if source == "instagram":
+        match = re.search(r"\d{10,}", str(content_id or ""))
+        if match:
+            media_id = int(match.group(0))
+            if media_id > 0:
+                alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+                shortcode = ""
+                while media_id:
+                    shortcode = alphabet[media_id & 63] + shortcode
+                    media_id >>= 6
+                return f"https://www.instagram.com/p/{shortcode}/"
+    elif source == "tiktok":
+        handle = str(entity_name or "").strip().lstrip("@")
+        video_id = str(content_id or "").strip()
+        if re.fullmatch(r"[A-Za-z0-9._]{2,64}", handle) and video_id.isdigit():
+            return f"https://www.tiktok.com/@{handle}/video/{video_id}"
+    return None
+
+
+def _is_canonical_rescrape_permalink(source: str, value: str) -> bool:
+    if not value.startswith("https://"):
+        return False
+    try:
+        parsed = urlparse(value)
+        host = (parsed.hostname or "").lower().rstrip(".")
+        port = parsed.port
+    except ValueError:
+        return False
+    if parsed.username or parsed.password or port not in (None, 443):
+        return False
+    path = parsed.path or ""
+    if source == "instagram":
+        return host in {"instagram.com", "www.instagram.com"} and bool(
+            re.match(r"^/(?:p|reel|reels|tv)/[^/]+/?$", path, re.I)
+        )
+    if source == "tiktok":
+        return host in {"tiktok.com", "www.tiktok.com"} and bool(
+            re.match(r"^/@[^/]+/(?:video|photo)/\d+/?$", path, re.I)
+        )
+    return False
 
 
 def _env_int(name: str, default: int) -> int:
@@ -368,7 +436,8 @@ class Reconciler:
         try:
             async with self.pool.acquire() as conn:
                 rows = await conn.fetch(
-                    "SELECT m.content_id, m.file_path, m.source_url, m.entity_id "
+                    "SELECT m.content_id, m.file_path, m.source_url, m.entity_id, "
+                    "m.entity_name, m.metadata "
                     "FROM media_items m "
                     "WHERE m.source = $1 AND NOT EXISTS ("
                     "  SELECT 1 FROM media_recover_state t "
@@ -398,7 +467,13 @@ class Reconciler:
             
             # For sources with expiring CDN URLs, bypass redownload and queue a fresh scrape
             if self.source in ("tiktok", "instagram"):
-                await self._queue_rescrape(r["content_id"], r.get("entity_id"))
+                await self._queue_rescrape(
+                    r["content_id"],
+                    r.get("entity_id"),
+                    r.get("entity_name"),
+                    r.get("metadata"),
+                    r.get("source_url"),
+                )
                 self._tombstoned.add(r["content_id"])
                 self._dirty.add(r["content_id"])
                 continue
@@ -414,20 +489,50 @@ class Reconciler:
         await self.persist()
         return downloaded
 
-    async def _queue_rescrape(self, content_id: str, entity_id: str | None = None) -> None:
-        """Send expiring-URL media to the revisit/dead-letter queue instead of failing."""
-        if not self.pool: return
+    async def _queue_rescrape(
+        self,
+        content_id: str,
+        entity_id: str | None = None,
+        entity_name: str | None = None,
+        metadata: dict | str | None = None,
+        source_url: str | None = None,
+    ) -> None:
+        """Queue only if a first-party detail permalink can be recovered."""
+        if not self.pool:
+            return
         try:
+            post_url = _canonical_rescrape_permalink(
+                self.source,
+                content_id,
+                metadata,
+                entity_name,
+            )
+            if not post_url:
+                logger.debug(
+                    "%s: skipping browser revisit without canonical permalink for %s",
+                    self.source,
+                    content_id,
+                )
+                return
             async with self.pool.acquire() as conn:
                 if self.source in ("tiktok", "instagram"):
                     await conn.execute(
                         """
-                        INSERT INTO browser_media_revisit_queue (platform, content_id, priority)
-                        VALUES ($1, $2, 100)
+                        INSERT INTO browser_media_revisit_queue
+                          (platform, content_id, username, post_url, source_url, reason, priority)
+                        VALUES ($1, $2, $3, $4, $5, 'reconciler_expired_url', 100)
                         ON CONFLICT (platform, content_id) DO UPDATE
-                        SET status = 'pending', priority = 100
+                        SET username = COALESCE(EXCLUDED.username, browser_media_revisit_queue.username),
+                            post_url = COALESCE(EXCLUDED.post_url, browser_media_revisit_queue.post_url),
+                            source_url = COALESCE(EXCLUDED.source_url, browser_media_revisit_queue.source_url),
+                            priority = GREATEST(browser_media_revisit_queue.priority, EXCLUDED.priority),
+                            updated_at = now()
                         """,
-                        self.source, content_id
+                        self.source,
+                        content_id,
+                        entity_name,
+                        post_url,
+                        source_url,
                     )
                 else:
                     await conn.execute(

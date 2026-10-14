@@ -1078,6 +1078,18 @@ function consumeInstagramRevisitBudget() {
   lsSet(key, JSON.stringify(state));
   return true;
 }
+function hasInstagramRevisitBudget() {
+  const cap = igRevisitHourlyCap();
+  if (cap <= 0) return false;
+  const key = "ucIgRevisitHourlyBudget";
+  const bucket = Math.floor(Date.now() / 3600000);
+  try {
+    const state = JSON.parse(localStorage.getItem(key) || "null");
+    return !state || state.bucket !== bucket || Number(state.count || 0) < cap;
+  } catch (e) {
+    return true;
+  }
+}
 const IG_SEEDED_ACCOUNTS = new Set();  // ds_user_ids self-seeded this session (re-seeds on account switch)
 
 const instagram = {
@@ -1534,24 +1546,143 @@ function collectIgDetailDomMedia(sink, username) {
 // reliable wins. Open a profile or your "Following" feed and leave it.
 // ===========================================================================
 function tiktokRevisitKey() { return "uc_tiktok_revisit_active"; }
+async function browserRevisitTabId() {
+  const response = await send({ type: "getBrowserTabId" }, { retries: 0, timeoutMs: 5000 }).catch(() => null);
+  if (!response || response.tab_id == null) return null;
+  const tabId = response && Number(response.tab_id);
+  return Number.isInteger(tabId) && tabId >= 0 ? tabId : null;
+}
+async function browserRevisitTabState(tabId, platform, url) {
+  if (!Number.isInteger(Number(tabId)) || Number(tabId) < 0) return null;
+  return await send({
+    type: "getBrowserRevisitTabState",
+    tab_id: Number(tabId),
+    platform,
+    url,
+  }, { retries: 0, timeoutMs: 5000 }).catch(() => null);
+}
+function browserMediaRevisitPageMatches(platform, actualUrl, targetUrl) {
+  try {
+    const actual = new URL(actualUrl);
+    const target = new URL(targetUrl);
+    if (actual.pathname.replace(/\/$/, "") !== target.pathname.replace(/\/$/, "")) return false;
+    const hosts = {
+      instagram: new Set(["instagram.com", "www.instagram.com"]),
+      threads: new Set(["threads.com", "www.threads.com", "threads.net", "www.threads.net"]),
+      tiktok: new Set(["tiktok.com", "www.tiktok.com"]),
+      x: new Set(["x.com", "www.x.com", "twitter.com", "www.twitter.com"]),
+      facebook: new Set(["facebook.com", "www.facebook.com", "m.facebook.com"]),
+      lemon8: new Set(["lemon8-app.com", "www.lemon8-app.com", "lemon8.com", "www.lemon8.com"]),
+    }[platform];
+    return !!hosts && hosts.has(actual.hostname.toLowerCase()) && hosts.has(target.hostname.toLowerCase());
+  } catch (e) {
+    return false;
+  }
+}
+const BROWSER_REVISIT_RESULT_TIMEOUT_MS = 10 * 60 * 1000;
+async function armBrowserRevisitWatchdog(queue, platform, active) {
+  if (!active || !active.content_id) return;
+  await send({
+    type: "browserRevisitNavigationStarted",
+    queue,
+    platform,
+    content_id: active.content_id,
+    claim_attempt: active.attempts ?? null,
+    url: active.url || active.post_url || null,
+    navigation_started_at: active.navigation_started_at || active.claimed_at || Date.now(),
+  }, { retries: 1, timeoutMs: 8000 }).catch(() => null);
+}
 function currentTikTokRevisit() {
   try {
     const active = JSON.parse(localStorage.getItem(tiktokRevisitKey()) || "null");
     if (!active || !active.content_id) return null;
-    if (active.claimed_at && Date.now() - active.claimed_at > 30 * 60000) {
-      localStorage.removeItem(tiktokRevisitKey());
-      return null;
-    }
     return active;
   } catch (e) {
     localStorage.removeItem(tiktokRevisitKey());
     return null;
   }
 }
+async function sendTikTokRevisitResult(active, result) {
+  if (!active || !active.content_id) return false;
+  const payload = result || active.result_pending || {
+    type: "tiktokRevisitResult",
+    content_id: active.content_id,
+    claim_attempt: active.attempts ?? null,
+    status: "failed",
+    reason: "detail_result_missing",
+    username: active.username || null,
+  };
+  const response = await send(payload, { retries: 2, timeoutMs: 12000 }).catch(() => null);
+  if (response && response.ok) {
+    localStorage.removeItem(tiktokRevisitKey());
+    return true;
+  }
+  localStorage.setItem(tiktokRevisitKey(), JSON.stringify({ ...active, result_pending: payload }));
+  return false;
+}
 async function maybeStartTikTokRevisit(owner) {
   if (deferNavigationForForcedRecovery("tiktok")) return null;
   const active = currentTikTokRevisit();
-  if (active) return active;
+  if (active) {
+    if (active.result_pending) {
+      await sendTikTokRevisitResult(active);
+      return { ...active, navigating: true };
+    }
+    const activeUrl = active.url || active.post_url;
+    if (!browserMediaRevisitUrlOk("tiktok", activeUrl)) {
+      await sendTikTokRevisitResult(active, {
+        type: "tiktokRevisitResult",
+        content_id: active.content_id,
+        claim_attempt: active.attempts ?? null,
+        status: "unavailable",
+        reason: "missing_revisit_url",
+        username: active.username || owner || null,
+      });
+      return { ...active, navigating: true };
+    }
+    const tabId = await browserRevisitTabId();
+    if (tabId === null) return { ...active, navigating: true };
+    if (active.tab_id != null && Number(active.tab_id) !== tabId) {
+      return { ...active, navigating: true };
+    }
+    if (active.tab_id == null) {
+      if (location.href !== activeUrl) {
+        await sendTikTokRevisitResult(active, {
+          type: "tiktokRevisitResult",
+          content_id: active.content_id,
+          claim_attempt: active.attempts ?? null,
+          status: "failed",
+          reason: "detail_tab_owner_missing",
+          username: active.username || owner || null,
+        });
+        return { ...active, navigating: true };
+      }
+      active.tab_id = tabId;
+      localStorage.setItem(tiktokRevisitKey(), JSON.stringify(active));
+    }
+    await armBrowserRevisitWatchdog("tiktok", "tiktok", active);
+    if (location.href !== activeUrl &&
+        Date.now() - Number(active.navigation_started_at || active.claimed_at || Date.now()) > BROWSER_REVISIT_NAVIGATION_TIMEOUT_MS) {
+      await sendTikTokRevisitResult(active, {
+        type: "tiktokRevisitResult",
+        content_id: active.content_id,
+        claim_attempt: active.attempts ?? null,
+        status: "failed",
+        reason: "detail_navigation_timeout",
+        username: active.username || owner || null,
+      });
+      clog("warn", `TikTok detail navigation timed out for ${active.content_id}`, "tiktok");
+      return { ...active, navigating: true };
+    }
+    if (location.href !== activeUrl) {
+      await sleep(jitter(900));
+      location.href = activeUrl;
+      return { ...active, url: activeUrl, navigating: true };
+    }
+    return active;
+  }
+  const tabId = await browserRevisitTabId();
+  if (tabId === null) return null;
   let reply = null;
   try {
     reply = await send({ type: "getTikTokRevisitTarget", owner: owner || null }).catch(() => null);
@@ -1560,19 +1691,23 @@ async function maybeStartTikTokRevisit(owner) {
   }
   const target = reply && reply.target;
   if (!target || !target.content_id) return null;
-  const url = target.post_url || target.source_url;
-  if (!url || !/^https?:\/\//i.test(url)) {
-    await send({
+  const claim = { ...target, tab_id: tabId };
+  const url = target.post_url;
+  if (!browserMediaRevisitUrlOk("tiktok", url)) {
+    await sendTikTokRevisitResult(claim, {
       type: "tiktokRevisitResult",
       content_id: target.content_id,
-      status: "failed",
+      claim_attempt: target.attempts ?? null,
+      status: "unavailable",
       reason: "missing_revisit_url",
       username: target.username || null,
-    }).catch(() => {});
-    return null;
+    });
+    return { ...target, navigating: true };
   }
-  const state = { ...target, url, claimed_at: Date.now() };
+  const now = Date.now();
+  const state = { ...claim, url, claimed_at: now, navigation_started_at: now };
   localStorage.setItem(tiktokRevisitKey(), JSON.stringify(state));
+  await armBrowserRevisitWatchdog("tiktok", "tiktok", state);
   if (location.href !== url) {
     clog("info", `TikTok detail revisit queued for ${target.content_id}`, "tiktok");
     await sleep(jitter(900));
@@ -1586,16 +1721,16 @@ async function finishTikTokRevisit(active, response, observed, username) {
   const stored = Number(response && response.upload && response.upload.stored || 0);
   const status = observed > 0 ? "success" : "no_media";
   const reason = observed > 0 ? "detail_page_harvested" : "detail_page_no_media";
-  await send({
+  await sendTikTokRevisitResult(active, {
     type: "tiktokRevisitResult",
     content_id: active.content_id,
+    claim_attempt: active.attempts ?? null,
     status,
     reason,
     observed,
     stored,
     username: username || active.username || null,
-  }).catch(() => {});
-  localStorage.removeItem(tiktokRevisitKey());
+  });
 }
 function tiktokProgressKey() {
   return "uc_tiktok_zero_progress_" + location.pathname.replace(/[^A-Za-z0-9_/-]/g, "_").slice(0, 180);
@@ -1632,10 +1767,6 @@ function currentBrowserMediaRevisit(platform) {
   try {
     const active = JSON.parse(localStorage.getItem(browserMediaRevisitKey(platform)) || "null");
     if (!active || !active.content_id || active.platform !== platform) return null;
-    if (active.claimed_at && Date.now() - active.claimed_at > 30 * 60000) {
-      localStorage.removeItem(browserMediaRevisitKey(platform));
-      return null;
-    }
     return active;
   } catch (e) {
     localStorage.removeItem(browserMediaRevisitKey(platform));
@@ -1682,6 +1813,10 @@ function browserMediaRevisitUrlOk(platform, url) {
       return /(^|\.)instagram\.com$/i.test(u.hostname) &&
         /^\/(?:p|reel|reels|tv|stories)\//.test(u.pathname);
     }
+    if (platform === "tiktok") {
+      return /^(?:www\.)?tiktok\.com$/i.test(u.hostname) &&
+        /^\/@[^/]+\/(?:video|photo)\/\d+\/?$/i.test(u.pathname);
+    }
     if (platform === "facebook") {
       return /(^|\.)facebook\.com$/i.test(u.hostname) &&
         (/\/(posts|photos|videos)\//.test(u.pathname) ||
@@ -1694,13 +1829,89 @@ function browserMediaRevisitUrlOk(platform, url) {
   } catch (e) {}
   return false;
 }
+const BROWSER_REVISIT_NAVIGATION_TIMEOUT_MS = 120000;
+async function sendBrowserMediaRevisitResult(platform, active, result) {
+  if (!active || !active.content_id) return false;
+  const payload = result || active.result_pending || {
+    type: "browserMediaRevisitResult",
+    platform,
+    content_id: active.content_id,
+    claim_attempt: active.attempts ?? null,
+    status: "failed",
+    reason: "detail_result_missing",
+    username: active.username || null,
+  };
+  const response = await send(payload, { retries: 2, timeoutMs: 12000 }).catch(() => null);
+  if (response && response.ok) {
+    localStorage.removeItem(browserMediaRevisitKey(platform));
+    return true;
+  }
+  localStorage.setItem(browserMediaRevisitKey(platform), JSON.stringify({
+    ...active,
+    platform,
+    result_pending: payload,
+  }));
+  return false;
+}
 async function maybeStartBrowserMediaRevisit(platform, owner) {
   if (!BROWSER_MEDIA_REVISIT_PLATFORMS.has(platform)) return null;
   if (deferBrowserMediaRevisitForForcedRecovery(platform)) return null;
   const active = currentBrowserMediaRevisit(platform);
   if (active) {
-    const activeUrl = active.url || active.post_url || active.source_url;
-    if (browserMediaRevisitUrlOk(platform, activeUrl) && location.href !== activeUrl) {
+    if (active.result_pending) {
+      await sendBrowserMediaRevisitResult(platform, active);
+      return { ...active, navigating: true };
+    }
+    const activeUrl = active.url || active.post_url;
+    if (!browserMediaRevisitUrlOk(platform, activeUrl)) {
+      await sendBrowserMediaRevisitResult(platform, active, {
+        type: "browserMediaRevisitResult",
+        platform,
+        content_id: active.content_id,
+        claim_attempt: active.attempts ?? null,
+        status: "unavailable",
+        reason: "missing_revisit_url",
+        username: active.username || owner || null,
+      });
+      return { ...active, navigating: true };
+    }
+    const tabId = await browserRevisitTabId();
+    if (tabId === null) return { ...active, navigating: true };
+    if (active.tab_id != null && Number(active.tab_id) !== tabId) {
+      return { ...active, navigating: true };
+    }
+    if (active.tab_id == null) {
+      if (location.href !== activeUrl) {
+        await sendBrowserMediaRevisitResult(platform, active, {
+          type: "browserMediaRevisitResult",
+          platform,
+          content_id: active.content_id,
+          claim_attempt: active.attempts ?? null,
+          status: "failed",
+          reason: "detail_tab_owner_missing",
+          username: active.username || owner || null,
+        });
+        return { ...active, navigating: true };
+      }
+      active.tab_id = tabId;
+      localStorage.setItem(browserMediaRevisitKey(platform), JSON.stringify(active));
+    }
+    await armBrowserRevisitWatchdog("browser", platform, active);
+    if (location.href !== activeUrl &&
+        Date.now() - Number(active.navigation_started_at || active.claimed_at || Date.now()) > BROWSER_REVISIT_NAVIGATION_TIMEOUT_MS) {
+      await sendBrowserMediaRevisitResult(platform, active, {
+        type: "browserMediaRevisitResult",
+        platform,
+        content_id: active.content_id,
+        claim_attempt: active.attempts ?? null,
+        status: "failed",
+        reason: "detail_navigation_timeout",
+        username: active.username || owner || null,
+      });
+      clog("warn", `${platform.toUpperCase()} detail navigation timed out for ${active.content_id}`, platform);
+      return { ...active, navigating: true };
+    }
+    if (location.href !== activeUrl) {
       clog("info", `${platform.toUpperCase()} detail revisit resuming for ${active.content_id}`, platform);
       await sleep(jitter(900));
       location.href = activeUrl;
@@ -1708,29 +1919,50 @@ async function maybeStartBrowserMediaRevisit(platform, owner) {
     }
     return active;
   }
+  const tabId = await browserRevisitTabId();
+  if (tabId === null) return null;
+  if (platform === "instagram" && !hasInstagramRevisitBudget()) return null;
   const reply = await send(
     { type: "getBrowserMediaRevisitTarget", platform, owner: owner || null },
     { retries: 0, timeoutMs: 8000 }
   ).catch(() => null);
   const target = reply && reply.target;
   if (!target || !target.content_id) return null;
+  const claim = { ...target, platform, tab_id: tabId };
   if (platform === "instagram" && !consumeInstagramRevisitBudget()) {
-    return null;
-  }
-  const url = target.post_url || target.source_url;
-  if (!browserMediaRevisitUrlOk(platform, url)) {
-    await send({
+    await sendBrowserMediaRevisitResult(platform, claim, {
       type: "browserMediaRevisitResult",
       platform,
       content_id: target.content_id,
-      status: "failed",
-      reason: "missing_revisit_url",
-      username: target.username || null,
-    }).catch(() => {});
-    return null;
+      claim_attempt: target.attempts ?? null,
+      status: "deferred",
+      reason: "instagram_revisit_budget_race",
+      username: target.username || owner || null,
+    });
+    return { ...target, platform, navigating: true };
   }
-  const state = { ...target, platform, url, claimed_at: Date.now() };
+  const url = target.post_url;
+  if (!browserMediaRevisitUrlOk(platform, url)) {
+    await sendBrowserMediaRevisitResult(platform, claim, {
+      type: "browserMediaRevisitResult",
+      platform,
+      content_id: target.content_id,
+      claim_attempt: target.attempts ?? null,
+      status: "unavailable",
+      reason: "missing_revisit_url",
+      username: target.username || owner || null,
+    });
+    return { ...target, platform, navigating: true };
+  }
+  const now = Date.now();
+  const state = {
+    ...claim,
+    url,
+    claimed_at: now,
+    navigation_started_at: now,
+  };
   localStorage.setItem(browserMediaRevisitKey(platform), JSON.stringify(state));
+  await armBrowserRevisitWatchdog("browser", platform, state);
   if (location.href !== url) {
     clog("info", `${platform.toUpperCase()} detail revisit queued for ${target.content_id}`, platform);
     await sleep(jitter(900));
@@ -1749,17 +1981,17 @@ async function finishBrowserMediaRevisit(platform, active, response, observed, u
   const reason = observed > 0
     ? (attempted && accepted <= 0 ? "detail_page_upload_failed" : "detail_page_harvested")
     : "detail_page_no_media";
-  await send({
+  await sendBrowserMediaRevisitResult(platform, active, {
     type: "browserMediaRevisitResult",
     platform,
     content_id: active.content_id,
+    claim_attempt: active.attempts ?? null,
     status,
     reason,
     observed,
     stored,
     username: username || active.username || null,
-  }).catch(() => {});
-  localStorage.removeItem(browserMediaRevisitKey(platform));
+  });
 }
 function markBrowserMediaRevisitItems(platform, sink, active) {
   if (!active || !active.content_id || !sink || !Array.isArray(sink.items)) return;

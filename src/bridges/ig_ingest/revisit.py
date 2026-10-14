@@ -66,24 +66,38 @@ async def tiktok_revisit_target(request):
             )
             row = await conn.fetchrow(
                 """
-                WITH picked AS (
-                  SELECT id, status AS previous_status
-                  FROM tiktok_browser_revisit_queue
+                WITH platform_lock AS MATERIALIZED (
+                  SELECT pg_advisory_xact_lock(
+                    hashtextextended('unifiedcollector:tiktok_browser_revisit', 0)
+                  )
+                ), active AS MATERIALIZED (
+                  SELECT 1
+                  FROM tiktok_browser_revisit_queue q
+                  CROSS JOIN platform_lock
+                  WHERE q.status = 'claimed'
+                    AND COALESCE(q.last_attempt_at, q.updated_at, q.created_at)
+                        > now() - ($2::int * interval '1 second')
+                  LIMIT 1
+                ), picked AS MATERIALIZED (
+                  SELECT q.id, q.status AS previous_status
+                  FROM tiktok_browser_revisit_queue q
+                  CROSS JOIN platform_lock
                   WHERE (
-                      (status IN ('pending', 'failed') AND next_visit_at <= now())
+                      (q.status IN ('pending', 'failed') AND q.next_visit_at <= now())
                       OR (
-                        status = 'claimed'
-                        AND COALESCE(last_attempt_at, updated_at, created_at)
+                        q.status = 'claimed'
+                        AND COALESCE(q.last_attempt_at, q.updated_at, q.created_at)
                             <= now() - ($2::int * interval '1 second')
                       )
                     )
-                    AND attempts < $1
+                    AND q.attempts < $1
+                    AND NOT EXISTS (SELECT 1 FROM active)
                   ORDER BY
-                    CASE WHEN status = 'claimed' THEN 0 ELSE 1 END,
-                    priority DESC,
-                    next_visit_at ASC,
-                    created_at ASC
-                  FOR UPDATE SKIP LOCKED
+                    CASE WHEN q.status = 'claimed' THEN 0 ELSE 1 END,
+                    q.priority DESC,
+                    q.next_visit_at ASC,
+                    q.created_at ASC
+                  FOR UPDATE OF q SKIP LOCKED
                   LIMIT 1
                 )
                 UPDATE tiktok_browser_revisit_queue q
@@ -132,24 +146,33 @@ async def tiktok_revisit_result(request):
     raw_status = str(body.get("status") or "").strip().lower()
     reason = str(body.get("reason") or raw_status or "unknown")[:300]
     success = raw_status in {"success", "ok", "stored", "completed"}
-    unavailable = raw_status in {"unavailable", "private", "deleted", "no_media"}
-    status = "completed" if success else ("unavailable" if unavailable else "failed")
+    unavailable = raw_status in {"unavailable", "private", "deleted", "no_media", "missing_revisit_url"}
+    deferred = raw_status == "deferred"
+    status = "pending" if deferred else ("completed" if success else ("unavailable" if unavailable else "failed"))
+    try:
+        claim_attempt = int(body.get("claim_attempt")) if body.get("claim_attempt") is not None else None
+    except (TypeError, ValueError):
+        claim_attempt = None
     try:
         async with request.app["pool"].acquire() as conn:
-            await conn.execute(
+            result = await conn.execute(
                 """
                 UPDATE tiktok_browser_revisit_queue
                 SET status = $2,
                     reason = COALESCE($3, reason),
+                    attempts = CASE WHEN $6::boolean THEN GREATEST(0, attempts - 1) ELSE attempts END,
                     last_success_at = CASE WHEN $2 = 'completed' THEN now() ELSE last_success_at END,
                     next_visit_at = CASE
                       WHEN $2 = 'completed' THEN next_visit_at
                       WHEN $2 = 'unavailable' THEN now() + interval '7 days'
+                      WHEN $6::boolean THEN now() + interval '5 minutes'
                       ELSE now() + (LEAST(3600, GREATEST(120, attempts * 300)) * interval '1 second')
                     END,
                     metadata = metadata || $4::jsonb,
                     updated_at = now()
                 WHERE content_id = $1
+                  AND status = 'claimed'
+                  AND ($5::int IS NULL OR attempts = $5)
                 """,
                 content_id,
                 status,
@@ -162,13 +185,17 @@ async def tiktok_revisit_result(request):
                             "stored": body.get("stored"),
                             "observed": body.get("observed"),
                             "extension_version": body.get("extension_version"),
+                            "claim_attempt": claim_attempt,
                             "reported_at": datetime.now(timezone.utc).isoformat(),
                         }
                     },
                     default=str,
                 ),
+                claim_attempt,
+                deferred,
             )
-        return _cors(web.json_response({"ok": True, "status": status}))
+        accepted = result.rsplit(" ", 1)[-1] == "1"
+        return _cors(web.json_response({"ok": True, "accepted": accepted, "status": status}))
     except Exception as exc:
         logger.debug("tiktok revisit result update failed content_id=%s", content_id, exc_info=True)
         return _cors(web.json_response({"ok": False, "error": str(exc)[:300]}, status=500))
@@ -226,25 +253,40 @@ async def browser_revisit_target(request):
             )
             row = await conn.fetchrow(
                 """
-                WITH picked AS (
-                  SELECT id, status AS previous_status
-                  FROM browser_media_revisit_queue
-                  WHERE platform = $1
+                WITH platform_lock AS MATERIALIZED (
+                  SELECT pg_advisory_xact_lock(
+                    hashtextextended('unifiedcollector:browser_media_revisit:' || $1, 0)
+                  )
+                ), active AS MATERIALIZED (
+                  SELECT 1
+                  FROM browser_media_revisit_queue active
+                  CROSS JOIN platform_lock
+                  WHERE active.platform = $1
+                    AND active.status = 'claimed'
+                    AND COALESCE(active.last_attempt_at, active.updated_at, active.created_at)
+                        > now() - ($3::int * interval '1 second')
+                  LIMIT 1
+                ), picked AS MATERIALIZED (
+                  SELECT q.id, q.status AS previous_status
+                  FROM browser_media_revisit_queue q
+                  CROSS JOIN platform_lock
+                  WHERE q.platform = $1
                     AND (
-                      (status IN ('pending', 'failed') AND next_visit_at <= now())
+                      (q.status IN ('pending', 'failed') AND q.next_visit_at <= now())
                       OR (
-                        status = 'claimed'
-                        AND COALESCE(last_attempt_at, updated_at, created_at)
+                        q.status = 'claimed'
+                        AND COALESCE(q.last_attempt_at, q.updated_at, q.created_at)
                             <= now() - ($3::int * interval '1 second')
                       )
                     )
-                    AND attempts < $2
+                    AND q.attempts < $2
+                    AND NOT EXISTS (SELECT 1 FROM active)
                   ORDER BY
-                    CASE WHEN status = 'claimed' THEN 0 ELSE 1 END,
-                    priority DESC,
-                    next_visit_at ASC,
-                    created_at ASC
-                  FOR UPDATE SKIP LOCKED
+                    CASE WHEN q.status = 'claimed' THEN 0 ELSE 1 END,
+                    q.priority DESC,
+                    q.next_visit_at ASC,
+                    q.created_at ASC
+                  FOR UPDATE OF q SKIP LOCKED
                   LIMIT 1
                 )
                 UPDATE browser_media_revisit_queue q
@@ -326,23 +368,32 @@ async def browser_revisit_result(request):
     reason = str(body.get("reason") or raw_status or "unknown")[:300]
     success = raw_status in {"success", "ok", "stored", "completed"}
     unavailable = raw_status in {"unavailable", "private", "deleted", "no_media", "missing_revisit_url"}
-    status = "completed" if success else ("unavailable" if unavailable else "failed")
+    deferred = raw_status == "deferred"
+    status = "pending" if deferred else ("completed" if success else ("unavailable" if unavailable else "failed"))
+    try:
+        claim_attempt = int(body.get("claim_attempt")) if body.get("claim_attempt") is not None else None
+    except (TypeError, ValueError):
+        claim_attempt = None
     try:
         async with request.app["pool"].acquire() as conn:
-            await conn.execute(
+            result = await conn.execute(
                 """
                 UPDATE browser_media_revisit_queue
                 SET status = $3,
                     reason = COALESCE($4, reason),
+                    attempts = CASE WHEN $7::boolean THEN GREATEST(0, attempts - 1) ELSE attempts END,
                     last_success_at = CASE WHEN $3 = 'completed' THEN now() ELSE last_success_at END,
                     next_visit_at = CASE
                       WHEN $3 = 'completed' THEN next_visit_at
                       WHEN $3 = 'unavailable' THEN now() + interval '7 days'
+                      WHEN $7::boolean THEN now() + interval '5 minutes'
                       ELSE now() + (LEAST(3600, GREATEST(120, attempts * 300)) * interval '1 second')
                     END,
                     metadata = metadata || $5::jsonb,
                     updated_at = now()
                 WHERE platform = $1 AND content_id = $2
+                  AND status = 'claimed'
+                  AND ($6::int IS NULL OR attempts = $6)
                 """,
                 platform,
                 content_id,
@@ -356,13 +407,17 @@ async def browser_revisit_result(request):
                             "stored": body.get("stored"),
                             "observed": body.get("observed"),
                             "extension_version": body.get("extension_version"),
+                            "claim_attempt": claim_attempt,
                             "reported_at": datetime.now(timezone.utc).isoformat(),
                         }
                     },
                     default=str,
                 ),
+                claim_attempt,
+                deferred,
             )
-        return _cors(web.json_response({"ok": True, "status": status}))
+        accepted = result.rsplit(" ", 1)[-1] == "1"
+        return _cors(web.json_response({"ok": True, "accepted": accepted, "status": status}))
     except Exception as exc:
         logger.debug(
             "browser media revisit result update failed platform=%s content_id=%s",

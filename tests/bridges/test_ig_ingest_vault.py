@@ -580,6 +580,83 @@ def test_browser_media_candidates_skips_unopenable_instagram_revisit():
     assert not any("browser_media_revisit_queue" in query for query in queries)
 
 
+def test_threads_revisit_requires_canonical_page_url():
+    assert ig_ingest._browser_candidate_post_url(
+        "threads",
+        {"content_id": "img_hash", "url": "https://scontent.cdninstagram.com/video.mp4"},
+        "alice",
+    ) is None
+    assert ig_ingest._browser_candidate_post_url(
+        "threads",
+        {
+            "content_id": "img_hash",
+            "url": "https://scontent.cdninstagram.com/video.mp4",
+            "meta": {"page_url": "https://www.threads.com/@alice/post/ABC123"},
+        },
+        "alice",
+    ) == "https://www.threads.com/@alice/post/ABC123"
+    assert ig_ingest._browser_candidate_post_url(
+        "instagram",
+        {"content_id": "abc", "meta": {"page_url": "https://fakeinstagram.com/p/ABC123/"}},
+        "alice",
+    ) is None
+    assert ig_ingest._browser_candidate_post_url(
+        "instagram",
+        {"content_id": "abc", "meta": {"page_url": "https://scontent.cdninstagram.com/p/ABC123/"}},
+        "alice",
+    ) is None
+    assert ig_ingest._tiktok_candidate_post_url(
+        {"content_id": "123456789", "meta": {"page_url": "https://www.tiktok.com/@alice"}},
+        "alice",
+    ) == "https://www.tiktok.com/@alice/video/123456789"
+
+
+def test_browser_revisit_target_serializes_per_platform_lease(monkeypatch):
+    pool = _FakePool()
+    pool.conn.fetchrow_result = None
+    monkeypatch.setenv("BROWSER_MEDIA_REVISIT_MAX_ATTEMPTS", "5")
+    response = asyncio.run(
+        ig_ingest.browser_revisit_target(_FakeRequest({"pool": pool}, {}, query={"platform": "threads"}))
+    )
+    assert json.loads(response.text)["target"] is None
+    claim_query = pool.conn.fetchrows[0][0]
+    assert "pg_advisory_xact_lock" in claim_query
+    assert "status = 'claimed'" in claim_query
+
+
+def test_browser_revisit_result_is_fenced_by_claim_attempt():
+    pool = _FakePool()
+    response = asyncio.run(
+        ig_ingest.browser_revisit_result(
+            _FakeRequest(
+                {"pool": pool},
+                {
+                    "platform": "threads",
+                    "content_id": "thread_video_1",
+                    "claim_attempt": 3,
+                    "status": "success",
+                },
+            )
+        )
+    )
+    assert json.loads(response.text) == {"ok": True, "accepted": True, "status": "completed"}
+    query, args = pool.conn.executes[0]
+    assert "attempts = $6" in query
+    assert args[-2] == 3
+
+
+def test_browser_revisit_upsert_preserves_terminal_states_and_schedule():
+    sql = ig_ingest._BROWSER_MEDIA_REVISIT_UPSERT_SQL
+    assert "status =" not in sql.split("ON CONFLICT", 1)[1]
+    assert "attempts =" not in sql.split("ON CONFLICT", 1)[1]
+    assert "next_visit_at =" not in sql.split("ON CONFLICT", 1)[1]
+    tiktok_sql = ig_ingest._TIKTOK_BROWSER_REVISIT_UPSERT_SQL
+    conflict_update = tiktok_sql.split("ON CONFLICT", 1)[1]
+    assert "status =" not in conflict_update
+    assert "attempts =" not in conflict_update
+    assert "next_visit_at =" not in conflict_update
+
+
 def test_browser_revisit_target_reclaims_stale_claimed(monkeypatch):
     pool = _FakePool()
     pool.conn.fetchrow_result = {
@@ -668,7 +745,7 @@ def test_browser_revisit_result_scopes_update_by_platform():
     )
     payload = json.loads(response.text)
 
-    assert payload == {"ok": True, "status": "completed"}
+    assert payload == {"ok": True, "accepted": True, "status": "completed"}
     query, args = pool.conn.executes[0]
     assert "browser_media_revisit_queue" in query
     assert "WHERE platform = $1 AND content_id = $2" in query
@@ -705,7 +782,7 @@ def test_tiktok_revisit_target_reclaims_stale_claimed(monkeypatch):
     query, args = pool.conn.fetchrows[0]
     assert "status = 'claimed'" in query
     assert "previous_status" in query
-    assert "COALESCE(last_attempt_at, updated_at, created_at)" in query
+    assert "COALESCE(q.last_attempt_at, q.updated_at, q.created_at)" in query
     assert args == (7, 120, 60)
 
 

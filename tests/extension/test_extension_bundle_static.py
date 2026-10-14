@@ -630,6 +630,30 @@ def test_instagram_browser_media_detail_revisit_is_enabled():
     assert re.search(r'finishBrowserMediaRevisit\(\s*"instagram",', helper_block)
 
 
+def test_browser_revisit_checks_instagram_budget_before_claim_and_uses_page_url_only():
+    content = _read("extension/content.js")
+    revisit_block = content.split("async function maybeStartBrowserMediaRevisit", 1)[1].split(
+        "async function finishBrowserMediaRevisit", 1
+    )[0]
+    assert revisit_block.index("hasInstagramRevisitBudget()") < revisit_block.index("getBrowserMediaRevisitTarget")
+    assert "const url = target.post_url;" in revisit_block
+    assert "target.post_url || target.source_url" not in revisit_block
+    assert "const tabId = await browserRevisitTabId()" in revisit_block
+    assert "active.tab_id" in revisit_block
+    assert "tab_id: tabId" in revisit_block
+    assert "detail_navigation_timeout" in revisit_block
+    assert "result_pending" in revisit_block
+
+
+def test_browser_revisit_background_watchdog_releases_abandoned_navigation():
+    background = _read("extension/background.js")
+    assert "BROWSER_REVISIT_WATCHDOG_PREFIX" in background
+    assert "browserRevisitNavigationStarted" in background
+    assert "detail_navigation_timeout" in background
+    assert "detail_result_timeout" in background
+    assert "runBrowserRevisitWatchdog(a.name)" in background
+
+
 def test_instagram_tuning_knobs_are_bounded_and_explicit():
     content = _read("extension/content.js")
     assert 'lsBoundedInt("ucIgStorySweepCap", 6, 5, 8)' in content

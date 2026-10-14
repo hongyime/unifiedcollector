@@ -943,49 +943,63 @@ def _classify_browser_candidate_result(
 
 def _tiktok_candidate_post_url(item: dict | None, username: str | None) -> str | None:
     meta = _item_meta(item)
-    for key in ("page_url", "post_url", "canonical_url"):
+    for key in ("post_url", "canonical_url", "page_url"):
         value = str(meta.get(key) or (item or {}).get(key) or "").strip()
-        if value.startswith("http"):
+        if _canonical_browser_revisit_url("tiktok", value):
             return value
     source_url = str((item or {}).get("source_url") or (item or {}).get("url") or "").strip()
-    if re.search(r"https?://(?:www\.)?tiktok\.com/@[^/]+/(?:video|photo)/", source_url):
+    if _canonical_browser_revisit_url("tiktok", source_url):
         return source_url
     handle = _tiktok_handle(username)
-    return f"https://www.tiktok.com/@{handle}" if handle else None
+    content_id = str((item or {}).get("content_id") or "").strip()
+    if handle and content_id.isdigit():
+        return f"https://www.tiktok.com/@{handle}/video/{content_id}"
+    return None
+
+
+def _canonical_browser_revisit_url(platform: str, value: str | None) -> str | None:
+    """Return only a first-party detail permalink supported by the browser worker."""
+    raw = str(value or "").strip()
+    if not raw.startswith("https://"):
+        return None
+    try:
+        parsed = urlparse(raw)
+        host = (parsed.hostname or "").lower().rstrip(".")
+        path = parsed.path or ""
+        port = parsed.port
+    except Exception:
+        return None
+    if parsed.username or parsed.password or port not in (None, 443):
+        return None
+    if platform == "instagram":
+        first_party = host in {"instagram.com", "www.instagram.com"}
+        valid_path = re.match(r"^/(?:p|reel|reels|tv|stories)/[^/]+(?:/[^/]+)?/?$", path, re.I)
+    elif platform == "threads":
+        first_party = host in {"threads.com", "www.threads.com", "threads.net", "www.threads.net"}
+        valid_path = re.match(r"^/@[^/]+/post/[^/]+/?$", path, re.I)
+    elif platform == "tiktok":
+        first_party = host in {"tiktok.com", "www.tiktok.com"}
+        valid_path = re.match(r"^/@[^/]+/(?:video|photo)/\d+/?$", path, re.I)
+    elif platform == "x":
+        first_party = host in {"x.com", "www.x.com", "twitter.com", "www.twitter.com"}
+        valid_path = re.match(r"^/[A-Za-z0-9_]{1,20}/status/\d+/?$", path)
+    elif platform == "facebook":
+        first_party = host == "facebook.com" or host.endswith(".facebook.com")
+        valid_path = re.match(r"^/(?:[^/]+/)?(?:posts|photos|videos)/[^/]+/?$|^/(?:photo|permalink|story)\.php(?:/|$)", path, re.I)
+    elif platform == "lemon8":
+        first_party = "lemon8" in host
+        valid_path = re.search(r"/(?:@[^/]+/)?\d{6,}(?:/|$)|/@[^/]+", path, re.I)
+    else:
+        return None
+    return raw if first_party and valid_path else None
 
 
 def _browser_candidate_post_url(platform: str, item: dict | None, username: str | None) -> str | None:
     meta = _item_meta(item)
-    for key in ("page_url", "post_url", "canonical_url", "verify_url", "url"):
+    for key in ("post_url", "canonical_url", "verify_url", "page_url", "url"):
         value = str(meta.get(key) or (item or {}).get(key) or "").strip()
-        if not value.startswith("http"):
-            continue
-        try:
-            parsed = urlparse(value)
-        except Exception:
-            continue
-        host = parsed.netloc.lower()
-        path = parsed.path or ""
-        if platform == "instagram" and host.endswith("instagram.com"):
-            if path.startswith(("/p/", "/reel/", "/reels/", "/tv/", "/stories/")):
-                return value
-        if platform == "x" and host in {"x.com", "www.x.com", "twitter.com", "www.twitter.com"}:
-            if re.match(r"^/[A-Za-z0-9_]{1,20}/status/\d+", path):
-                return value
-        elif platform == "threads" and host in {"www.threads.com", "threads.com", "www.threads.net", "threads.net"}:
-            if re.match(r"^/@[^/]+/post/", path):
-                return value
-        elif platform == "lemon8" and ("lemon8" in host or "lemon8-app.com" in host):
-            if re.search(r"/(?:@[^/]+/)?\d{6,}", path) or "/@" in path:
-                return value
-        elif platform == "facebook" and host.endswith("facebook.com"):
-            if (
-                any(token in path for token in ("/posts/", "/photos/", "/videos/"))
-                or path.startswith("/photo")
-                or path.startswith("/permalink.php")
-                or path.startswith("/story.php")
-            ):
-                return value
+        if _canonical_browser_revisit_url(platform, value):
+            return value
     if platform == "instagram":
         content_id = str((item or {}).get("content_id") or "").strip()
         media_id = re.split(r"[_:/-]", content_id, maxsplit=1)[0]
@@ -1044,16 +1058,6 @@ ON CONFLICT (content_id) DO UPDATE SET
   source_url = COALESCE(EXCLUDED.source_url, tiktok_browser_revisit_queue.source_url),
   reason = EXCLUDED.reason,
   priority = GREATEST(tiktok_browser_revisit_queue.priority, EXCLUDED.priority),
-  status = CASE
-    WHEN tiktok_browser_revisit_queue.status = 'completed'
-      THEN tiktok_browser_revisit_queue.status
-    ELSE 'pending'
-  END,
-  next_visit_at = CASE
-    WHEN tiktok_browser_revisit_queue.status = 'completed'
-      THEN tiktok_browser_revisit_queue.next_visit_at
-    ELSE LEAST(tiktok_browser_revisit_queue.next_visit_at, now())
-  END,
   metadata = tiktok_browser_revisit_queue.metadata || EXCLUDED.metadata,
   updated_at = now()
 """
@@ -1206,16 +1210,6 @@ ON CONFLICT (platform, content_id) DO UPDATE SET
   source_url = COALESCE(EXCLUDED.source_url, browser_media_revisit_queue.source_url),
   reason = EXCLUDED.reason,
   priority = GREATEST(browser_media_revisit_queue.priority, EXCLUDED.priority),
-  status = CASE
-    WHEN browser_media_revisit_queue.status = 'completed'
-      THEN browser_media_revisit_queue.status
-    ELSE 'pending'
-  END,
-  next_visit_at = CASE
-    WHEN browser_media_revisit_queue.status = 'completed'
-      THEN browser_media_revisit_queue.next_visit_at
-    ELSE LEAST(browser_media_revisit_queue.next_visit_at, now())
-  END,
   metadata = browser_media_revisit_queue.metadata || EXCLUDED.metadata,
   updated_at = now()
 """
