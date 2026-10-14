@@ -10,9 +10,9 @@
     // and avoid browser memory spikes.
     { id: "tiktok", label: "TikTok", url: "https://www.tiktok.com/following", host: "www.tiktok.com", cookieUrl: "https://www.tiktok.com", cookie: "sessionid", scraper: true, optionalExtraUrls: ["https://www.tiktok.com/foryou", "https://www.tiktok.com/explore"] },
     // Lemon8's SPA renders "Not found" for /feed/<cat> and legacy paths as of
-    // 2026-08-05. Keep one visible topic tab only; the headless Lemon8 collector
-    // handles broader coverage without pinning extra Chrome tabs.
-    { id: "lemon8", label: "Lemon8", url: "https://www.lemon8-app.com/topic/singapore?region=sg", host: "www.lemon8-app.com", cookieUrl: "https://www.lemon8-app.com", cookie: "sessionid", scraper: false, noLogin: true },
+    // 2026-08-05. Keep one visible topic tab; the extension supplements the
+    // headless collector with paced DOM media candidates.
+    { id: "lemon8", label: "Lemon8", url: "https://www.lemon8-app.com/topic/singapore?region=sg", host: "www.lemon8-app.com", cookieUrl: "https://www.lemon8-app.com", cookie: "sessionid", scraper: true, noLogin: true },
     { id: "x", label: "Twitter / X", url: "https://x.com/home", host: "x.com", aliasHosts: ["twitter.com"], cookieUrl: "https://x.com", cookie: "auth_token", scraper: true },
     { id: "facebook", label: "Facebook", url: "https://www.facebook.com/", host: "www.facebook.com", cookieUrl: "https://www.facebook.com", cookie: "c_user", scraper: true },
     { id: "strava", label: "Strava", url: "https://www.strava.com/dashboard", host: "www.strava.com", cookieUrl: "https://www.strava.com", cookie: "_strava4_session", scraper: true }
@@ -1043,7 +1043,7 @@
   var _mainWorldHookHostRe = /(^|\.)((instagram|tiktok|strava)\.com|threads\.com|x\.com|twitter\.com|facebook\.com)$/i;
   var SCRAPER_TABS_PINNED_KEY = "ucPinScraperTabs";
   var EXPANDED_PLATFORM_TABS_KEY = "ucOpenExpandedPlatformTabs";
-  var AUTO_SCRAPER_PLATFORM_IDS = /* @__PURE__ */ new Set(["instagram", "threads", "tiktok", "x", "facebook", "strava"]);
+  var AUTO_SCRAPER_PLATFORM_IDS = /* @__PURE__ */ new Set(["instagram", "threads", "tiktok", "lemon8", "x", "facebook", "strava"]);
   async function scraperTabsPinned() {
     try {
       const stored = await chrome.storage.local.get([SCRAPER_TABS_PINNED_KEY]);

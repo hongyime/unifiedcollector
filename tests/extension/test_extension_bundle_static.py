@@ -120,7 +120,7 @@ def test_x_is_auto_managed_by_scraper_tab_recovery():
     background = _read("extension/background.js")
     tabs_js = _read("extension/tabs.js")
 
-    assert 'const AUTO_SCRAPER_PLATFORM_IDS = new Set(["instagram", "threads", "tiktok", "x", "facebook", "strava"])' in background
+    assert 'const AUTO_SCRAPER_PLATFORM_IDS = new Set(["instagram", "threads", "tiktok", "lemon8", "x", "facebook", "strava"])' in background
     assert "p.scraper && AUTO_SCRAPER_PLATFORM_IDS.has(p.id)" in background
     open_all_block = background.split('case "openAll":', 1)[1].split('case "refreshScraperTabs":', 1)[0]
     reload_intent_block = background.split("const openIds = Array.isArray(intent.open_ids)", 1)[1].split(
@@ -134,7 +134,7 @@ def test_x_is_auto_managed_by_scraper_tab_recovery():
     assert "[EXPANDED_PLATFORM_TABS_KEY]: false" in tabs_js
 
 
-def test_lemon8_defaults_to_headless_collector_not_visible_scraper_tab():
+def test_lemon8_runs_as_visible_scraper_alongside_headless_collector():
     background = _read("extension/background.js")
     platforms = _read("extension/platforms.js")
     content = _read("extension/content.js")
@@ -143,7 +143,8 @@ def test_lemon8_defaults_to_headless_collector_not_visible_scraper_tab():
         assert '"https://www.lemon8-app.com/topic/singapore?region=sg"' in text
         lemon8_line = next(line for line in text.splitlines() if 'id: "lemon8"' in line)
         assert "extraUrls" not in lemon8_line
-        assert "scraper: false" in lemon8_line
+        assert "scraper: true" in lemon8_line
+    assert '"lemon8", "x"' in background
     assert "function lemon8TopicFromHref" in content
     assert 'return topic ? "topic_" + topic : "topic";' in content
 

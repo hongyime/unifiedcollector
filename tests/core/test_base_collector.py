@@ -278,10 +278,12 @@ async def test_seed_known_ids_keeps_partial_page_on_timeout(monkeypatch, caplog)
 
 
 @pytest.mark.asyncio
-async def test_duplicate_skip_keeps_canonical_vault_blob(tmp_path, monkeypatch):
+@pytest.mark.parametrize("source", ["github", "lemon8"])
+async def test_duplicate_skip_keeps_canonical_vault_blob_for_cross_path_media(tmp_path, monkeypatch, source):
     vault_root = tmp_path / "vault"
     monkeypatch.setattr(base_collector, "VAULT_ROOT", vault_root)
     coll = _collector(monkeypatch)
+    coll.SOURCE_NAME = source
     data = b"shared blob"
     digest = hashlib.sha256(data).hexdigest()
     blob = vault_root / "media" / "blobs" / digest[:2] / digest[2:4] / f"{digest}.jpg"

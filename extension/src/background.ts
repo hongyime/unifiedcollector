@@ -1048,7 +1048,7 @@ const _tpath = (u) => { try { return new URL(u).pathname.split("?")[0].replace(/
 const _mainWorldHookHostRe = /(^|\.)((instagram|tiktok|strava)\.com|threads\.com|x\.com|twitter\.com|facebook\.com)$/i;
 const SCRAPER_TABS_PINNED_KEY = "ucPinScraperTabs";
 const EXPANDED_PLATFORM_TABS_KEY = "ucOpenExpandedPlatformTabs";
-const AUTO_SCRAPER_PLATFORM_IDS = new Set(["instagram", "threads", "tiktok", "x", "facebook", "strava"]);
+const AUTO_SCRAPER_PLATFORM_IDS = new Set(["instagram", "threads", "tiktok", "lemon8", "x", "facebook", "strava"]);
 
 async function scraperTabsPinned() {
   try {

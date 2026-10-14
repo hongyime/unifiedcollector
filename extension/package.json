@@ -1,7 +1,7 @@
 {
   "name": "unifiedcollector-extension",
   "private": true,
-  "version": "1.23.107",
+  "version": "1.23.108",
   "description": "Chrome MV3 extension bundler for UnifiedCollector Bridge.",
   "type": "module",
   "scripts": {

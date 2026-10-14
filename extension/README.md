@@ -5,9 +5,9 @@ forwards it to the local collector. Requests run in the site's page context;
 source rate limits, login walls and challenges still apply.
 
 **Multi-platform:** the scraper registry is in `extension/src/content.ts`.
-Current page scrapers are Instagram, Threads, TikTok, X, Facebook and Strava.
-Lemon8 is available as a no-login browser tab, while broader Lemon8 collection
-uses the headless collector.
+Current page scrapers are Instagram, Threads, TikTok, Lemon8, X, Facebook and
+Strava. Lemon8's no-login topic tab adds paced browser media candidates to the
+headless API collector's profile, feed, and topic collection.
 
 **Observability (popup):** dark-mode popup with a live **Status** panel (worker
 alive, social tab open, ingest connected, cycle cadence + next wake, last-cycle
