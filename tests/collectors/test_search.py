@@ -894,6 +894,28 @@ async def test_dynamic_search_query_uses_rotating_approved_dork(monkeypatch):
     assert items[0]["next_template_cursor"] == 3
 
 
+@pytest.mark.asyncio
+async def test_dynamic_term_refresh_runs_before_base_collect_mutex(monkeypatch):
+    _set_clean_env(monkeypatch)
+    monkeypatch.setenv("SEARCH_DYNAMIC_TERMS_ENABLED", "1")
+    coll = SearchCollector()
+    coll.set_pool(_make_pool())
+    calls = []
+
+    async def refresh(_conn):
+        calls.append("refresh")
+
+    async def base_run(_collector, _targets):
+        calls.append("base_run")
+
+    coll._refresh_dynamic_search_terms = refresh
+    monkeypatch.setattr(SearchCollector.__bases__[0], "run", base_run)
+
+    await coll.run(["static query"])
+
+    assert calls == ["refresh", "base_run"]
+
+
 def test_document_text_extraction_handles_text_rtf_and_docx():
     import io
     import zipfile

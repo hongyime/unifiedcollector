@@ -1052,6 +1052,27 @@ class SearchCollector(BaseCollector):
         except Exception as exc:
             logger.debug("dynamic search result schedule update skipped: %s", type(exc).__name__)
 
+    async def run(self, targets: list[str]) -> None:
+        """Refresh dynamic terms before competing for the search-engine mutex.
+
+        Exposure and search share a mutex because they use the same providers.
+        Term refresh only reads Postgres, so it should still run when exposure
+        is processing a long batch and the search collector's collect slice is
+        skipped by that mutex.
+        """
+        if (
+            self.SOURCE_NAME == "search"
+            and self._dynamic_terms_enabled
+            and self._dynamic_term_cap > 0
+            and self.pool is not None
+        ):
+            try:
+                async with self.pool.acquire() as conn:
+                    await self._refresh_dynamic_search_terms(conn)
+            except Exception as exc:
+                logger.debug("dynamic search term preflight skipped: %s", type(exc).__name__)
+        await super().run(targets)
+
     async def collect(self, targets: list[str]):
         # Pace between queries to reduce search-engine 429s (the ddgs brave
         # backend throttles aggressively). Env-tunable; 0 disables.
