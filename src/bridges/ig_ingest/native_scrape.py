@@ -27,6 +27,28 @@ _MAX_ATTEMPTS = 5
 _USERNAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
 _ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,200}$")
 _AIRBNB_HOSTS = ("airbnb.com", "airbnb.com.sg", "airbnb.co.uk", "airbnb.co.kr")
+_VERIFIED_KEYS = (
+    "is_verified", "verified", "isVerified", "is_blue_verified", "isBlueVerified",
+    "blue_verified", "blueVerified", "author_is_verified", "author_verified",
+    "channel_is_verified", "channelIsVerified", "is_verified_merchant",
+    "isVerifiedMerchant", "verifiedMerchant", "verified_badge", "verifiedBadge",
+)
+
+
+def _explicitly_verified_item(value: object) -> bool:
+    if not isinstance(value, dict):
+        return False
+    for key in _VERIFIED_KEYS:
+        flag = value.get(key)
+        if flag is True or (isinstance(flag, int) and flag == 1) or (
+            isinstance(flag, str) and flag.strip().lower() in {"true", "1", "yes"}
+        ):
+            return True
+    for key in ("author", "creator", "user", "profile", "owner", "channel", "metadata"):
+        nested = value.get(key)
+        if isinstance(nested, dict) and _explicitly_verified_item(nested):
+            return True
+    return False
 
 
 def _text(value: object, limit: int = 1000) -> str | None:
@@ -179,6 +201,8 @@ async def native_scrape_target(request: web.Request) -> web.Response:
 
 def _validated_item(platform: str, item: object) -> tuple[str, tuple] | None:
     if not isinstance(item, dict):
+        return None
+    if platform in {"pinterest", "snapchat"} and _explicitly_verified_item(item):
         return None
     item_type = str(item.get("type") or "").strip().lower()
     meta = _metadata(item.get("metadata"))

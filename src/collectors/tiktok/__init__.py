@@ -1368,6 +1368,9 @@ class TiktokCollector(BaseCollector):
         else:
             metadata = await self._scrape_profile_metadata(username)
         status = str(metadata.get("status") or "")
+        if status == "verified":
+            logger.info("tiktok/@%s: skipping verified profile and its videos", username)
+            return "verified"
         if status in {"unavailable", "not_found", "deleted", "account_deleted", "username_changed"}:
             await self._record_profile_access(username, False, error=status)
             return "unavailable"
@@ -1580,6 +1583,9 @@ class TiktokCollector(BaseCollector):
                 }
             return {"status": "missing"}
 
+        if self._safe_bool(author.get("verified", False)):
+            return {"status": "verified", "verified": True}
+
         profile_uuid = await self._upsert_profile(author, stats) if self.pool is not None else None
         followers = None
         if isinstance(stats, dict):
@@ -1688,6 +1694,8 @@ class TiktokCollector(BaseCollector):
         Returns the profile UUID (str) on success, or None.
         """
         if not isinstance(author, dict):
+            return None
+        if self._safe_bool(author.get("verified", False)):
             return None
         platform_user_id = author.get("id")
         if not platform_user_id:
@@ -1878,6 +1886,9 @@ class TiktokCollector(BaseCollector):
         return str(row["id"]) if row else None
 
     async def _upsert_post(self, data: dict, username: str, profile_uuid: str | None = None):
+        author = data.get("author") if isinstance(data.get("author"), dict) else {}
+        if self._safe_bool(author.get("verified", data.get("verified", False))):
+            return
         post_id = data.get("id")
         if not post_id:
             return

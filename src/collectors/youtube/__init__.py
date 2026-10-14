@@ -243,6 +243,7 @@ class YoutubeCollector(BaseCollector):
         self._youtube_quota_snapshot_restored = False
         self._max_concurrent = int(os.getenv("YOUTUBE_MAX_CONCURRENT_DOWNLOADS", "3"))
         self._use_yt_dlp = self._check_yt_dlp()
+        self._verified_channel_cache: dict[str, bool | None] = {}
         self._ffmpeg_available = check_tool("ffmpeg")
         self._ffprobe_available = check_tool("ffprobe")
         logger.info(
@@ -543,6 +544,14 @@ class YoutubeCollector(BaseCollector):
             logger.warning("Could not resolve channel: %s", channel_input)
             return {"status": "error", "reason": "resolve_failed", "input": channel_input}
 
+        if await self._youtube_channel_is_verified(channel_id):
+            logger.info("youtube: skipping verified channel %s and its content", channel_id)
+            return {
+                "status": "completed",
+                "reason": "verified_account",
+                "channel_id": channel_id,
+            }
+
         # 1. Upsert Channel Info (returns uploads playlist ID + subscriber count)
         uploads_playlist, sub_count = await self._upsert_channel(
             channel_id,
@@ -619,6 +628,70 @@ class YoutubeCollector(BaseCollector):
             "video_ids": len(video_ids),
             "subscriber_count": sub_count,
         }
+
+    async def _youtube_channel_is_verified(self, channel_id: str) -> bool | None:
+        """Best-effort check for YouTube's explicit verified-channel badge.
+
+        The Data API does not return this badge. yt-dlp exposes the badge only
+        when YouTube includes it in the channel renderer; missing metadata is
+        therefore unknown and stays eligible.
+        """
+        channel_id = str(channel_id or "").strip()
+        if not channel_id:
+            return None
+        if channel_id in self._verified_channel_cache:
+            return self._verified_channel_cache[channel_id]
+        if not self._use_yt_dlp or not shutil.which("yt-dlp"):
+            self._verified_channel_cache[channel_id] = None
+            return None
+
+        await self.wait_rate_limit("youtube.com")
+
+        async def _extract_channel_info() -> dict | None:
+            process = await asyncio.create_subprocess_exec(
+                "yt-dlp", "--dump-single-json", "--skip-download", "--flat-playlist",
+                "--playlist-end", "1", "--socket-timeout", "15", "--retries", "1",
+                "--extractor-retries", "1", "--no-warnings", "--no-progress",
+                f"https://www.youtube.com/channel/{channel_id}/videos",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            try:
+                stdout, _ = await asyncio.wait_for(process.communicate(), timeout=45)
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.communicate()
+                return None
+            if process.returncode != 0 or not stdout:
+                return None
+            try:
+                payload = json.loads(stdout.decode("utf-8", "replace"))
+            except (TypeError, ValueError):
+                return None
+            return payload if isinstance(payload, dict) else None
+
+        try:
+            payload = await _extract_channel_info()
+            verified = (
+                True
+                if (
+                isinstance(payload, dict)
+                and (
+                    payload.get("channel_is_verified") is True
+                    or any(
+                        isinstance(entry, dict) and entry.get("channel_is_verified") is True
+                        for entry in (payload.get("entries") or [])
+                    )
+                )
+                )
+                else None
+            )
+            self._verified_channel_cache[channel_id] = verified
+            return verified
+        except Exception as exc:
+            logger.debug("youtube verified badge probe failed for %s: %s", channel_id, type(exc).__name__)
+            self._verified_channel_cache[channel_id] = None
+            return None
 
     def _yt_auth(self, params: dict | None = None) -> tuple[dict, dict]:
         """Return (headers, params) populated with whichever auth is available."""
@@ -1931,6 +2004,9 @@ class YoutubeCollector(BaseCollector):
         """Collect a channel's Community tab (text/poll/image posts) via YouTube's
         InnerTube browse API (the tab lazy-loads; not in the initial HTML). The
         renderer is `postRenderer` (formerly backstagePostRenderer). No API quota."""
+        if await self._youtube_channel_is_verified(channel_id):
+            logger.info("youtube: skipping verified channel community posts for %s", channel_id)
+            return 0
         headers = {"User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                                   "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"),
                    "Accept-Language": "en-US,en;q=0.9", "Cookie": "SOCS=CAI"}
@@ -2077,6 +2153,8 @@ class YoutubeCollector(BaseCollector):
         return total
 
     async def _upsert_video(self, channel_id: str, video_data: dict):
+        if video_data.get("channel_is_verified") is True or await self._youtube_channel_is_verified(channel_id):
+            return
         async with self.pool.acquire() as conn:
             channel_row = await conn.fetchrow("SELECT id FROM youtube_channels WHERE platform_channel_id = $1", channel_id)
             channel_uuid = channel_row['id'] if channel_row else None
@@ -2371,6 +2449,9 @@ class YoutubeCollector(BaseCollector):
         allow_channel_fallback: bool = True,
     ) -> int:
         from src.core.subprocess_downloader import yt_dlp_download, managed_tempdir
+        if await self._youtube_channel_is_verified(channel_id):
+            logger.info("youtube: skipping video media for verified channel %s", channel_id)
+            return 0
         candidates, skipped_duration = await self._filter_video_ids_for_download(video_ids)
         candidates, skipped_db = await self._filter_video_ids_already_archived(candidates)
         urls = [
@@ -2642,6 +2723,9 @@ class YoutubeCollector(BaseCollector):
 
     async def _collect_thumbnails_via_yt_dlp(self, channel_id: str, channel_name: str):
         from src.core.subprocess_downloader import yt_dlp_download, managed_tempdir
+        if await self._youtube_channel_is_verified(channel_id):
+            logger.info("youtube: skipping channel thumbnails for verified channel %s", channel_id)
+            return
         channel_url = f"https://www.youtube.com/channel/{channel_id}/videos"
         async with managed_tempdir("yt_thumb_") as tmpdir:
             extra: list[str] = ["--skip-download", "--playlist-end", "50"]
@@ -2679,8 +2763,9 @@ class YoutubeCollector(BaseCollector):
             async with self.pool.acquire() as conn:
                 rows = await conn.fetch(
                     """
-                    SELECT v.id, v.platform_video_id
+                    SELECT v.id, v.platform_video_id, c.platform_channel_id
                     FROM youtube_videos v
+                    LEFT JOIN youtube_channels c ON c.id=v.channel_id
                     WHERE NOT EXISTS (
                         SELECT 1 FROM youtube_transcripts t WHERE t.video_id = v.id
                     )
@@ -2693,6 +2778,8 @@ class YoutubeCollector(BaseCollector):
             for row in rows:
                 if self._stop.is_set():
                     break
+                if await self._youtube_channel_is_verified(row["platform_channel_id"]):
+                    continue
                 try:
                     await self._fetch_transcript(row["id"], row["platform_video_id"])
                 except Exception as e:
@@ -2705,8 +2792,9 @@ class YoutubeCollector(BaseCollector):
             async with self.pool.acquire() as conn:
                 rows = await conn.fetch(
                     """
-                    SELECT v.id, v.platform_video_id
+                    SELECT v.id, v.platform_video_id, c.platform_channel_id
                     FROM youtube_videos v
+                    LEFT JOIN youtube_channels c ON c.id=v.channel_id
                     WHERE NOT EXISTS (
                         SELECT 1 FROM youtube_comments c WHERE c.video_id = v.id
                     )
@@ -2719,6 +2807,8 @@ class YoutubeCollector(BaseCollector):
             for row in rows:
                 if self._stop.is_set():
                     break
+                if await self._youtube_channel_is_verified(row["platform_channel_id"]):
+                    continue
                 try:
                     await self._fetch_comments(row["id"], row["platform_video_id"])
                 except Exception as e:

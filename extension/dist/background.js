@@ -1751,7 +1751,11 @@
       }, delay);
     }
   }
-  chrome.runtime.onInstalled.addListener(() => {
+  chrome.runtime.onInstalled.addListener(async () => {
+    try {
+      await chrome.storage.local.set({ [EXPANDED_PLATFORM_TABS_KEY]: false });
+    } catch (e) {
+    }
     runStartupRecovery("installed", { force: true, refreshTabs: true, refreshGapMs: 1500, retries: 2 });
   });
   chrome.runtime.onStartup.addListener(() => {
@@ -1787,7 +1791,8 @@
     return (globalThis.UC_PLATFORMS || []).filter((p) => p.scraper && AUTO_SCRAPER_PLATFORM_IDS.has(p.id));
   }
   function platformHosts(p) {
-    return [p && p.host, ...p && p.aliasHosts || []].filter(Boolean);
+    const hosts = [p && p.host, ...p && p.aliasHosts || []].filter(Boolean).map((host) => String(host).trim().toLowerCase().replace(/^www\./, "")).filter(Boolean);
+    return Array.from(new Set(hosts.flatMap((host) => [host, `www.${host}`])));
   }
   function platformUrlPatterns(p) {
     return platformHosts(p).map((host) => `https://${host}/*`);

@@ -1,15 +1,32 @@
 # Agent State
-Current task: UnifiedCollector Full Plan (2026-10-14), one phase/commit at a time.
-Status (2026-10-14, 23:03 UTC): The replacement clean window completed from 22:47:49 to 23:02:49 UTC after the Instagram HTTP 401. Final scan: 0 later rate-limit rows, 0 error-level log matches, 0 tracebacks, and 0 explicit HTTP 429 matches; all 30 UnifiedCollector containers were up and all 24 configured healthchecks were healthy. Both existing `/tmp` reports were refreshed with rolling 12-hour counts. Lemon8 extension version 1.23.108 is sending heartbeats, but no browser media candidates appeared.
+Current task: Complete the UnifiedCollector Full Plan (2026-10-14), one phase/commit at a time, including the later verified-account, follow-priority, and one-tab requirements.
+Status (2026-10-15 23:50 UTC): Phase 1 and the Beeper history verification pass. Search, Telegram discussion visits, Lemon8 extension capture, Pinterest pin detail coverage, Snapchat highlights, and live reload/queue checks remain open. The current tree is on `main` at `2646d5e5` and has uncommitted extension, bridge, native collector, and checklist changes. Extension v1.23.110 is built but live heartbeats still show v1.23.108.
 
-- Phase 1: 30 UnifiedCollector containers are up, including Postgres; all 24 configured healthchecks are healthy. Retired split containers remain exited. Static scan finds no references to `instagram_ingest`, `collector_light`, or `collector_lowrisk` outside shared agent history.
-- Phase 2: Pinterest, Snapchat, and Airbnb are confirmed WIP within Phase 2. Current 12-hour counts: Pinterest 419 board rows/0 pins, Snapchat 9 Stories/24 Spotlights/0 Highlights, Airbnb 4 listings/6 hosts/14 reviews, Beeper 3,469 shadow messages/313 sync-state touches. Lemon8 has 25 posts and 49 media rows; extension version 1.23.108 is sending heartbeats, but browser media candidates remain 0. Telegram discussion visits remain 0 pending approved account aliases; Pinterest pin capture still has no rows.
-- Lemon8: Bounds are pushed in `16f62c89` (5 feed pages/120 media), and profile sampling cap 8 is pushed in `f8f0277f`. The worker is healthy with cap 8 and processes 8/260 targets per cycle. Rolling 12-hour post count is 25. A note-detail HTTP 429 at 22:16:48 UTC set a 968-second cooldown; it ended at 22:32:56 UTC. The 22:33:08 soak was reset by an Instagram HTTP 401 rate-limit event at 22:47:49 UTC; the replacement 15-minute window passed through 23:02:49 UTC. The freshly reloaded extension reports version 1.23.108, but browser media candidates remain 0.
-- Telegram: 9,096 messages and 655 member refreshes in the latest 12 hours. Sixteen refreshed polls were anonymous; 0 poll-voter rows, 1 join/leave event. Roster coverage remains 223,852 membership rows, 203,801 join dates, 145,951 usernames, and 178,603 display names.
-- Search: Code/cadence are pushed (`cd1db689`, `4f17e85c`). Existing local media is indexed into 28 `search_documents`: 10 PDFs (106,363 text chars/64 pages), 10 text files (1,000,000 chars), and 8 images. Image metadata keys are limited to format, height, mode, and width. Ten active terms remain unsearched; zero provider queries in 12 hours. The 7,495 recent `search_results` rows are shared with Exposure and are not Search progress. Exposure has 7,762 recent findings; one shared advisory lock remains held by an idle session, so leave Exposure untouched.
-- Earlier soak windows recorded Instagram HTTP 401 events at 22:02:06 and 22:47:49, one Lemon8 download error at 22:06:29, and the Lemon8 HTTP 429 at 22:16:48. No Spider files were touched.
-- Next: user deferred Telegram account aliases and a populated Lemon8 feed/post to later. User can sign in to Pinterest in the managed browser; authenticated pin capture remains pending that session. Resume those live checks when the needed user-controlled input is available. Do not touch Spider files.
-Batch 2 Item 3 blocker (2026-10-14): code is committed in `86dc357a`, `a863ab93`, and `cd4339e9`. The 15-minute live observation kept pending counts flat (Threads 949, Instagram 5,424) but added no completions; recent activity still reports extension 1.23.105 instead of rebuilt 1.23.107. Browser-use policy rejected Chrome internal Extensions controls and explicitly prohibits CDP/browser-command reload. Bryan was asked to reload manually; after 30+ minutes, proceeding without live completion verification.
+## Agreed operating rules
+
+- Telegram may use every configured account across all eligible groups; the allowlist is empty. Current FloodWait cooldowns cover all 4 configured accounts until 2026-10-15 06:01–06:21 UTC. Ten `discussion_recheck` jobs remain pending.
+- Pinterest and Snapchat start from available follow-graph targets and widen only when capacity remains. Airbnb uses explicit listing links associated with followed identities, then broadens only with spare capacity.
+- Exclude accounts only when a platform supplies an explicit verification/badge signal on Instagram, Snapchat, Pinterest, X, Threads, TikTok, or YouTube. Unknown stays eligible; do not infer from names/popularity.
+- Keep one extension tab per social platform. v1.23.110 clears expanded-tab mode and deduplicates on startup; manual reload and tab audit remain.
+- Do not touch Spider/SpiderFoot files, print credentials, exceed provider backoffs, or release Exposure's idle advisory lock.
+
+## Active checklist
+
+- [x] Phase 1: split Exposure/Lemon8 and Search/Strava; rename `instagram_ingest` to `browser_ingest`. Changes are pushed; all 30 Compose services are currently running.
+- [x] Phase 2a Beeper: live DB gained 436 messages in 15 minutes; latest cycle logged 293 messages and 0 errors.
+- [~] Phase 2b Lemon8 API + extension: 28 posts in the last 12 hours (target 50+). Recent extension media events (191) all reported 0 observed/stored items; no fresh browser media candidates. Current heartbeat is v1.23.108; latest local build v1.23.110 is not loaded. A populated-feed browser check is still required.
+- [~] Phase 3 Telegram: poll votes (262 total), chat members (223,864 total; 615 refreshed in 12 hours), and join/leave events (1 total and recent) have rows. Discussion visits are 0; all 4 accounts are in FloodWait until the deadlines above, and 10 rechecks are pending. Verify rechecks after cooldown.
+- [~] Phase 4 Search: 10 active dynamic terms are all due and unsearched; no `search_queries` rows were created in 12 hours, though 7,401 existing search results and 28 indexed documents are recent. Exposure holds the shared advisory lock idle; do not interrupt it. Diagnose a non-invasive way to resume term searches.
+- [~] Phase 5a Pinterest: 432 boards and 137 pins. 136 pins have titles, 1 has a description, and none have destination links or repin/comment counts. Implement/verify the missing pin detail fields.
+- [~] Phase 5b Snapchat: 2,205 profiles, 9 stories, and 24 Spotlights; `snapchat_highlights` has 0 rows. Verify whether public highlights are discoverable and persist them when available.
+- [~] Phase 5c Airbnb: 4 listings, 6 hosts, and 14 reviews; listing descriptions/photos/amenities and review text are present on most rows. Confirm the direct GraphQL path and finish field/live verification.
+- [~] Later user requirements: explicit badge filters and followed-target priority are local, statically validated, and not yet live-confirmed. Verify queue order and fresh captures after rollout; retain historical rows.
+- [~] One tab per platform: source/build includes normalized `www`/bare matching, expanded-tab reset, and duplicate cleanup. Live version is still v1.23.108; reload v1.23.110 and audit tab counts.
+- [ ] After all phase gates clear, run a fresh clean 15-minute soak and refresh the per-container rolling 12-hour report; write `/tmp/unifiedcollector-plan-complete-20261014.md`.
+
+## Current handoff
+
+See `.agents/handoffs/20261015-2350-utc-full-plan.md` for the current live snapshot, uncommitted files, and ordered next steps. The prior clean soak passed 22:47:49–23:02:49 UTC, but later code/runtime changes require another soak.
 
 ## Prior handoff history
 

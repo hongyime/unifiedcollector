@@ -433,6 +433,36 @@ def _norm_platform(p, *, allow_diagnostics: bool = False):
     return p if p in KNOWN_PLATFORMS else "instagram"
 
 
+_VERIFIED_CAPTURE_KEYS = (
+    "is_verified", "verified", "isVerified", "is_blue_verified", "isBlueVerified",
+    "blue_verified", "blueVerified", "author_is_verified", "author_verified",
+    "verified_author", "is_verified_merchant", "isVerifiedMerchant", "verifiedMerchant",
+    "channel_is_verified", "channelIsVerified", "verified_badge", "verifiedBadge",
+)
+_VERIFIED_FILTER_PLATFORMS = frozenset({
+    "instagram", "snapchat", "pinterest", "x", "threads", "tiktok", "youtube",
+})
+
+
+def _explicitly_verified_capture(value: object) -> bool:
+    """Recognize only explicit platform badge/verification fields."""
+    if not isinstance(value, dict):
+        return False
+    for key in _VERIFIED_CAPTURE_KEYS:
+        flag = value.get(key)
+        if flag is True or (isinstance(flag, int) and flag == 1) or (
+            isinstance(flag, str) and flag.strip().lower() in {"true", "1", "yes"}
+        ):
+            return True
+    # `owner` is commonly the logged-in collector account in extension bodies;
+    # do not let that account's badge suppress unrelated targets.
+    for key in ("author", "user", "profile", "channel", "meta", "metadata"):
+        nested = value.get(key)
+        if isinstance(nested, dict) and _explicitly_verified_capture(nested):
+            return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # CORS helpers moved to .cors (imported at top of module).
 # Middleware and path classifiers moved to .middleware (imported at top).
@@ -1926,6 +1956,11 @@ async def _ingest(app, platform, body):
     username = body.get("username") or "unknown"
     surface = normalize_collection_surface(body.get("collection_surface") or body.get("surface"))
     items = body.get("items") or []
+    if platform in _VERIFIED_FILTER_PLATFORMS and _explicitly_verified_capture(body):
+        items = []
+    if isinstance(items, list):
+        if platform in _VERIFIED_FILTER_PLATFORMS:
+            items = [item for item in items if not _explicitly_verified_capture(item)]
     if items:
         task = asyncio.create_task(_drain(
             app, platform, username, items, body.get("extension_version"), surface,
@@ -1961,6 +1996,10 @@ async def _ingest_uploaded_media(app, platform, body):
     if not isinstance(item, dict):
         item = {}
     item = dict(item)
+    if platform in _VERIFIED_FILTER_PLATFORMS and (
+        _explicitly_verified_capture(body) or _explicitly_verified_capture(item)
+    ):
+        return {"saved": False, "excluded_verified": True}
     item["collection_surface"] = normalize_collection_surface(
         item.get("collection_surface") or surface
     )
@@ -2544,6 +2583,8 @@ async def _save_posts(pool, platform, posts, collection_surface: str = "unknown"
     default_surface = normalize_collection_surface(collection_surface)
     async with pool.acquire() as conn:
         for p in posts:
+            if platform in _VERIFIED_FILTER_PLATFORMS and _explicitly_verified_capture(p):
+                continue
             ppid = str(p.get("platform_post_id") or "")
             if not ppid:
                 continue
@@ -2793,6 +2834,8 @@ async def _record_users(pool, platform, users, context, owner=None) -> int:
         if isinstance(u, str):
             u = {"username": u}
         if not isinstance(u, dict):
+            continue
+        if platform in _VERIFIED_FILTER_PLATFORMS and _explicitly_verified_capture(u):
             continue
         user_id = u.get("user_id") or u.get("pk") or u.get("id")
         username = (u.get("username") or "").strip().lstrip("@") or None
@@ -3198,7 +3241,9 @@ async def _upsert_tt_decoded(pool, owner, threads, messages):
 async def _save_profile(pool, platform, p) -> bool:
     """Upsert a full profile. Instagram is API-rich; X/Facebook are browser DOM
     best-effort profiles keyed on the visible handle."""
-    if platform not in ("instagram", "x", "facebook"):
+    if platform not in ("instagram", "x", "facebook") or (
+        platform in _VERIFIED_FILTER_PLATFORMS and _explicitly_verified_capture(p)
+    ):
         return False
     uname = (p.get("username") or "").strip().lstrip("@")
     if not uname:
@@ -3970,7 +4015,8 @@ async def seed_handler(request):
     """Seed the spider from the user's own followers/following as hop-0 targets."""
     body = await _safe_json(request)
     platform = _norm_platform(body.get("platform"))
-    users = body.get("users") or []
+    raw_users = body.get("users") or []
+    users = [u for u in raw_users if not _explicitly_verified_capture(u)] if isinstance(raw_users, list) else []
     added = 0
     if platform == "instagram":
         pool = request.app["pool"]
@@ -3995,8 +4041,10 @@ async def seed_handler(request):
 async def profile_handler(request):
     body = await _safe_json(request)
     platform = _norm_platform(body.get("platform"))
-    await _archive_browser_capture(request.app["pool"], platform, "profile", body)
     p = body.get("profile") or {}
+    if platform in _VERIFIED_FILTER_PLATFORMS and _explicitly_verified_capture(p):
+        return _cors(web.json_response({"ok": True, "excluded_verified": True}))
+    await _archive_browser_capture(request.app["pool"], platform, "profile", body)
     await _save_profile(request.app["pool"], platform, p)
     await _record_browser_ingest_event(
         request.app["pool"],
@@ -4027,9 +4075,14 @@ async def profile_handler(request):
 async def posts_handler(request):
     body = await _safe_json(request)
     platform = _norm_platform(body.get("platform"))
-    posts = body.get("posts") or []
-    if not isinstance(posts, list):
-        posts = []
+    raw_posts = body.get("posts") or []
+    if not isinstance(raw_posts, list):
+        raw_posts = []
+    posts = (
+        [post for post in raw_posts if not _explicitly_verified_capture(post)]
+        if platform in _VERIFIED_FILTER_PLATFORMS else raw_posts
+    )
+    body = {**body, "posts": posts}
     _schedule_app_task(
         request.app,
         _posts_ingest_background(request.app, platform, body),
@@ -4038,7 +4091,8 @@ async def posts_handler(request):
     return _cors(web.json_response({
         "ok": True,
         "queued": True,
-        "observed": len(posts),
+        "observed": len(raw_posts),
+        "excluded_verified": len(raw_posts) - len(posts),
         "saved": 0,
     }))
 
@@ -4047,6 +4101,10 @@ async def _posts_ingest_background(app, platform: str, body: dict) -> None:
     posts = body.get("posts") or []
     if not isinstance(posts, list):
         posts = []
+    else:
+        if platform in _VERIFIED_FILTER_PLATFORMS:
+            posts = [post for post in posts if not _explicitly_verified_capture(post)]
+            body = {**body, "posts": posts}
     sem = app.get("structured_sem")
     if sem is None:
         sem = asyncio.Semaphore(SOCIAL_INGEST_STRUCTURED_BACKGROUND_CONCURRENCY)
@@ -4082,8 +4140,12 @@ async def _posts_ingest_background(app, platform: str, body: dict) -> None:
 async def comments_handler(request):
     body = await _safe_json(request)
     platform = _norm_platform(body.get("platform"))
+    raw_comments = body.get("comments") or []
+    comments = raw_comments if isinstance(raw_comments, list) else []
+    if platform in _VERIFIED_FILTER_PLATFORMS:
+        comments = [comment for comment in comments if not _explicitly_verified_capture(comment)]
+    body = {**body, "comments": comments}
     await _archive_browser_capture(request.app["pool"], platform, "comments", body)
-    comments = body.get("comments") or []
     n = await _save_comments(request.app["pool"], platform, body.get("post_id"), comments)
     await _record_browser_ingest_event(
         request.app["pool"],

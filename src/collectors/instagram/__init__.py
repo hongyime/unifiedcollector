@@ -1870,20 +1870,21 @@ class InstagramCollector(BaseCollector):
             else:
                 resp.raise_for_status()
                 profile_response = resp.json()
-                self._archive_raw_payload(
-                    artifact_id=f"httpx/profiles/{username}/{time.time_ns()}",
-                    payload=profile_response,
-                    target_tables=["instagram_profiles"],
-                    metadata={
-                        "payload_type": "instagram_httpx_profile_response",
-                        "username": username,
-                        "collection_account": acct_name,
-                        "request_url": f"{GRAPH_API}/users/web_profile_info/",
-                        "http_status": resp.status_code,
-                        "ingest_path": "httpx_profile_fetch",
-                    },
-                )
                 user_data = profile_response.get("data", {}).get("user", {})
+                if not user_data.get("is_verified"):
+                    self._archive_raw_payload(
+                        artifact_id=f"httpx/profiles/{username}/{time.time_ns()}",
+                        payload=profile_response,
+                        target_tables=["instagram_profiles"],
+                        metadata={
+                            "payload_type": "instagram_httpx_profile_response",
+                            "username": username,
+                            "collection_account": acct_name,
+                            "request_url": f"{GRAPH_API}/users/web_profile_info/",
+                            "http_status": resp.status_code,
+                            "ingest_path": "httpx_profile_fetch",
+                        },
+                    )
         elif not user_data and playwright_primary:
             logger.info(
                 "instagram/%s: skipped raw web_profile_info fallback; Playwright primary returned no usable profile",
@@ -1896,6 +1897,10 @@ class InstagramCollector(BaseCollector):
             # + not following, or blocked). Record so the selector can route to a
             # follower account later.
             await self._record_profile_access(username, False, error="empty profile data")
+            return
+
+        if user_data.get("is_verified") is True:
+            logger.info("instagram/%s: skipping verified profile and its content", username)
             return
 
         uid = user_data.get("id", username)
@@ -2048,6 +2053,8 @@ class InstagramCollector(BaseCollector):
             logger.debug("profile_analyzer post-step failed for %s: %s", entity_name, e)
 
     async def _upsert_profile(self, data: dict):
+        if data.get("is_verified") is True:
+            return
         async with self.pool.acquire() as conn:
             await conn.execute("""
                 INSERT INTO instagram_profiles (
@@ -2672,21 +2679,24 @@ class InstagramCollector(BaseCollector):
                 except Exception as e:
                     logger.warning("Playwright Mode-β: JSON parse failed for %s: %s", username, e)
                     return None
-                self._archive_raw_payload(
-                    artifact_id=f"playwright/profiles/{username}/{time.time_ns()}",
-                    payload=data,
-                    target_tables=["instagram_profiles"],
-                    metadata={
-                        "payload_type": "instagram_playwright_profile_response",
-                        "username": username,
-                        "collection_account": acct_name,
-                        "request_url": f"{GRAPH_API}/users/web_profile_info/",
-                        "http_status": status,
-                        "ingest_path": "playwright_profile_fetch",
-                    },
-                )
                 user_data = data.get("data", {}).get("user", {})
+                if user_data.get("is_verified") is True:
+                    logger.info("instagram/%s: Playwright found verified profile; excluding it", username)
+                    return user_data
                 if user_data:
+                    self._archive_raw_payload(
+                        artifact_id=f"playwright/profiles/{username}/{time.time_ns()}",
+                        payload=data,
+                        target_tables=["instagram_profiles"],
+                        metadata={
+                            "payload_type": "instagram_playwright_profile_response",
+                            "username": username,
+                            "collection_account": acct_name,
+                            "request_url": f"{GRAPH_API}/users/web_profile_info/",
+                            "http_status": status,
+                            "ingest_path": "playwright_profile_fetch",
+                        },
+                    )
                     logger.info("Playwright Mode-β: recovered profile JSON for %s", username)
                     return user_data
                 logger.info("Playwright Mode-β: empty user payload for %s", username)

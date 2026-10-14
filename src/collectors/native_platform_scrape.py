@@ -11,6 +11,153 @@ _SNAPCHAT_CONTENT_TABLES = {
     "spotlight": ("snapchat_spotlights", "spotlight_id"),
     "highlight": ("snapchat_highlights", "highlight_id"),
 }
+_FOLLOWED_TARGET_SOURCES = {
+    "pinterest": "followed_handle_candidate",
+    "snapchat": "followed_handle_candidate",
+    "airbnb": "followed_account_link",
+}
+_FOLLOWED_TARGET_PRIORITY = 50
+_FOLLOWED_TARGET_CAP = 10
+
+_FOLLOWED_HANDLE_SEED_SQL = """
+    INSERT INTO browser_native_scrape_queue
+        (platform, target_url, username, source, priority)
+    SELECT $1, $2 || followed.username || $3, followed.username,
+           'followed_handle_candidate', $4
+      FROM (
+            SELECT DISTINCT ON (LOWER(BTRIM(f.target_username)))
+                   BTRIM(f.target_username) AS username,
+                   f.last_seen
+              FROM follow_edges f
+             WHERE f.direction='following'
+               AND f.platform IN ('instagram','x','tiktok','threads','pinterest','snapchat')
+               AND BTRIM(COALESCE(f.target_username,'')) ~ '^[A-Za-z0-9._-]{1,100}$'
+               AND NOT EXISTS (
+                    SELECT 1 FROM instagram_profiles p
+                     WHERE f.platform='instagram' AND p.is_verified IS TRUE
+                       AND (p.platform_user_id::text=f.target_uid
+                            OR LOWER(p.username)=LOWER(BTRIM(f.target_username)))
+               )
+               AND NOT EXISTS (
+                    SELECT 1 FROM x_profiles p
+                     WHERE f.platform='x' AND p.is_verified IS TRUE
+                       AND (p.platform_user_id::text=f.target_uid
+                            OR LOWER(p.username)=LOWER(BTRIM(f.target_username)))
+               )
+               AND NOT EXISTS (
+                    SELECT 1 FROM tiktok_profiles p
+                     WHERE f.platform='tiktok' AND p.is_verified IS TRUE
+                       AND (p.platform_user_id::text=f.target_uid
+                            OR LOWER(p.username)=LOWER(BTRIM(f.target_username)))
+               )
+             ORDER BY LOWER(BTRIM(f.target_username)),
+                      f.last_seen DESC NULLS LAST
+      ) followed
+     WHERE NOT EXISTS (
+            SELECT 1 FROM browser_native_scrape_queue q
+             WHERE q.platform=$1 AND q.target_url=$2 || followed.username || $3
+     )
+     ORDER BY followed.last_seen DESC NULLS LAST,
+              LOWER(followed.username)
+     LIMIT GREATEST(0, $5 - (
+            SELECT count(*) FROM browser_native_scrape_queue
+             WHERE platform=$1 AND source='followed_handle_candidate'
+               AND status IN ('pending','claimed')
+     ))
+    ON CONFLICT (platform, target_url) DO UPDATE SET
+        username=COALESCE(EXCLUDED.username, browser_native_scrape_queue.username),
+        source='followed_handle_candidate',
+        priority=GREATEST(browser_native_scrape_queue.priority, EXCLUDED.priority),
+        updated_at=now()
+"""
+
+_FOLLOWED_AIRBNB_LINKS_SQL = r"""
+    WITH candidates AS (
+        SELECT DISTINCT ON (l.url) l.url, l.discovered_at, l.id
+          FROM discovered_links l
+         WHERE l.domain ~* '(^|\.)airbnb\.(com|com\.sg|co\.uk|co\.kr)$'
+           AND l.url ~* '^https://([^/]+\.)?airbnb\.(com|com\.sg|co\.uk|co\.kr)/rooms/[0-9]+'
+           AND (
+                EXISTS (
+                    SELECT 1 FROM instagram_posts p
+                    JOIN instagram_profiles profile ON profile.id=p.profile_id
+                    JOIN follow_edges f ON f.platform='instagram'
+                        AND f.direction='following'
+                        AND (f.target_uid=profile.platform_user_id
+                             OR LOWER(f.target_username)=LOWER(profile.username))
+                    WHERE l.source_table='instagram_posts'
+                      AND (l.source_record_id=p.id::text OR l.source_record_id=p.platform_post_id)
+                      AND profile.is_verified IS NOT TRUE
+                )
+                OR EXISTS (
+                    SELECT 1 FROM x_posts p
+                    JOIN follow_edges f ON f.platform='x' AND f.direction='following'
+                        AND LOWER(f.target_username)=LOWER(p.author_username)
+                    LEFT JOIN x_profiles profile ON LOWER(profile.username)=LOWER(p.author_username)
+                    WHERE l.source_table='x_posts'
+                      AND (l.source_record_id=p.id::text OR l.source_record_id=p.platform_post_id)
+                      AND profile.is_verified IS NOT TRUE
+                )
+                OR EXISTS (
+                    SELECT 1 FROM tiktok_posts p
+                    JOIN tiktok_profiles profile ON profile.id=p.profile_id
+                    JOIN follow_edges f ON f.platform='tiktok' AND f.direction='following'
+                        AND (f.target_uid=profile.platform_user_id
+                             OR LOWER(f.target_username)=LOWER(profile.username))
+                    WHERE l.source_table='tiktok_posts'
+                      AND (l.source_record_id=p.id::text OR l.source_record_id=p.platform_post_id)
+                      AND profile.is_verified IS NOT TRUE
+                )
+                OR EXISTS (
+                    SELECT 1 FROM threads_posts p
+                    JOIN follow_edges f ON f.platform='threads' AND f.direction='following'
+                        AND LOWER(f.target_username)=LOWER(p.author_username)
+                    WHERE l.source_table='threads_posts'
+                      AND (l.source_record_id=p.id::text OR l.source_record_id=p.platform_post_id)
+                )
+                OR EXISTS (
+                    SELECT 1 FROM pinterest_pins p
+                    JOIN follow_edges f ON f.platform='pinterest' AND f.direction='following'
+                        AND LOWER(f.target_username)=LOWER(p.username)
+                    WHERE l.source_table='pinterest_pins'
+                      AND l.source_record_id=p.pin_id
+                      AND p.metadata->>'author_is_verified' IS DISTINCT FROM 'true'
+                )
+                OR EXISTS (
+                    SELECT 1 FROM snapchat_stories p
+                    JOIN follow_edges f ON f.platform='snapchat' AND f.direction='following'
+                        AND LOWER(f.target_username)=LOWER(p.username)
+                    WHERE l.source_table='snapchat_stories'
+                      AND l.source_record_id=p.story_id
+                      AND p.metadata->>'author_is_verified' IS DISTINCT FROM 'true'
+                )
+           )
+           AND NOT EXISTS (
+                SELECT 1 FROM browser_native_scrape_queue q
+                 WHERE q.platform='airbnb' AND q.target_url=l.url
+                   AND (
+                       q.status='completed'
+                       OR q.source='followed_account_link'
+                       OR (q.status='claimed' AND COALESCE(q.claim_expires_at, 'infinity'::timestamptz) > now())
+                   )
+           )
+         ORDER BY l.url, l.discovered_at DESC NULLS LAST, l.id
+    )
+    INSERT INTO browser_native_scrape_queue
+        (platform, target_url, username, source, priority)
+    SELECT 'airbnb', candidates.url, NULL, 'followed_account_link', $1
+      FROM candidates
+     ORDER BY candidates.discovered_at DESC NULLS LAST, candidates.id
+     LIMIT GREATEST(0, $2 - (
+            SELECT count(*) FROM browser_native_scrape_queue
+             WHERE platform='airbnb' AND source='followed_account_link'
+               AND status IN ('pending','claimed')
+     ))
+    ON CONFLICT (platform, target_url) DO UPDATE SET
+        source='followed_account_link',
+        priority=GREATEST(browser_native_scrape_queue.priority, EXCLUDED.priority),
+        updated_at=now()
+"""
 
 
 def snapchat_storage_target(content_type: str) -> tuple[str, str]:
@@ -182,7 +329,7 @@ _SEED_QUERIES: dict[str, tuple[str, ...]] = {
 
 
 async def seed_native_targets(pool: Any, platform: str) -> None:
-    """Seed bounded targets using the source's existing public input tables."""
+    """Seed followed-identity targets before low-priority public discovery."""
     if platform not in _PLATFORMS:
         return
     async with pool.acquire() as conn:
@@ -193,6 +340,42 @@ async def seed_native_targets(pool: Any, platform: str) -> None:
             )
             if platform == "snapchat":
                 await retarget_snapchat_profile_targets(conn)
+
+            if platform in {"pinterest", "snapchat"}:
+                url_prefix, url_suffix = (
+                    ("https://www.pinterest.com/", "/")
+                    if platform == "pinterest"
+                    else ("https://story.snapchat.com/@", "")
+                )
+                await conn.execute(
+                    _FOLLOWED_HANDLE_SEED_SQL,
+                    platform,
+                    url_prefix,
+                    url_suffix,
+                    _FOLLOWED_TARGET_PRIORITY,
+                    _FOLLOWED_TARGET_CAP,
+                )
+            elif platform == "airbnb":
+                await conn.execute(
+                    _FOLLOWED_AIRBNB_LINKS_SQL,
+                    _FOLLOWED_TARGET_PRIORITY,
+                    _FOLLOWED_TARGET_CAP,
+                )
+
+            preferred_count = await conn.fetchval(
+                """
+                SELECT count(*) FROM browser_native_scrape_queue
+                 WHERE platform=$1 AND source=$2
+                   AND status IN ('pending','claimed')
+                """,
+                platform,
+                _FOLLOWED_TARGET_SOURCES[platform],
+            )
+            # Public discovery is lower priority. Keep its backlog from growing
+            # while followed-identity candidates are still waiting for a pass.
+            if preferred_count:
+                return
+
             for query in _SEED_QUERIES[platform]:
                 if platform == "airbnb" and "'airbnb_listings'" in query:
                     active_listings = await conn.fetchval(
@@ -235,6 +418,15 @@ async def claim_native_target(pool: Any, platform: str) -> dict[str, Any] | None
                        AND due.next_visit_at <= now()
                        AND (due.status IN ('pending','failed','completed')
                             OR (due.status='claimed' AND due.claim_expires_at <= now()))
+                       AND (
+                            due.source=$3
+                            OR NOT EXISTS (
+                                SELECT 1 FROM browser_native_scrape_queue preferred
+                                 WHERE preferred.platform=$1
+                                   AND preferred.source=$3
+                                   AND preferred.status IN ('pending','claimed')
+                            )
+                       )
                        AND NOT EXISTS (
                             SELECT 1 FROM browser_native_scrape_queue active
                              WHERE active.platform=$1
@@ -249,6 +441,7 @@ async def claim_native_target(pool: Any, platform: str) -> dict[str, Any] | None
                 """,
                 platform,
                 _MAX_ATTEMPTS,
+                _FOLLOWED_TARGET_SOURCES[platform],
             )
     return dict(row) if row else None
 

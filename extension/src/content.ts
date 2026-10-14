@@ -860,13 +860,31 @@ function imageLooksTooSmall(im, min = 120) {
 
 // Walk an arbitrary embedded-state object collecting {url, type, id}. Used for
 // TikTok/Lemon8 where the page ships its data as JSON in a <script> tag.
-function deepCollectMedia(obj, sink, entity, depth = 0) {
+function hasExplicitVerifiedFlag(value) {
+  if (!value || typeof value !== "object") return false;
+  return [
+    "is_verified", "verified", "isVerified", "is_blue_verified", "isBlueVerified",
+    "blue_verified", "blueVerified", "author_is_verified", "channel_is_verified",
+    "is_verified_merchant", "isVerifiedMerchant", "verifiedMerchant", "verified_badge",
+  ].some((key) => value[key] === true || (typeof value[key] === "string" && /^(true|1|yes)$/i.test(value[key].trim())));
+}
+
+function hasVerifiedCreator(value, platform) {
+  if (platform !== "tiktok") return false;
+  if (!value || typeof value !== "object") return false;
+  if ((value.uniqueId || value.unique_id || value.username || value.handle) && hasExplicitVerifiedFlag(value)) return true;
+  // `owner` can refer to the logged-in account rather than the creator of this item.
+  return [value.author, value.user, value.creator, value.profile].some(hasExplicitVerifiedFlag);
+}
+
+function deepCollectMedia(obj, sink, entity, depth = 0, platform = "") {
   if (!obj || depth > 8) return;
   if (Array.isArray(obj)) {
-    for (const v of obj) deepCollectMedia(v, sink, entity, depth + 1);
+    for (const v of obj) deepCollectMedia(v, sink, entity, depth + 1, platform);
     return;
   }
   if (typeof obj !== "object") return;
+  if (hasVerifiedCreator(obj, platform)) return;
   // Full video node (TikTok). These URLs usually 403 outside Chrome, so send
   // them through the browser-upload path rather than the server URL fetcher.
   const vid = obj.video || obj.Video;
@@ -933,16 +951,17 @@ function deepCollectMedia(obj, sink, entity, depth = 0) {
   }
   for (const k in obj) {
     const v = obj[k];
-    if (v && typeof v === "object") deepCollectMedia(v, sink, entity, depth + 1);
+    if (v && typeof v === "object") deepCollectMedia(v, sink, entity, depth + 1, platform);
   }
 }
 
 // Scan embedded state for user objects (TikTok uniqueId/nickname, Lemon8 handles)
 // so we record every creator/commenter we come across into social_users.
-function deepCollectUsers(obj, users, depth = 0) {
+function deepCollectUsers(obj, users, depth = 0, platform = "") {
   if (!obj || depth > 8 || users.length > 800) return;
-  if (Array.isArray(obj)) { for (const v of obj) deepCollectUsers(v, users, depth + 1); return; }
+  if (Array.isArray(obj)) { for (const v of obj) deepCollectUsers(v, users, depth + 1, platform); return; }
   if (typeof obj !== "object") return;
+  if (hasVerifiedCreator(obj, platform)) return;
   const uname = obj.uniqueId || obj.unique_id || obj.handle || (obj.author && obj.author.uniqueId);
   if (typeof uname === "string" && uname && uname.length < 40) {
     users.push({
@@ -951,7 +970,7 @@ function deepCollectUsers(obj, users, depth = 0) {
       profile_pic_url: obj.avatarThumb || obj.avatar_thumb || obj.avatarMedium || obj.avatar || null,
     });
   }
-  for (const k in obj) { const v = obj[k]; if (v && typeof v === "object") deepCollectUsers(v, users, depth + 1); }
+  for (const k in obj) { const v = obj[k]; if (v && typeof v === "object") deepCollectUsers(v, users, depth + 1, platform); }
 }
 
 function parseEmbeddedState(ids) {
@@ -2119,9 +2138,9 @@ const tiktok = {
     });
     const state = parseEmbeddedState(["__UNIVERSAL_DATA_FOR_REHYDRATION__", "SIGI_STATE", "sigi-persisted-data"]);
     if (state) {
-      deepCollectMedia(state, sink, entity);
+      deepCollectMedia(state, sink, entity, 0, "tiktok");
       const us = [];
-      deepCollectUsers(state, us);
+      deepCollectUsers(state, us, 0, "tiktok");
       userCount = us.length;
       if (us.length) await send({ type: "users", platform: "tiktok", context: "seen", users: us });
     }
@@ -2392,8 +2411,8 @@ const lemon8 = {
     const state = parseEmbeddedState(["__NEXT_DATA__"]);
     const users = [];
     if (state) {
-      deepCollectMedia(state, sink, entity);
-      deepCollectUsers(state, users);
+      deepCollectMedia(state, sink, entity, 0, "lemon8");
+      deepCollectUsers(state, users, 0, "lemon8");
     }
     lemon8CollectDomMedia(sink, entity);
     lemon8CollectDomUsers().forEach((u) => users.push(u));
@@ -2459,6 +2478,31 @@ function xStatusHref(root) {
   }
 }
 
+function xVerifiedBadge(root) {
+  if (!root || root.nodeType === 9) return false;
+  const nameRegion = root.matches && root.matches('[data-testid="User-Name"],[data-testid="UserName"]')
+    ? root
+    : root.querySelector && root.querySelector('[data-testid="User-Name"],[data-testid="UserName"]');
+  if (!nameRegion) return false;
+  return Boolean(nameRegion.querySelector(
+    '[data-testid="icon-verified"], [aria-label="Verified account"], [aria-label="Verified"]'
+  ));
+}
+
+function threadsVerifiedBadge(root) {
+  if (!root || !root.querySelectorAll) return false;
+  const authorLink = root.matches && root.matches('a[href*="/@"]')
+    ? root : root.querySelector('a[href*="/@"]');
+  if (!authorLink) return false;
+  const authorRegion = authorLink.closest("header") || authorLink.parentElement;
+  if (!authorRegion) return false;
+  const elements = [authorRegion, ...authorRegion.querySelectorAll("[aria-label],[title]")];
+  return elements.some((element) => [
+    element.getAttribute && element.getAttribute("aria-label"),
+    element.getAttribute && element.getAttribute("title"),
+  ].some((label) => String(label || "").toLowerCase().includes("verified")));
+}
+
 function xTweetRoots() {
   const roots = [];
   const seen = new Set();
@@ -2484,6 +2528,7 @@ function harvestXPosts(entity, feed) {
   const posts = [];
   xTweetRoots().forEach((art) => {
     try {
+      if (xVerifiedBadge(art)) return;
       const href = xStatusHref(art);
       const m = href.match(/^\/([A-Za-z0-9_]{1,20})\/status\/(\d+)/);
       if (!m) return;
@@ -2665,11 +2710,14 @@ function addXVideoCandidate(sink, u, entity, role, context = {}) {
 
 function xCollectMediaFromRoot(root, sink, entity, context = {}) {
   if (!root || !root.querySelectorAll) return;
+  if (xVerifiedBadge(root)) return;
   root.querySelectorAll('img[src*="pbs.twimg.com"], img[srcset*="pbs.twimg.com"]').forEach((im) => {
+    if (xVerifiedBadge(im.closest('article[data-testid="tweet"], article[role="article"], div[data-testid="cellInnerDiv"]'))) return;
     if (imageLooksTooSmall(im, 120)) return;
     imageUrlsFromElement(im).forEach((u) => addXMediaCandidate(sink, u, entity, "img", context));
   });
   root.querySelectorAll('picture source[srcset*="pbs.twimg.com"], source[srcset*="pbs.twimg.com"]').forEach((src) => {
+    if (xVerifiedBadge(src.closest('article[data-testid="tweet"], article[role="article"], div[data-testid="cellInnerDiv"]'))) return;
     try {
       const srcset = src.getAttribute("srcset") || "";
       srcset.split(",").forEach((part) => {
@@ -2679,12 +2727,14 @@ function xCollectMediaFromRoot(root, sink, entity, context = {}) {
     } catch (e) {}
   });
   root.querySelectorAll("video").forEach((v) => {
+    if (xVerifiedBadge(v.closest('article[data-testid="tweet"], article[role="article"], div[data-testid="cellInnerDiv"]'))) return;
     addXMediaCandidate(sink, v.poster, entity, "poster", context);
     const u = v.currentSrc || v.src || (v.querySelector("source") && v.querySelector("source").src);
     addXVideoCandidate(sink, u, entity, "video", context);
     v.querySelectorAll("source[src]").forEach((source) => addXVideoCandidate(sink, source.src, entity, "video_source", context));
   });
   root.querySelectorAll("[style]").forEach((el) => {
+    if (xVerifiedBadge(el.closest('article[data-testid="tweet"], article[role="article"], div[data-testid="cellInnerDiv"]'))) return;
     if (elementLooksTooSmall(el, 120)) return;
     try {
       urlsFromCssValue(el.getAttribute("style") || "").forEach((u) => addXMediaCandidate(sink, u, entity, "css_bg", context));
@@ -2714,7 +2764,7 @@ function scrapeXProfile(handle) {
     bio: textOf('[data-testid="UserDescription"]'),
     followers_count: xProfileCount(username, "followers"),
     following_count: xProfileCount(username, "following"),
-    is_verified: Boolean(document.querySelector('[data-testid="icon-verified"], [aria-label="Verified account"]')),
+    is_verified: xVerifiedBadge(nameBlock),
     is_private: /These posts are protected/i.test(body),
     profile_pic_url: avatar,
     external_url: external,
@@ -2896,6 +2946,7 @@ const x = {
       clog("info", `X ${feed}: ${xposts.length} tweet(s) w/ counts`, "x");
     }
     xTweetRoots().forEach((art) => {
+      if (xVerifiedBadge(art)) return;
       const ctx = xStatusContext(art);
       xCollectMediaFromRoot(art, sink, entity, ctx);
     });
@@ -2912,7 +2963,7 @@ const x = {
         };
       });
     }
-    const xu = collectPermalinkAuthors(/^\/([A-Za-z0-9_]{1,20})\/status\//, /^(home|explore|search|messages|notifications|i|settings)$/);
+    const xu = collectPermalinkAuthors(/^\/([A-Za-z0-9_]{1,20})\/status\//, /^(home|explore|search|messages|notifications|i|settings)$/, "x");
     if (xu.length) {
       sendSideEffect(
         { type: "users", platform: "x", context: "seen", users: xu },
@@ -3059,7 +3110,11 @@ function domPostUrlForElement(el, platform) {
 // ===========================================================================
 function harvestDom(entity, { imgRe, junkRe, platform }) {
   const sink = makeSink();
+  const insideVerifiedThreadPost = (node) => platform === "threads" && threadsVerifiedBadge(
+    node && node.closest && node.closest('[data-pressable-container],[role="article"],article')
+  );
   document.querySelectorAll("img").forEach((im) => {
+    if (insideVerifiedThreadPost(im)) return;
     if (imageLooksTooSmall(im, 120)) return;
     imageUrlsFromElement(im).forEach((u) => {
       if (u && imgRe.test(u) && !junkRe.test(u))
@@ -3077,6 +3132,7 @@ function harvestDom(entity, { imgRe, junkRe, platform }) {
     });
   });
   document.querySelectorAll('[style*="url("]').forEach((el) => {
+    if (insideVerifiedThreadPost(el)) return;
     if (elementLooksTooSmall(el, 140)) return;
     const values = [
       el.getAttribute && el.getAttribute("style"),
@@ -3096,6 +3152,7 @@ function harvestDom(entity, { imgRe, junkRe, platform }) {
     });
   });
   document.querySelectorAll("video").forEach((v) => {
+    if (insideVerifiedThreadPost(v)) return;
     if (v.poster && /https?:/.test(v.poster) && !junkRe.test(v.poster))
       sink.add({
         content_id: "poster_" + urlId(v.poster),
@@ -3125,7 +3182,7 @@ function harvestDom(entity, { imgRe, junkRe, platform }) {
 // signal). For each post link we climb to its container and take the text as the
 // caption. Engagement counts are left null here — reliable counts need the auth
 // API (documented), and we won't fabricate them from brittle DOM scraping.
-function harvestPermalinkPosts(linkRe, idFrom) {
+function harvestPermalinkPosts(linkRe, idFrom, platform = "") {
   const byId = new Map();
   document.querySelectorAll("a[href]").forEach((a) => {
     const m = (a.getAttribute("href") || "").match(linkRe);
@@ -3133,6 +3190,7 @@ function harvestPermalinkPosts(linkRe, idFrom) {
     const pid = idFrom(m);
     if (!pid || byId.has(pid)) return;
     const box = a.closest('[data-pressable-container],[role="article"],article') || a.parentElement;
+    if (platform === "threads" && threadsVerifiedBadge(box)) return;
     let caption = "";
     try { caption = (box && box.innerText || "").trim().slice(0, 2200); } catch (e) {}
     if (!caption) return;                       // skip empties / UI chrome
@@ -3147,10 +3205,13 @@ function harvestPermalinkPosts(linkRe, idFrom) {
 
 // Collect usernames from profile/permalink anchors (X /<user>/status, FB /<user>/posts,
 // Threads /@user) -> social_users. Lightweight, DOM-only, every platform.
-function collectPermalinkAuthors(re, skip) {
+function collectPermalinkAuthors(re, skip, platform = "") {
   const set = new Set();
   document.querySelectorAll("a[href]").forEach((a) => {
     const m = (a.getAttribute("href") || "").match(re);
+    const box = a.closest('[data-pressable-container],[role="article"],article');
+    if (platform === "x" && xVerifiedBadge(box)) return;
+    if (platform === "threads" && threadsVerifiedBadge(box)) return;
     if (m && m[1] && m[1].length < 40 && !(skip && skip.test(m[1]))) set.add(m[1]);
   });
   return [...set].map((u) => ({ username: u }));
@@ -3228,7 +3289,7 @@ const threads = {
     const sink = harvestDom(user, { ...THREADS_IMG, platform: "threads" });
     const activeMediaRevisit = currentBrowserMediaRevisit("threads");
     markBrowserMediaRevisitItems("threads", sink, activeMediaRevisit);
-    const posts = harvestPermalinkPosts(/\/@([^/]+)\/post\/([^/?#]+)/, (m) => m[2]);
+    const posts = harvestPermalinkPosts(/\/@([^/]+)\/post\/([^/?#]+)/, (m) => m[2], "threads");
     const ingestPayload = {
       type: "ingest",
       platform: "threads",
@@ -3319,8 +3380,8 @@ const threads = {
     const sink = harvestDom(feed, { ...THREADS_IMG, platform: "threads" });
     const activeMediaRevisit = currentBrowserMediaRevisit("threads");
     markBrowserMediaRevisitItems("threads", sink, activeMediaRevisit);
-    const posts = harvestPermalinkPosts(/\/@([^/]+)\/post\/([^/?#]+)/, (m) => m[2]);
-    const authors = collectPermalinkAuthors(/^\/@([A-Za-z0-9._]{1,30})(?:\/|$)/, /^(search|explore|activity|saved)$/);
+    const posts = harvestPermalinkPosts(/\/@([^/]+)\/post\/([^/?#]+)/, (m) => m[2], "threads");
+    const authors = collectPermalinkAuthors(/^\/@([A-Za-z0-9._]{1,30})(?:\/|$)/, /^(search|explore|activity|saved)$/, "threads");
     const ingestPayload = {
       type: "ingest",
       platform: "threads",

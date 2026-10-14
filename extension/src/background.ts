@@ -1840,7 +1840,13 @@ async function performStartupRecovery(reason, options = {}) {
 // the scraper tabs to respawn fresh content scripts immediately, instead of leaving
 // them dead until the 75-min auto-refresh. This is the "I reloaded the extension and
 // scraping stopped" fix.
-chrome.runtime.onInstalled.addListener(() => {
+chrome.runtime.onInstalled.addListener(async () => {
+  // Keep the user's browser light by default: one canonical feed per platform.
+  // Existing Expanded Tabs preference is reset on reload/update so stale extra
+  // routes are cleaned up with the next startup sweep.
+  try {
+    await chrome.storage.local.set({ [EXPANDED_PLATFORM_TABS_KEY]: false });
+  } catch (e) {}
   runStartupRecovery("installed", { force: true, refreshTabs: true, refreshGapMs: 1500, retries: 2 });
 });
 chrome.runtime.onStartup.addListener(() => {
@@ -1877,7 +1883,14 @@ function scraperPlatforms() {
   return (globalThis.UC_PLATFORMS || []).filter((p) => p.scraper && AUTO_SCRAPER_PLATFORM_IDS.has(p.id));
 }
 function platformHosts(p) {
-  return [p && p.host, ...((p && p.aliasHosts) || [])].filter(Boolean);
+  const hosts = [p && p.host, ...((p && p.aliasHosts) || [])]
+    .filter(Boolean)
+    .map((host) => String(host).trim().toLowerCase().replace(/^www\./, ""))
+    .filter(Boolean);
+  // Registry entries may use the bare domain while the canonical URL or the
+  // user's logged-in tab uses www (or vice versa). Match both forms so tab
+  // status, cleanup, and scraper heartbeats all see the same platform tab.
+  return Array.from(new Set(hosts.flatMap((host) => [host, `www.${host}`])));
 }
 function platformUrlPatterns(p) {
   return platformHosts(p).map((host) => `https://${host}/*`);

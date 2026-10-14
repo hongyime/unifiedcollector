@@ -321,6 +321,10 @@ class PinterestCollector(ProfileOnlyCollector):
                                  error=f"http:{r.status_code}")
 
         html = r.text
+        if self._page_has_explicit_verified_badge(html):
+            return ProfileResult(
+                exists=True, username=username, fields={}, excluded_verified=True,
+            )
         name_m = _FULL_NAME_RE.search(html)
         if not name_m:
             return ProfileResult(exists=False, username=username, fields={})
@@ -388,6 +392,8 @@ class PinterestCollector(ProfileOnlyCollector):
             anonymous_data = await self._read_public_page(
                 anonymous_context, anonymous_url, target_kind, anonymous_html,
             )
+            if anonymous_data.get("profile_is_verified") is True:
+                raise RuntimeError("verified_account_excluded")
             if target_kind[0] == "profile" and not anonymous_data.get("profile_identity_verified"):
                 raise RuntimeError("public_profile_identity_unconfirmed")
             public_boards, public_pins = self._parse_native_page(target_url, anonymous_data)
@@ -412,6 +418,8 @@ class PinterestCollector(ProfileOnlyCollector):
             authenticated_data = await self._read_public_page(
                 authenticated_context, authenticated_url, target_kind, authenticated_html,
             )
+            if authenticated_data.get("profile_is_verified") is True:
+                raise RuntimeError("verified_account_excluded")
             if target_kind[0] == "profile" and not authenticated_data.get("profile_identity_verified"):
                 return public_boards, public_pins
             auth_boards, auth_pins = self._parse_native_page(target_url, authenticated_data)
@@ -543,12 +551,19 @@ class PinterestCollector(ProfileOnlyCollector):
               });
               const identityTokens = identityText.toLowerCase().match(/@[a-z0-9._-]+/g) || [];
               const profileIdentityVerified = identityByLink || identityTokens.includes('@' + expectedHandle);
+              const profileIsVerified = Array.from(
+                identityRegion?.querySelectorAll('[aria-label],[title]') || []
+              ).some((element) => [
+                element.getAttribute('aria-label') || '',
+                element.getAttribute('title') || '',
+              ].some((label) => label.toLowerCase().includes('verified')));
               return {
                 url: location.href,
                 title: text(heading?.innerText || document.title),
                 primary_heading: text(heading?.innerText),
                 board_header_text: fullText(boardHeader?.innerText).slice(0, 2000),
                 profile_identity_verified: profileIdentityVerified,
+                profile_is_verified: profileIsVerified,
                 description: text(document.querySelector('meta[name="description"]')?.content),
                 body_text: fullText(document.body?.innerText).slice(0, 12000),
                 serialized_state: Array.from(document.scripts)
@@ -780,6 +795,12 @@ class PinterestCollector(ProfileOnlyCollector):
             summary["boards"] = len(boards)
             summary["pins"] = len(pins)
         except Exception as exc:
+            if str(exc) == "verified_account_excluded":
+                await finish_native_target(
+                    self.pool, self.SOURCE_NAME, int(target["id"]), success=True,
+                )
+                summary["excluded_verified"] = 1
+                return summary
             attempts = int(target.get("attempts") or 1)
             exponential_retry = min(24 * 60 * 60, 15 * 60 * (2 ** min(max(attempts - 1, 0), 6)))
             retry_after_seconds = getattr(exc, "retry_after_seconds", None)

@@ -33,6 +33,15 @@ function visibleText(node: Element | null, limit = 1200): string | null {
   return cleanText(node.innerText || node.textContent || "", limit);
 }
 
+function hasExplicitVerifiedBadge(node: Element | null): boolean {
+  if (!node) return false;
+  const candidates = [node, ...Array.from(node.querySelectorAll("[aria-label],[title]"))];
+  return candidates.some((element) => [
+    element.getAttribute("aria-label") || "",
+    element.getAttribute("title") || "",
+  ].some((label) => label.toLowerCase().includes("verified")));
+}
+
 function pinterestUsername(pageUrl: string): string | null {
   try {
     const first = new URL(pageUrl).pathname.split("/").filter(Boolean)[0] || "";
@@ -48,6 +57,9 @@ function pinterestItems(doc: Document, pageUrl: string): NativeScrapeItem[] {
   const boardPage = boardParts.length === 2 && !new Set(["pin", "search", "ideas", "_", "_created", "_saved", "login", "signup"])
     .has(boardParts[0].toLowerCase()) && !new Set(["_created", "_saved"]).has(boardParts[1].toLowerCase());
   const boardId = boardPage ? boardParts.slice(0, 2).join(":") : null;
+  if (username && boardParts.length === 1 && hasExplicitVerifiedBadge(
+    doc.querySelector('main header, [data-test-id*="profileHeader" i]'),
+  )) return [];
   const pins: NativeScrapeItem[] = [];
   const seenPins = new Set<string>();
   for (const anchor of Array.from(doc.querySelectorAll<HTMLAnchorElement>('a[href*="/pin/"]'))) {
@@ -82,6 +94,7 @@ function pinterestItems(doc: Document, pageUrl: string): NativeScrapeItem[] {
       description: visibleText(card, 800),
       image_url: absoluteHttps(image?.currentSrc || image?.src, pageUrl),
       destination_url: destination,
+      author_is_verified: hasExplicitVerifiedBadge(card || null),
       metadata: { page_path: new URL(pageUrl).pathname },
     });
     if (pins.length >= 40) break;
@@ -115,6 +128,7 @@ function pinterestItems(doc: Document, pageUrl: string): NativeScrapeItem[] {
         image_url: imageUrl,
         destination_url: null,
         url: pinUrl || pageUrl,
+        author_is_verified: hasExplicitVerifiedBadge(card),
         metadata: { page_path: new URL(pageUrl).pathname, permalink_available: !!pinUrl },
       });
       if (pins.length >= 40) break;
@@ -141,6 +155,7 @@ function pinterestItems(doc: Document, pageUrl: string): NativeScrapeItem[] {
       url: href,
       title: cleanText(anchor.getAttribute("aria-label") || anchor.innerText || anchor.textContent, 500),
       pin_count: countMatch ? Number(countMatch[1].replace(/,/g, "")) : null,
+      author_is_verified: hasExplicitVerifiedBadge(card),
       metadata: { page_path: new URL(pageUrl).pathname },
     });
     if (boards.length >= 10) break;
@@ -216,6 +231,7 @@ function snapchatStoryItems(doc: Document, pageUrl: string): NativeScrapeItem[] 
         absoluteHttps(media?.querySelector<HTMLSourceElement>("source[src]")?.src, pageUrl),
       posted_at: time,
       expires_at: null,
+      author_is_verified: hasExplicitVerifiedBadge(card),
       metadata: { page_path: parsed.pathname, visible_public_story: true },
     });
     if (stories.length >= 25) break;

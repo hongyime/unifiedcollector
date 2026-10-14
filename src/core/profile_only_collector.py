@@ -21,6 +21,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from abc import abstractmethod
 from dataclasses import dataclass
@@ -29,6 +30,72 @@ from typing import Optional
 from src.core.base_collector import BaseCollector
 
 logger = logging.getLogger(__name__)
+
+_VERIFIED_BADGE_HTML_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:is_?verified|verified|is_?blue_?verified|blue_?verified|"
+    r"isVerifiedMerchant|verifiedMerchant)[\"']?\s*[:=]\s*(?:true|1)(?![A-Za-z0-9_])"
+    r"|aria-label\s*=\s*[\"'][^\"']*\bverified\b[^\"']*[\"']"
+    r"|title\s*=\s*[\"'][^\"']*\bverified\b[^\"']*[\"']",
+    re.IGNORECASE,
+)
+
+_FOLLOW_GRAPH_PROBE_SOURCES = frozenset({"snapchat", "pinterest"})
+_FOLLOW_GRAPH_TARGET_BATCH = 10
+
+_FOLLOW_GRAPH_SOURCE_SQL = """
+    WITH followed AS (
+        SELECT DISTINCT ON (LOWER(BTRIM(f.target_username)))
+               LOWER(BTRIM(f.target_username)) AS username,
+               f.platform AS origin_platform,
+               f.last_seen
+          FROM follow_edges f
+         WHERE f.direction='following'
+               AND f.platform IN ('instagram','x','tiktok','threads','pinterest','snapchat')
+               AND BTRIM(COALESCE(f.target_username,'')) ~ '^[A-Za-z0-9._-]{1,100}$'
+           AND NOT EXISTS (
+                SELECT 1 FROM instagram_profiles p
+                 WHERE f.platform='instagram' AND p.is_verified IS TRUE
+                   AND (p.platform_user_id::text=f.target_uid
+                        OR LOWER(p.username)=LOWER(BTRIM(f.target_username)))
+           )
+           AND NOT EXISTS (
+                SELECT 1 FROM x_profiles p
+                 WHERE f.platform='x' AND p.is_verified IS TRUE
+                   AND (p.platform_user_id::text=f.target_uid
+                        OR LOWER(p.username)=LOWER(BTRIM(f.target_username)))
+           )
+           AND NOT EXISTS (
+                SELECT 1 FROM tiktok_profiles p
+                 WHERE f.platform='tiktok' AND p.is_verified IS TRUE
+                   AND (p.platform_user_id::text=f.target_uid
+                        OR LOWER(p.username)=LOWER(BTRIM(f.target_username)))
+           )
+         ORDER BY LOWER(BTRIM(f.target_username)), f.last_seen DESC NULLS LAST
+    ), promoted AS (
+        UPDATE profile_probe_queue q
+           SET enqueued_by='followed:' || followed.origin_platform
+          FROM followed
+         WHERE q.source=$1 AND q.status='pending'
+           AND LOWER(BTRIM(q.username, '@'))=followed.username
+           AND COALESCE(q.enqueued_by,'') NOT LIKE 'followed:%'
+        RETURNING q.id
+    )
+    INSERT INTO profile_probe_queue (source, username, enqueued_by)
+    SELECT $1, followed.username, 'followed:' || followed.origin_platform
+      FROM followed
+     WHERE NOT EXISTS (
+            SELECT 1 FROM profile_probe_queue q
+             WHERE q.source=$1
+               AND LOWER(BTRIM(q.username, '@'))=followed.username
+     )
+     ORDER BY followed.last_seen DESC NULLS LAST, followed.username
+     LIMIT GREATEST(0, $2 - (
+            SELECT count(*) FROM profile_probe_queue q
+             WHERE q.source=$1 AND q.status='pending'
+               AND q.enqueued_by LIKE 'followed:%'
+     ))
+    ON CONFLICT (source, username) DO NOTHING
+"""
 
 
 @dataclass
@@ -39,6 +106,7 @@ class ProfileResult:
     fields: dict  # keys matching the platform's <PROFILE_TABLE> columns
     raw_payload: Optional[dict] = None
     error: Optional[str] = None
+    excluded_verified: bool = False
 
 
 class ProfileOnlyCollector(BaseCollector):
@@ -97,6 +165,11 @@ class ProfileOnlyCollector(BaseCollector):
 
     # --- platform-specific ---
 
+    @staticmethod
+    def _page_has_explicit_verified_badge(html: str) -> bool:
+        """Only match source-provided verification flags or badge labels."""
+        return bool(_VERIFIED_BADGE_HTML_RE.search(html or ""))
+
     @abstractmethod
     async def probe_profile(self, username: str) -> ProfileResult:
         """Fetch profile info for a single username. Read-only.
@@ -110,7 +183,10 @@ class ProfileOnlyCollector(BaseCollector):
     async def run_cycle(self) -> dict:
         """Pop a batch of pending queue rows, probe each, write profile
         rows, and mark queue rows done/404/error."""
-        summary = {"skipped": None, "processed": 0, "found": 0, "not_found": 0, "errors": 0}
+        summary = {
+            "skipped": None, "processed": 0, "found": 0,
+            "not_found": 0, "errors": 0, "excluded_verified": 0,
+        }
         if not self.enabled:
             summary["skipped"] = "disabled"
             return summary
@@ -119,12 +195,37 @@ class ProfileOnlyCollector(BaseCollector):
             return summary
 
         async with self.pool.acquire() as conn:
+            if self.SOURCE_NAME in _FOLLOW_GRAPH_PROBE_SOURCES:
+                await conn.execute(
+                    _FOLLOW_GRAPH_SOURCE_SQL,
+                    self.SOURCE_NAME,
+                    _FOLLOW_GRAPH_TARGET_BATCH,
+                )
             rows = await conn.fetch(
                 """
                 SELECT id, username
                 FROM profile_probe_queue
                 WHERE source = $1 AND status = 'pending'
-                ORDER BY added_at ASC
+                  AND (
+                      enqueued_by LIKE 'followed:%'
+                      OR enqueued_by='spider_discovered_links'
+                      OR NOT EXISTS (
+                          SELECT 1 FROM profile_probe_queue preferred
+                           WHERE preferred.source=$1
+                             AND preferred.status='pending'
+                             AND (
+                                 preferred.enqueued_by LIKE 'followed:%'
+                                 OR preferred.enqueued_by='spider_discovered_links'
+                             )
+                      )
+                  )
+                ORDER BY
+                    CASE
+                        WHEN enqueued_by LIKE 'followed:%' THEN 0
+                        WHEN enqueued_by='spider_discovered_links' THEN 1
+                        ELSE 2
+                    END,
+                    added_at ASC
                 LIMIT $2
                 """,
                 self.SOURCE_NAME,
@@ -157,6 +258,12 @@ class ProfileOnlyCollector(BaseCollector):
             if not result.exists:
                 await self._mark_404(queue_id)
                 summary["not_found"] += 1
+                await asyncio.sleep(interval)
+                continue
+
+            if result.excluded_verified:
+                await self._mark_done(queue_id)
+                summary["excluded_verified"] += 1
                 await asyncio.sleep(interval)
                 continue
 

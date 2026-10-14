@@ -171,6 +171,10 @@ def _make_public_snap_item(
         or _scalar(story.get("storySubtitle"))
     )
     creator = video.get("creator") or story.get("creator")
+    if isinstance(creator, dict) and any(
+        creator.get(key) is True for key in ("verified", "isVerified", "is_verified", "is_blue_verified")
+    ):
+        return None
     username = _public_profile_handle(creator, fallback_username)
     posted = (
         _to_timestamp(video.get("uploadDateMs"), milliseconds=True)
@@ -243,6 +247,12 @@ def _extract_public_snap_items(html: str, target_url: str, username: str | None)
         user_profile.get("publicProfileInfo")
         if isinstance(user_profile.get("publicProfileInfo"), dict) else {}
     )
+    if any(
+        obj.get(key) is True
+        for obj in (user_profile, profile_info)
+        for key in ("verified", "isVerified", "is_verified", "is_blue_verified")
+    ):
+        return []
     page_username = _public_profile_handle(profile_info, username)
 
     def add_snap_list(
@@ -436,6 +446,10 @@ class SnapchatCollector(ProfileOnlyCollector):
                                  error=f"http:{r.status_code}")
 
         html = r.text
+        if self._page_has_explicit_verified_badge(html):
+            return ProfileResult(
+                exists=True, username=username, fields={}, excluded_verified=True,
+            )
         display_name_m = _DISPLAY_NAME_RE.search(html)
         bitmoji_m = _BITMOJI_URL_RE.search(html)
         snap_score_m = _SNAP_SCORE_RE.search(html)
