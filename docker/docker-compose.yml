@@ -279,9 +279,9 @@ services:
   # ───────────────────────────────────────────────────────────────
 
 
-  # GitHub is split out of collector_lowrisk. Its spider reseed was restarting
-  # the shared worker and taking strava/search down with it. 1024m covers the
-  # github working set; lowrisk keeps the large search known-id set.
+  # GitHub stays isolated because its spider reseed can restart its worker.
+  # 1024m covers the GitHub working set; search keeps the larger cap for its
+  # known-id set.
   collector_github:
     <<: *collector-common
     container_name: unifiedcollector_collector_github
@@ -337,16 +337,14 @@ services:
       start_period: 30s
     restart: unless-stopped
 
-  # Strava and search stay in one worker. GitHub has its own container above.
-  # Search still holds the large known-id set, so this cap stays high, but it
-  # drops 2560m -> 2048m now that the github working set has left. Do not raise
-  # this container to 3072m on the ~7.7GiB VM.
-  collector_lowrisk:
+  # Search keeps the larger memory cap for its known-id set. Strava has an
+  # independent worker and log stream so either source can be diagnosed or
+  # restarted without affecting the other.
+  collector_search:
     <<: *collector-common
-    container_name: unifiedcollector_collector_lowrisk
-    init: true  # reap search/gallery-dl subprocess zombies (this wedged a recreate before)
-    command: python -m src.main worker --source strava,search
-    # Strava + search only. The old 2560m cap included github's spider reseed.
+    container_name: unifiedcollector_collector_search
+    init: true
+    command: python -m src.main worker --source search
     mem_limit: 2048m
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
@@ -354,10 +352,6 @@ services:
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
       COLLECTOR_HANG_TIMEOUT_SECONDS: "7200"
-      # EDIT 2026-08-01 (DB pressure): page scrape 100 -> 20. The old low-risk
-      # lane was saturating Postgres while realtime/media collectors were healthy.
-      # Keep history moving, but cap per-cycle DB churn.
-      STRAVA_PAGE_SCRAPE_BATCH: "20"
       SEARCH_SPIDER_PAGES: "1"
       SEARCH_MAX_RESULTS: "100"
       SEARCH_CONCURRENT_DOWNLOADS: "10"
@@ -371,28 +365,54 @@ services:
       WEB_REQUEST_PERSONA_MODE: "${WEB_REQUEST_PERSONA_MODE:-stable_by_domain}"
       WEB_REQUEST_SEND_ORIGIN: "${WEB_REQUEST_SEND_ORIGIN:-1}"
       WEB_REQUEST_ORIGIN_POOL: "${WEB_REQUEST_ORIGIN_POOL:-https://www.google.com/,https://www.bing.com/,https://duckduckgo.com/}"
-      # Strava athlete spider (kudos/comments/followers/clubs) — paced for I/O.
+      COLLECTOR_CYCLE_SLEEP_SEARCH: "240"
+      DB_POOL_MAX_SIZE: "4"
+    extra_hosts:
+      - "host.docker.internal:172.20.0.1"
+    cap_add:
+      - SYS_PTRACE
+    volumes:
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}:/vault"
+      - ../credentials:/app/credentials
+      - sessions_data:/app/sessions
+      - ../config/sources:/app/config/sources:ro
+      - ../src:/app/src
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - ./env/common.env
+      - ./env/search.env
+    healthcheck:
+      test: ["CMD", "python", "-m", "src.core.health"]
+      interval: 60s
+      timeout: 45s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  collector_strava:
+    <<: *collector-common
+    container_name: unifiedcollector_collector_strava
+    init: true
+    command: python -m src.main worker --source strava
+    mem_limit: 512m
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
+      COLLECTOR_STARTUP_DELAY_SECONDS: "120"
+      COLLECTOR_DRIVE_PATH: /media
+      COLLECTOR_VAULT_ROOT: /vault
+      COLLECTOR_HANG_TIMEOUT_SECONDS: "7200"
+      STRAVA_PAGE_SCRAPE_BATCH: "20"
       STRAVA_SPIDER_ENABLED: "true"
       STRAVA_FOLLOW_SCRAPE_ENABLED: "true"
-      # EDIT 2026-07-13: 15 -> 3. Each spider athlete = a full month-by-month
-      # history backfill (~4-6min, ~200 activities discovered), so 15/cycle was
-      # ~50min/cycle of NEW stream_status=NULL rows (add ~1.7k/day) starving the
-      # GPS drain (~324/day) — the backlog GREW. Queue has ~25k pending athletes
-      # (unbounded), so discovery loses nothing by going slower; raise back once
-      # strava_activities.stream_status NULL count converges.
       STRAVA_SPIDER_MAX_PER_CYCLE: "3"
-      # GPS-route backfill: bounded to protect DB/API pressure while Strava is
-      # returning stream 429s. Keep this small; profiles/activity metadata keep
-      # flowing while route repair drains slowly after cooldowns expire.
       STRAVA_GPS_BACKFILL_BATCH: "12"
       STRAVA_GPS_BACKFILL_FIRST: "true"
       STRAVA_ROUTE_STREAM_SHARED_COOLDOWN: "true"
       STRAVA_PROFILE_ENRICH_BATCH: "15"
-      # Low-volume sources idle between cycles.
       COLLECTOR_CYCLE_SLEEP_STRAVA: "600"
-      COLLECTOR_CYCLE_SLEEP_SEARCH: "240"
-      # Conn-budget hygiene (P2 review §5): low-volume, long-cycle sources — a
-      # small pool is plenty. Default 10 -> 4.
       DB_POOL_MAX_SIZE: "4"
     extra_hosts:
       - "host.docker.internal:172.20.0.1"
@@ -411,7 +431,6 @@ services:
     env_file:
       - ./env/common.env
       - ./env/strava.env
-      - ./env/search.env
     healthcheck:
       test: ["CMD", "python", "-m", "src.core.health"]
       interval: 60s
@@ -535,33 +554,21 @@ services:
       start_period: 30s
     restart: unless-stopped
 
-  collector_light:
+  collector_exposure:
     image: unifiedcollector-collector:latest
-    container_name: unifiedcollector_collector_light
+    container_name: unifiedcollector_collector_exposure
     init: true
-    # 2026-09-28: merged exposure + lemon8 (consolidation audit) — both are
-    # non-realtime, cycle-based, no subprocess/spider-burst history in their
-    # own compose blocks; combining them saves ~640m of pure headroom overcommit
-    # (was 384m+768m limits for 61MB+142MB actual use) and one Python-interpreter
-    # baseline. See .agents/STATE.md for the full consolidation analysis.
-    command: python -m src.main worker --source exposure,lemon8
-    mem_limit: 512m
+    command: python -m src.main worker --source exposure
+    mem_limit: 384m
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
       COLLECTOR_HANG_TIMEOUT_SECONDS: "7200"
       COLLECTOR_STARTUP_DELAY_SECONDS: "20"
-      # Merged process shares one asyncpg pool across both sources; raised from
-      # exposure's standalone default of 3.
-      DB_POOL_MAX_SIZE: "6"
-      X_SOURCE_MANUAL_MODE: "${X_SOURCE_MANUAL_MODE:-0}"
-      EXPOSURE_ENABLED: "${EXPOSURE_ENABLED:-1}"
-      EXPOSURE_ALLOWED_DOMAINS: "${EXPOSURE_ALLOWED_DOMAINS:-*.edu.sg,*.sg,*.com,*.me,*.kr,*.*}"
-      EXPOSURE_ALLOWED_REGEX: "${EXPOSURE_ALLOWED_REGEX:-.*}"
+      DB_POOL_MAX_SIZE: "3"
       EXPOSURE_EXPAND_WILDCARD_TARGETS: "${EXPOSURE_EXPAND_WILDCARD_TARGETS:-0}"
       EXPOSURE_DORKS_FILE: "${EXPOSURE_DORKS_FILE:-/app/config/sources/exposure.dorks}"
-      EXPOSURE_MAX_QUERIES_PER_CYCLE: "${EXPOSURE_MAX_QUERIES_PER_CYCLE:-9999}"
       EXPOSURE_FETCH_EVIDENCE: "${EXPOSURE_FETCH_EVIDENCE:-0}"
       EXPOSURE_SPIDER_PAGES: "${EXPOSURE_SPIDER_PAGES:-0}"
       SEARCH_MAX_RESULTS: "${EXPOSURE_SEARCH_MAX_RESULTS:-25}"
@@ -578,6 +585,44 @@ services:
       WEB_REQUEST_SEND_ORIGIN: "${WEB_REQUEST_SEND_ORIGIN:-1}"
       WEB_REQUEST_ORIGIN_POOL: "${WEB_REQUEST_ORIGIN_POOL:-https://www.google.com/,https://www.bing.com/,https://duckduckgo.com/}"
       COLLECTOR_CYCLE_SLEEP_EXPOSURE: "${COLLECTOR_CYCLE_SLEEP_EXPOSURE:-21600}"
+    extra_hosts:
+      - "host.docker.internal:172.20.0.1"
+    cap_add:
+      - SYS_PTRACE
+    volumes:
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}:/vault"
+      - ../credentials:/app/credentials
+      - sessions_data:/app/sessions
+      - ../config/sources:/app/config/sources:ro
+      - ../src:/app/src
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - ./env/common.env
+      - ./env/exposure.env
+    healthcheck:
+      test: ["CMD", "python", "-m", "src.core.health"]
+      interval: 60s
+      timeout: 45s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  collector_lemon8:
+    image: unifiedcollector-collector:latest
+    container_name: unifiedcollector_collector_lemon8
+    init: true
+    command: python -m src.main worker --source lemon8
+    mem_limit: 512m
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
+      COLLECTOR_DRIVE_PATH: /media
+      COLLECTOR_VAULT_ROOT: /vault
+      COLLECTOR_HANG_TIMEOUT_SECONDS: "7200"
+      COLLECTOR_STARTUP_DELAY_SECONDS: "35"
+      DB_POOL_MAX_SIZE: "3"
       LEMON8_FYP_DETAIL_FETCH: "true"
       LEMON8_TARGETS_PER_CYCLE: "6"
       LEMON8_SPIDER_QUEUE_PER_CYCLE: "8"
@@ -600,7 +645,6 @@ services:
         condition: service_healthy
     env_file:
       - ./env/common.env
-      - ./env/exposure.env
       - ./env/lemon8.env
     healthcheck:
       test: ["CMD", "python", "-m", "src.core.health"]
@@ -928,17 +972,17 @@ services:
       start_period: 30s
     restart: unless-stopped
 
-  # Instagram ingest bridge for the Chrome extension. Runs as a reliable
+  # Browser ingest bridge for the Chrome extension. Runs as a reliable
   # auto-restart container (vs a fragile manual host process) and publishes 8765
   # so the extension's service worker can reach it at 127.0.0.1:8765. The live
   # Runs from the baked image copy of /app/src. This bridge is latency-critical
   # for the Chrome extension; running it from Docker Desktop's Windows 9p bind
   # mount can wedge Python import/startup in p9_client_rpc and leave port 8765
   # accepting sockets without responses. Rebuild the collector image before
-  # recreating this service when instagram_ingest code changes.
-  instagram_ingest:
+  # recreating this service when browser_ingest code changes.
+  browser_ingest:
     image: unifiedcollector-collector:latest
-    container_name: unifiedcollector_instagram_ingest
+    container_name: unifiedcollector_browser_ingest
     command: python -m src.bridges.ig_ingest
     mem_limit: 512m
     ports:

@@ -46,7 +46,21 @@ services:
         target: /app/config
         initial_sync: true
         ignore: *watch-ignore
-  collector_lowrisk:
+  collector_search:
+    volumes: !override ["dev-data:/app/data", "dev-sessions:/app/sessions"]
+    develop:
+      watch:
+      - action: sync
+        path: ./src
+        target: /app/src
+        initial_sync: true
+        ignore: *watch-ignore
+      - action: sync
+        path: ./config
+        target: /app/config
+        initial_sync: true
+        ignore: *watch-ignore
+  collector_strava:
     volumes: !override ["dev-data:/app/data", "dev-sessions:/app/sessions"]
     develop:
       watch:
@@ -172,7 +186,7 @@ services:
         target: /app/config
         initial_sync: true
         ignore: *watch-ignore
-  instagram_ingest:
+  browser_ingest:
     volumes: !override ["dev-data:/app/data", "dev-sessions:/app/sessions"]
     develop:
       watch:

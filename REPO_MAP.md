@@ -15,7 +15,7 @@
 - Not analyzed: bytecode caches under `__pycache__/`, image binaries under `extension/icons/` and `src/dashboard/frontend/public/`, the `archive/` directory referenced in `README.md` but not tracked here, the two large sync/state markdowns (`2026-05-30-unifiedanalyzer-strategy.md`, `collector_audit.md`) beyond first pass. Deep-dive sections capped at MAX_MODULES_DEEP=10.
 
 ## 2. What this repository is
-A Python-plus-TypeScript ingestion service that collects public and semi-public content from 11 named source platforms (github, youtube, strava, search, website, tiktok, lemon8, whatsapp, telegram, instagram, beeper/matrix) and writes them into one shared Postgres database (`pgvector/pgvector:pg16`, `docker/docker-compose.yml:5`). Collection runs entirely inside Docker Compose services defined in `docker/docker-compose.yml` (29 services declared). The primary artifacts written are rows in `media_items`, `social_users`, and per-source tables under `src/db/schemas/` and `src/db/migrations/`, along with binary media files placed under the mounted `z:/unifiedcollector` vault. A React 19 + Vite operations dashboard (`src/dashboard/frontend/`, backend at `src/dashboard/api.py:8700`) surfaces status. An enrichment pipeline (`docker/Dockerfile.spiderfoot`, `src/recon_spiderfoot_service.py`, `src/core/recon_spiderfoot.py`) processes queued OSINT targets via SpiderFoot, maigret, and GHunt as part of the default stack. Targets still require an allowlist. Collectors ingest source content; separate notification and onboarding services can send outbound Telegram messages. Those services are described in Flows A/B and the entry-point table below.
+A Python-plus-TypeScript ingestion service that collects public and semi-public content from 11 named source platforms (github, youtube, strava, search, website, tiktok, lemon8, whatsapp, telegram, instagram, beeper/matrix) and writes them into one shared Postgres database (`pgvector/pgvector:pg16`, `docker/docker-compose.yml:5`). Collection runs entirely inside Docker Compose services defined in `docker/docker-compose.yml` (30 services declared). The primary artifacts written are rows in `media_items`, `social_users`, and per-source tables under `src/db/schemas/` and `src/db/migrations/`, along with binary media files placed under the mounted `z:/unifiedcollector` vault. A React 19 + Vite operations dashboard (`src/dashboard/frontend/`, backend at `src/dashboard/api.py:8700`) surfaces status. An enrichment pipeline (`docker/Dockerfile.spiderfoot`, `src/recon_spiderfoot_service.py`, `src/core/recon_spiderfoot.py`) processes queued OSINT targets via SpiderFoot, maigret, and GHunt as part of the default stack. Targets still require an allowlist. Collectors ingest source content; separate notification and onboarding services can send outbound Telegram messages. Those services are described in Flows A/B and the entry-point table below.
 
 ## 3. Quick facts
 | Field | Value |
@@ -25,7 +25,7 @@ A Python-plus-TypeScript ingestion service that collects public and semi-public 
 | Package manager | pip (`requirements.txt`, `requirements.lock`); npm (dashboard `src/dashboard/frontend/package.json`, whatsapp bridge `src/bridges/whatsapp/package.json`, both with `package-lock.json`) |
 | Tracked files | 644 |
 | Total lines (tracked) | 167,416 across text files inventoried |
-| Deployment artifact | Docker Compose stack (`docker/docker-compose.yml`, 29 services); container images built from `docker/Dockerfile`, `docker/Dockerfile.dashboard`, `docker/Dockerfile.spiderfoot`, `docker/Dockerfile.backup`, `src/bridges/whatsapp/Dockerfile` |
+| Deployment artifact | Docker Compose stack (`docker/docker-compose.yml`, 30 services); container images built from `docker/Dockerfile`, `docker/Dockerfile.dashboard`, `docker/Dockerfile.spiderfoot`, `docker/Dockerfile.backup`, `src/bridges/whatsapp/Dockerfile` |
 | Persistence | Postgres 16 + `pgvector` (`docker/docker-compose.yml:5`), Redis 7 (`docker/docker-compose.yml:1240`), RabbitMQ 3.13-alpine (`docker/docker-compose.yml:1214`), filesystem vault at `z:/unifiedcollector` mounted read-write into most collectors |
 | Test framework(s) | pytest with `pytest-asyncio` auto mode (`pyproject.toml:1-6`); `testpaths = ["tests"]` |
 | CI | GitHub Actions — 15 workflows under `.github/workflows/` (see Section 12) |
@@ -39,7 +39,7 @@ Entry points table:
 | `python -m src.main worker --source X` / `--all` | `src/main.py:44` | Container `command:` in most compose collector services | Boot DB pool + migrations then run `WorkerService` (`src/worker/__init__.py:228`) for the named source(s) |
 | `python -m src.main scheduler` | `src/main.py:56` | `docker/docker-compose.yml:948` (service `scheduler`) | `Scheduler` (`src/scheduler/__init__.py:182`) periodic reconciliation, recon auto-seed, phone-OSINT sweep |
 | `python -m src.main run` | `src/main.py:59` | `_cmd_run` combines worker + scheduler for ad-hoc runs | Both `WorkerService` and `Scheduler` inside the same process |
-| `python -m src.bridges.ig_ingest` | `src/bridges/ig_ingest.py:5921` | `docker/docker-compose.yml:911` service `ig_ingest`, port `8765` (`src/bridges/ig_ingest.py:83`) | `aiohttp` HTTP server with 35 route registrations (see Section 9) |
+| `python -m src.bridges.ig_ingest` | `src/bridges/ig_ingest.py:5921` | `docker/docker-compose.yml` service `browser_ingest`, port `8765` (`src/bridges/ig_ingest.py:83`) | `aiohttp` HTTP server with 35 route registrations (see Section 9) |
 | `uvicorn src.dashboard.api:app --host 0.0.0.0 --port 8700` | `docker/Dockerfile.dashboard:8` | `docker/docker-compose.yml:1087` service `dashboard`, port 8700 (also mapped :8001) | FastAPI app with 103 HTTP route decorators + 1 websocket route (`src/dashboard/api.py`) |
 | `python -m src.watchdog.freshness` | `src/watchdog/freshness.py:1` | `docker/docker-compose.yml:407` service `watchdog` | Freshness loop restarts stale realtime-source containers via Docker socket (`src/watchdog/freshness.py:348`) |
 | `python -m src.notifications.realtime_feed` | `src/notifications/realtime_feed.py:1` | `docker/docker-compose.yml:1040` service `realtime_feed` | Drains Redis list `uc:realtime_post_feed` (`src/notifications/realtime_feed.py:57`) and posts to Telegram |
@@ -49,14 +49,14 @@ Entry points table:
 | `python -m src.backup.db_backup run` | `src/backup/db_backup.py` | `docker/docker-compose.yml:1138` service `backup` | Daily pg_dump with atomic rename + retention (`src/backup/db_backup.py`) |
 | `node build/index.js` (WhatsApp bridge) | `src/bridges/whatsapp/package.json:5` | `docker/docker-compose.yml:1254` and `:1293` services `wa-bridge-1` / `wa-bridge-2` | Baileys TypeScript bridge publishing to RabbitMQ (`src/bridges/whatsapp/src/index.ts:1200 lines`) |
 | React dev/build | `src/dashboard/frontend/package.json` scripts `dev`, `build`, `preview` | Bundle served static from `src/dashboard/frontend/dist/` by dashboard image (`docker/Dockerfile.dashboard:6`) | React 19 SPA (`src/dashboard/frontend/src/App.tsx:1`) |
-| Chrome MV3 extension | `extension/manifest.json`, `extension/background.js`, `extension/content.js` | Installed manually into the operator's Chrome | POSTs to `ig_ingest:8765` (routes in Section 9) |
+| Chrome MV3 extension | `extension/manifest.json`, `extension/background.js`, `extension/content.js` | Installed manually into the operator's Chrome | POSTs to `browser_ingest:8765` (routes in Section 9) |
 
 Install and run (from `README.md` procedure, verified against `docker/docker-compose.yml`):
 ```
 cp .env.example .env
 docker compose -f docker/docker-compose.yml up -d              # core stack
 ```
-Required environment: `POSTGRES_USER`, `POSTGRES_PASSWORD`, and platform credentials keyed as documented in `.env.example` (~200 variable names — see Section 10). Ports bound on the host: `POSTGRES_HOST_PORT` default `5433` → container 5432 (`docker/docker-compose.yml:16`), `8765` for `ig_ingest`, `8700` for `dashboard`, `8790` for `browser_cookie_vault`, RabbitMQ port `5672` and management `15672` internal-only (`docker/docker-compose.yml:1214-1240` region).
+Required environment: `POSTGRES_USER`, `POSTGRES_PASSWORD`, and platform credentials keyed as documented in `.env.example` (~200 variable names — see Section 10). Ports bound on the host: `POSTGRES_HOST_PORT` default `5433` → container 5432 (`docker/docker-compose.yml:16`), `8765` for `browser_ingest`, `8700` for `dashboard`, `8790` for `browser_cookie_vault`, RabbitMQ port `5672` and management `15672` internal-only (`docker/docker-compose.yml:1214-1240` region).
 
 ## 5. Execution paths
 
@@ -76,7 +76,7 @@ Required environment: `POSTGRES_USER`, `POSTGRES_PASSWORD`, and platform credent
 4. Emits `sendPhoto`/`sendVideo` HTTP calls to Telegram API using `NOTIFY_TELEGRAM_BOT_TOKEN` and `NOTIFY_TELEGRAM_CHAT_ID` (`.env.example:194-222`).
 5. On rate cap, defers into `uc:realtime_post_feed:skipped_burst` (`src/notifications/realtime_feed.py:60`) and emits a 15-minute burst summary when `REALTIME_POST_FEED_BURST_SUMMARY=1`.
 
-### Flow C — Browser extension → `ig_ingest` bridge
+### Flow C — Browser extension → `browser_ingest` bridge
 1. `extension/content.js` (4,062 lines) and `extension/background.js` (2,978 lines) — Chrome MV3 content-script/service-worker pair; installed manually per `extension/README.md`.
 2. Extension POSTs batches to `http://<host>:8765/social/ingest` and related routes registered in `src/bridges/ig_ingest.py:5880-5915`.
 3. `src/bridges/ig_ingest.py:5921` `if __name__ == "__main__"` block calls `aiohttp.web.run_app(app, host="0.0.0.0", port=PORT)` where `PORT = int(os.getenv("IG_INGEST_PORT", "8765"))` (`src/bridges/ig_ingest.py:83`).
@@ -125,7 +125,7 @@ src/recon_spiderfoot_service.py ── src/core/recon_spiderfoot, src/core/ghunt
 src/backup/db_backup.py        ── pg_dump wrapper
 ```
 
-Observable pattern: dockerised **plugin-style** collectors (`src/collectors/*/__init__.py`) all sharing a template base (`src/core/base_collector.py`) and a common vault/persistence layer (`src/core/vault.py`, `src/db/`). Cross-cutting concerns (rate-limiting, session repair, deduplication) live under `src/core/`. Message passing is out-of-band via Postgres tables (`recon_targets`, `dead_letter_queue`, `collection_action_queue`), Redis lists (`uc:realtime_post_feed`), and RabbitMQ exchange `whatsapp.events` (`src/bridges/whatsapp/package.json:3` description). The dashboard, ig_ingest bridge, and realtime feed are peers reading and writing the same Postgres.
+Observable pattern: dockerised **plugin-style** collectors (`src/collectors/*/__init__.py`) all sharing a template base (`src/core/base_collector.py`) and a common vault/persistence layer (`src/core/vault.py`, `src/db/`). Cross-cutting concerns (rate-limiting, session repair, deduplication) live under `src/core/`. Message passing is out-of-band via Postgres tables (`recon_targets`, `dead_letter_queue`, `collection_action_queue`), Redis lists (`uc:realtime_post_feed`), and RabbitMQ exchange `whatsapp.events` (`src/bridges/whatsapp/package.json:3` description). The dashboard, `browser_ingest` bridge, and realtime feed are peers reading and writing the same Postgres.
 
 Boundary: transport (`src/bridges/ig_ingest.py`, `src/dashboard/api.py`), business logic (`src/collectors/`, `src/core/`), persistence (`src/db/`, `src/core/vault.py`).
 
@@ -231,7 +231,7 @@ Total tracked files: 644. Full sorted inventory retrieved via `git ls-files | so
 - Key symbols: `get_pool()` (`src/db/connection.py:107`), `close_pool()` (`:133`), `apply_all(pool)` (`src/db/migrate.py:63`).
 - Notable behavior: per-container pool sizing via `DB_POOL_MIN_SIZE`/`DB_POOL_MAX_SIZE` (`src/db/connection.py:120-126`) tuned to stay under `max_connections=200`; migration lock timeout via `MIGRATE_LOCK_TIMEOUT_MS` (`src/db/migrate.py:100`); ledger table `schema_migrations` with `filename PRIMARY KEY, checksum, applied_at`.
 - Depends on: asyncpg, stdlib.
-- Depended on by: every process entry point (worker, scheduler, dashboard, ig_ingest, notifications, watchdog).
+- Depended on by: every process entry point (worker, scheduler, dashboard, browser_ingest, notifications, watchdog).
 - Tests: `tests/core/test_db_connection.py`, `tests/core/test_db_migrate.py`, `tests/verify_clean_boot.py` (used by CI `.github/workflows/python-ci.yml:47` `schema-boot`).
 
 ### `src/watchdog/freshness.py`
@@ -297,7 +297,7 @@ Total tracked files: 644. Full sorted inventory retrieved via `git ls-files | so
 
 Websocket: 1 route in `src/dashboard/api.py` (`@app.websocket`), plus supporting module `src/dashboard/websocket.py:5153 bytes`.
 
-### HTTP endpoints — ig_ingest (`src/bridges/ig_ingest.py`, aiohttp, port 8765)
+### HTTP endpoints — browser_ingest (`src/bridges/ig_ingest.py`, aiohttp, port 8765)
 35 routes registered at `:5880-5915`. All under `/social/*` or `/ig/*`, plus `/health`.
 
 | Method | Path | Handler | Line |
@@ -500,7 +500,7 @@ Local hook: `scripts/hooks/pre-commit` present under scripts (not automatically 
 
 Linting/formatting: ruff configured in `pyproject.toml:14-27` with `select = ["F","E9"]` and `extend-exclude = ["archive","telegramcollector","whatsappcollector","tmp","src/db/migrations"]`. No formatter (black/isort/prettier) declared. `.deepsource.toml` and `.sourcery.yml` present at repo root.
 
-Areas with no direct test references: `src/bots/onboard_bot.py` has `tests/bots/test_onboard_bot_start.py` (single 4.6 KB test), `src/tools/browser_cookie_vault.py` has one test (`tests/tools/test_browser_cookie_vault.py`). The full `src/dashboard/api.py` (10,784 LOC) is exercised primarily by the 11 dashboard tests; the ig_ingest bridge (5,921 LOC) is exercised by one 75 KB test. `src/scheduler/__init__.py` (1,722 LOC) is exercised by `tests/test_scheduler_graph_edges.py` (1,188 bytes) plus indirect coverage.
+Areas with no direct test references: `src/bots/onboard_bot.py` has `tests/bots/test_onboard_bot_start.py` (single 4.6 KB test), `src/tools/browser_cookie_vault.py` has one test (`tests/tools/test_browser_cookie_vault.py`). The full `src/dashboard/api.py` (10,784 LOC) is exercised primarily by the 11 dashboard tests; the browser bridge package (5,921 LOC) is exercised by one 75 KB test. `src/scheduler/__init__.py` (1,722 LOC) is exercised by `tests/test_scheduler_graph_edges.py` (1,188 bytes) plus indirect coverage.
 
 ## 13. Branches
 Sorted by committer date descending (excluding local branches with `refs/heads/` prefix duplicates already shown by `refs/remotes/origin/`):
@@ -598,9 +598,9 @@ Tags/releases present: none.
 
 | Doc claim | Source | Code evidence | Status |
 |---|---|---|---|
-| "26 Docker Compose services" | `README.md` overview | `docker/docker-compose.yml` declares 28 services: `postgres, collector_spiderfoot, collector_youtube, collector_tiktok, collector_github, collector_lowrisk, watchdog, collector_website, collector_light, collector_snapchat, collector_paypal, collector_airbnb, collector_bluesky, collector_pinterest, collector_telegram, collector_beeper, collector_whatsapp, collector_instagram, ig_ingest, scheduler, onboard_bot, realtime_feed, dashboard, rabbitmq, redis, wa-bridge-1, wa-bridge-2, browser_cookie_vault`. | corrected 2026-10-01 |
+| "30 Docker Compose services" | `README.md` overview | `docker/docker-compose.yml` declares 30 services: `postgres, collector_spiderfoot, collector_youtube, collector_tiktok, collector_github, collector_strava, collector_search, watchdog, collector_website, collector_exposure, collector_lemon8, collector_snapchat, collector_paypal, collector_airbnb, collector_bluesky, collector_pinterest, collector_telegram, collector_beeper, collector_whatsapp, collector_instagram, browser_ingest, scheduler, onboard_bot, realtime_feed, dashboard, rabbitmq, redis, wa-bridge-1, wa-bridge-2, browser_cookie_vault`. | confirmed 2026-10-14 |
 | "11 source platforms" | `README.md` line 3 | `src/collectors/__init__.py:1-13` registers 12 collector classes: `github, website, instagram, telegram, tiktok, youtube, lemon8, strava, whatsapp, search, exposure, beeper`. `README.md` names 11 (excludes `exposure`). | contradicted — code has 12 collectors; README names 11 |
-| "ig_ingest :8765 (aiohttp)" | `README.md` architecture diagram | `src/bridges/ig_ingest.py:83` `PORT = int(os.getenv("IG_INGEST_PORT", "8765"))`; `src/bridges/ig_ingest.py:5921` `if __name__ == "__main__"` | confirmed |
+| "browser_ingest :8765 (aiohttp)" | `README.md` architecture diagram | `src/bridges/ig_ingest.py:83` `PORT = int(os.getenv("IG_INGEST_PORT", "8765"))`; `src/bridges/ig_ingest.py:5921` `if __name__ == "__main__"` | confirmed |
 | "dashboard :8700 (React + FastAPI ops)" | `README.md` | `docker/Dockerfile.dashboard:8` `uvicorn ... --port 8700`; `docker/docker-compose.yml:1092` ports | confirmed |
 | "Watchdog restarts stale containers via Docker socket" | `README.md` Support services | `src/watchdog/freshness.py:348` `http://docker/containers/{container}/restart` | confirmed |
 | "Two Baileys TS bridges push raw messages over AMQP into RabbitMQ" | `README.md` Path 3 | `docker/docker-compose.yml:1254` `wa-bridge-1`, `:1293` `wa-bridge-2`; `src/bridges/whatsapp/package.json:3` mentions AMQP topic exchange | confirmed |

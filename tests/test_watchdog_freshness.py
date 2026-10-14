@@ -835,5 +835,5 @@ def test_headless_watchdog_uses_canonical_lowrisk_progress_queries(monkeypatch):
     assert "strava_athletes" in freshness.CHECKS["strava"][0]
 
     assert freshness.CHECKS["github"][2] == ["unifiedcollector_collector_github"]
-    assert freshness.CHECKS["strava"][2] == ["unifiedcollector_collector_lowrisk"]
-    assert freshness.CHECKS["search"][2] == ["unifiedcollector_collector_lowrisk"]
+    assert freshness.CHECKS["strava"][2] == ["unifiedcollector_collector_strava"]
+    assert freshness.CHECKS["search"][2] == ["unifiedcollector_collector_search"]

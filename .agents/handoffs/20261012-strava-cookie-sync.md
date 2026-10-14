@@ -6,7 +6,7 @@ Starting point:
 - Branch `main` was clean and aligned with `origin/main` at `cf5a4c2e`.
 - `cookies_handler` currently accepts only Instagram and writes Netscape jars below `CREDENTIALS_ROOT`.
 - Extension `syncCookies()` and both call sites are in `extension/src/background.ts`; keep the function itself unchanged.
-- `instagram_ingest` and `collector_lowrisk` both mount `../credentials` at `/app/credentials`; the image works from `/app`. With `STRAVA_COOKIES_FILE` unset, collector discovery uses `/app/credentials/strava`.
+- `browser_ingest` and `collector_strava` both mount `../credentials` at `/app/credentials`; the image works from `/app`. With `STRAVA_COOKIES_FILE` unset, collector discovery uses `/app/credentials/strava`.
 - No dedicated cookie handler tests exist. `extension/package-lock.json` exists, but `extension/node_modules` is absent.
 
 Implemented: shared cookie writing/account sanitization helpers; Strava handler requires `_strava4_session` and writes `strava_<account>.txt`; extension sync is called at both existing sync sites; focused handler tests cover Strava, Instagram, and unsupported platforms. Build entry paths were updated from nonexistent `.js` files to the tracked `.ts` sources.

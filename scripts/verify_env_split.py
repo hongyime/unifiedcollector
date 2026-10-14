@@ -98,10 +98,12 @@ SERVICE_SOURCES: dict[str, list[str]] = {
     "collector_airbnb": PROFILE_PROBE_PATHS + ["src/collectors/airbnb"],
     "collector_bluesky": PROFILE_PROBE_PATHS + ["src/collectors/bluesky"],
     "collector_pinterest": PROFILE_PROBE_PATHS + ["src/collectors/pinterest"],
-    "collector_lowrisk": COMMON_WORKER_PATHS + [
+    "collector_strava": COMMON_WORKER_PATHS + [
         "src/collectors/strava",
-        "src/collectors/search",
         "src/core/strava_route_queue.py",
+    ],
+    "collector_search": COMMON_WORKER_PATHS + [
+        "src/collectors/search",
         "src/core/tor_proxy.py",
     ],
     "collector_website": COMMON_WORKER_PATHS + ["src/collectors/website"],

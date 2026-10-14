@@ -154,7 +154,7 @@ services:
     - /app/config
     profiles:
     - workers
-  collector_lowrisk:
+  collector_search:
     image: unifiedcollector-app-dev:local
     pull_policy: never
     build:
@@ -185,7 +185,43 @@ services:
     - watchfiles
     - --target-type
     - command
-    - python -m src.main worker --source github,strava,search
+    - python -m src.main worker --source search
+    - /app/src
+    - /app/config
+    profiles:
+    - workers
+  collector_strava:
+    image: unifiedcollector-app-dev:local
+    pull_policy: never
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: dev
+    init: true
+    env_file:
+    - path: .env.dev
+      required: false
+    environment:
+      DATABASE_URL: postgresql://collector:development@postgres:5432/unifiedcollector
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      WATCHFILES_FORCE_POLLING: 'true'
+      WATCHFILES_POLL_DELAY_MS: '500'
+      PYTHONDONTWRITEBYTECODE: '1'
+    volumes:
+    - ./src:/app/src:ro
+    - ./config:/app/config:ro
+    - dev-data:/app/data
+    - dev-sessions:/app/sessions
+    depends_on:
+    - postgres
+    - redis
+    - rabbitmq
+    command:
+    - watchfiles
+    - --target-type
+    - command
+    - python -m src.main worker --source strava
     - /app/src
     - /app/config
     profiles:
@@ -478,7 +514,7 @@ services:
     - /app/config
     profiles:
     - workers
-  instagram_ingest:
+  browser_ingest:
     image: unifiedcollector-app-dev:local
     pull_policy: never
     build:

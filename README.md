@@ -88,7 +88,7 @@ pwsh scripts/register-browser-autorecover-task.ps1
 pwsh scripts/register-browser-maintenance-task.ps1
 ```
 
-Success looks like `docker compose ps` reporting all 28 services `Up`
+Success looks like `docker compose ps` reporting all 30 services `Up`
 with `(healthy)` on the 22 that define healthchecks, and
 `curl http://localhost:8700/health` returning `{"status":"ok",...}`.
 
@@ -154,7 +154,7 @@ docker compose -f docker/docker-compose.yml up -d
 Ports bound on the host:
 - `${POSTGRES_HOST_PORT:-5433}` → postgres:5432
 - `8700` → dashboard (also mapped :8001)
-- `8765` → instagram_ingest (Chrome extension endpoint)
+- `8765` → browser_ingest (Chrome extension endpoint)
 - `8790` → browser_cookie_vault
 - `3011`, `3012` → wa-bridge-1/2 (management + QR scan)
 
@@ -338,15 +338,15 @@ unifiedcollector/
 
 Failure modes hit during the audit / hardening pass and their fixes:
 
-**1. `instagram_ingest` reports `db_pool: false` after a container restart.**
+**1. `browser_ingest` reports `db_pool: false` after a container restart.**
 Old symptom: `startup DB pool timed out` at boot when Postgres was slow
 to accept connections after the host wake-up. Fixed 2026-09-06 by
 extending startup retry to 300 s and by making `/health` return 503
 when db_pool is absent AND startup is not pending. If it still happens,
-`docker compose restart instagram_ingest` and watch
-`docker logs unifiedcollector_instagram_ingest --tail 20`.
+`docker compose restart browser_ingest` and watch
+`docker logs unifiedcollector_browser_ingest --tail 20`.
 
-**2. Chrome extension stops POSTing to `instagram_ingest`.**
+**2. Chrome extension stops POSTing to `browser_ingest`.**
 Diagnosis: `curl http://localhost:8790/health` (browser cookie vault)
 also fails, and `Test-NetConnection 127.0.0.1 -Port 9336` returns
 False. Fix: close all Chrome windows on the host, then re-run

@@ -22,7 +22,7 @@ multi-user or SaaS component.
 
 ## 2. System Architecture
 
-**Runtime:** Docker Compose, 29 services on one shared Postgres 16
+**Runtime:** Docker Compose, 30 services on one shared Postgres 16
 (`pgvector/pgvector:pg16`), Redis 7, and RabbitMQ 3.13. Every container
 bind-mounts `../src:/app/src` so code changes apply on
 `docker compose restart <svc>` without image rebuild.
@@ -31,8 +31,8 @@ bind-mounts `../src:/app/src` so code changes apply on
 
 | Path | Provenance tag | Services |
 |---|---|---|
-| Headless collectors (server-side scraping) | `ingest_path='headless'` | `collector_youtube`, `collector_tiktok`, `collector_instagram`, `collector_lemon8`, `collector_website`, `collector_exposure`, `collector_github`, `collector_lowrisk` (strava+search) |
-| Browser extension bridge | `ingest_path='extension'` | Chrome MV3 extension (host-side) posts to `ig_ingest:8765` — aiohttp bridge that persists into the same DB |
+| Headless collectors (server-side scraping) | `ingest_path='headless'` | `collector_youtube`, `collector_tiktok`, `collector_instagram`, `collector_lemon8`, `collector_website`, `collector_exposure`, `collector_github`, `collector_strava`, `collector_search` |
+| Browser extension bridge | `ingest_path='extension'` | Chrome MV3 extension (host-side) posts to `browser_ingest:8765` — aiohttp bridge that persists into the same DB |
 | Realtime messaging | `ingest_path='messaging'` | `collector_telegram` (Telethon), `collector_whatsapp` (consumes RabbitMQ from `wa-bridge-1/2` Baileys), `collector_beeper` (Matrix) |
 
 **Support services:** `dashboard` (FastAPI at :8700 + React 19 SPA),
@@ -51,7 +51,7 @@ files under sha256-blob paths.
 
 **Trust boundaries:** All services run in one Docker network. Postgres
 is not exposed to host by default (compose maps only `${POSTGRES_HOST_PORT:-5433}`).
-`dashboard` binds `:8700`, `ig_ingest` `:8765`, `browser_cookie_vault`
+`dashboard` binds `:8700`, `browser_ingest` `:8765`, `browser_cookie_vault`
 `:8790`. Everything else is internal. `credentials/` and GHunt
 `creds.m` mount as read-only. Per-service `.env` files scope credentials
 so `collector_spiderfoot` no longer sees Instagram/Telegram credentials
@@ -62,8 +62,8 @@ so `collector_spiderfoot` no longer sees Instagram/Telegram credentials
 | Feature | Module/Path | Status | Notes |
 |---|---|---|---|
 | GitHub collector | `src/collectors/github/` | Implemented | Own container `collector_github` |
-| Strava collector | `src/collectors/strava/` | Implemented | In `collector_lowrisk` |
-| Search collector | `src/collectors/search/` | Implemented | In `collector_lowrisk` |
+| Strava collector | `src/collectors/strava/` | Implemented | Own container `collector_strava` |
+| Search collector | `src/collectors/search/` | Implemented | Own container `collector_search` |
 | Website spider | `src/collectors/website/` | Implemented | Own container |
 | Exposure (dorking) collector | `src/collectors/exposure/` | Implemented | 13th collector, own container |
 | Instagram collector (headless) | `src/collectors/instagram/` | Implemented | Multi-account instaloader |
@@ -126,7 +126,7 @@ always a new file.
 | Service | Port | Framework | Routes |
 |---|---|---|---|
 | `dashboard` | 8700 | FastAPI | 110 `@app.<verb>` decorators + 1 websocket, JWT auth via `Depends(require_role(...))` |
-| `ig_ingest` | 8765 | aiohttp | 36 routes under `/social/*` and `/ig/*`, no auth (localhost + extension-origin only) |
+| `browser_ingest` | 8765 | aiohttp | 36 routes under `/social/*` and `/ig/*`, no auth (localhost + extension-origin only) |
 | `browser_cookie_vault` | 8790 | aiohttp | `/health`, CDP snapshot lifecycle |
 | `wa-bridge-1` / `wa-bridge-2` | 3011 / 3012 → 3001 internal | Node/express | `/health`, `/qr`, `/session`, `/reconnect`, `/media/decrypt`, `/devices/:number` |
 
@@ -192,7 +192,7 @@ platforms.
 **Absent by intent:**
 - Multi-user auth (system is single-tenant).
 - TLS between compose services (internal Docker network only).
-- Rate limiting on `ig_ingest` internal routes (localhost + extension
+- Rate limiting on `browser_ingest` internal routes (localhost + extension
   origin).
 
 **Absent + noted:**
@@ -258,10 +258,10 @@ persisted in DB so container restart preserves cooldown.
 uses `stop_event` in `SchedulerContext`; consumers check
 `self._stop.is_set()` between messages.
 
-**Health checks:** Docker healthchecks on 23 of 29 services
-(`collector_snapchat`, `collector_paypal`, `collector_airbnb`, `collector_bluesky`, `collector_pinterest`, and `ig_ingest` have no defined check). `dashboard`
+**Health checks:** Docker healthchecks on 24 of 30 services
+(`collector_snapchat`, `collector_paypal`, `collector_airbnb`, `collector_bluesky`, `collector_pinterest`, and `browser_ingest` have no defined check). `dashboard`
 `/health` returns database + drive + vault + backup status.
-`ig_ingest` `/health` returns 503 when `db_pool` is absent and
+`browser_ingest` `/health` returns 503 when `db_pool` is absent and
 startup task has given up (honest health).
 
 **Observability:** Prometheus metrics on `dashboard:/metrics`

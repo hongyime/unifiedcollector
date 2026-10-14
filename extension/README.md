@@ -27,7 +27,7 @@ collect and sign in where required. Tab/login requirements are listed in
 [platform tab]  content script  --(page/session capture)-->  browser evidence
         |  (chrome.runtime messages)
         v
-   background service worker  --(HTTP)-->  ig_ingest bridge (:8765)
+   background service worker  --(HTTP)-->  browser_ingest bridge (:8765)
                                       --> Collector database + media vault
 ```
 
@@ -36,10 +36,10 @@ feeds the collector over a local HTTP endpoint.
 
 ## Setup
 
-1. **Ingest server**: runs as the `instagram_ingest` service in
+1. **Ingest server**: runs as the `browser_ingest` service in
    `docker/docker-compose.yml` and listens on port 8765. Start it with:
    ```
-   docker compose -f docker/docker-compose.yml up -d instagram_ingest
+   docker compose -f docker/docker-compose.yml up -d browser_ingest
    ```
    The service uses the bind-mounted `src/bridges/ig_ingest/` package.
 
@@ -62,7 +62,7 @@ to `POST /ig/discover`, which stores them at hop+1 in `instagram_spider_targets`
 wipes them). Hop 0 = your seeds, hop 1 = their network, hop 2 = leaf (scrape
 only). **Famous accounts (> `INSTA_SPIDER_FAMOUS_CAP`, default 100k followers) are
 skipped** — we crawl your network, not celebrities. Tune via env on the
-`instagram_ingest` service: `INSTA_SPIDER_HOPS`, `INSTA_SPIDER_FAMOUS_CAP`,
+`browser_ingest` service: `INSTA_SPIDER_HOPS`, `INSTA_SPIDER_FAMOUS_CAP`,
 `IG_SPIDER_TARGETS_LIMIT` (max targets served per cycle).
 
 ## MV3 notes / maintenance

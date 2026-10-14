@@ -115,8 +115,8 @@ CHECKS = {
 #    available action and harmless if the extension is the live path. Once
 #    media_items.ingest_path lands (task #7) these can filter to ingest_path=
 #    'headless' for precision.
-  #  * github has its own container. strava/search still share collector_lowrisk,
-  #    so a stale one of those two restarts the shared container.
+#  * github, strava, and search each have their own container, so a stale source
+#    restarts only its own worker.
 # Opt-out with WATCHDOG_HEADLESS_ENABLED=0.
 if os.getenv("WATCHDOG_HEADLESS_ENABLED", "1") == "1":
     _D = 86400  # 1 day, the generous baseline
@@ -161,7 +161,7 @@ if os.getenv("WATCHDOG_HEADLESS_ENABLED", "1") == "1":
         "search": (
             "SELECT extract(epoch FROM now()-max(collected_at)) FROM search_results",
             int(os.getenv("WATCHDOG_STALE_SEARCH", str(_D * 3))),      # 72h
-            ["unifiedcollector_collector_lowrisk"],
+            ["unifiedcollector_collector_search"],
         ),
     })
     _strava_stale_threshold = int(os.getenv("WATCHDOG_STALE_STRAVA", str(_D * 3)))
@@ -169,7 +169,7 @@ if os.getenv("WATCHDOG_HEADLESS_ENABLED", "1") == "1":
         CHECKS["strava"] = (
             STRAVA_PROGRESS_QUERY,
             _strava_stale_threshold,  # 72h by default; 0 disables Strava monitoring
-            ["unifiedcollector_collector_lowrisk"],
+            ["unifiedcollector_collector_strava"],
         )
     else:
         log.info(
