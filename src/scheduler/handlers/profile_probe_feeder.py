@@ -27,7 +27,7 @@ WITH link_rules(source, domain_pattern, path_pattern) AS (
     VALUES
         ('snapchat',  '(^|\.)snapchat\.com$', 'snapchat\.com/add/([a-zA-Z0-9._-]{2,80})'),
         ('paypal',    '(^|\.)paypal\.me$',    'paypal\.me/([a-zA-Z0-9._-]{2,80})'),
-        ('airbnb',    '(^|\.)airbnb\.[a-z.]+$', 'airbnb\.[a-z.]+/users/show/([a-zA-Z0-9_-]{2,80})'),
+        ('airbnb',    '(^|\.)airbnb\.[a-z.]+$', 'airbnb\.[a-z.]+/users/show/([0-9]{2,20})'),
         ('bluesky',   '(^|\.)bsky\.app$',     'bsky\.app/profile/([a-zA-Z0-9._-]{2,80})'),
         ('pinterest', '(^|\.)pinterest\.[a-z.]+$', 'pinterest\.[a-z.]+/([a-zA-Z0-9._-]{2,80})')
 ),
@@ -80,12 +80,12 @@ social_handles AS (
     FROM social_users AS su
     LEFT JOIN profile_probe_queue AS existing
       ON existing.username = lower(btrim(su.username, '@'))
-     AND existing.source IN ('snapchat', 'paypal', 'airbnb', 'bluesky', 'pinterest')
+     AND existing.source IN ('snapchat', 'paypal', 'bluesky', 'pinterest')
     WHERE su.username IS NOT NULL
       AND su.platform NOT IN ('snapchat', 'paypal', 'airbnb', 'bluesky', 'pinterest')
       AND lower(btrim(su.username, '@')) ~ '^[a-z0-9][a-z0-9._-]{1,79}$'
     GROUP BY lower(btrim(su.username, '@'))
-    HAVING count(DISTINCT existing.source) < 5
+    HAVING count(DISTINCT existing.source) < 4
     ORDER BY platform_priority,
              max(COALESCE(su.last_seen, su.first_seen)) DESC NULLS LAST,
              lower(btrim(su.username, '@'))
@@ -99,7 +99,7 @@ social_candidates AS (
         handles.seen_at,
         1 AS evidence_rank
     FROM social_handles AS handles
-    CROSS JOIN (VALUES ('snapchat'), ('paypal'), ('airbnb'), ('bluesky'), ('pinterest'))
+    CROSS JOIN (VALUES ('snapchat'), ('paypal'), ('bluesky'), ('pinterest'))
         AS target(source)
 ),
 raw_candidates AS (

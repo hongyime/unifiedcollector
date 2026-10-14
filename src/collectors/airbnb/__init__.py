@@ -48,9 +48,8 @@ class AirbnbCollector(ProfileOnlyCollector):
     PROFILE_TABLE = "airbnb_profiles"
 
     async def probe_profile(self, username: str) -> ProfileResult:
-        # Prefer the profile path (works with username string); Airbnb
-        # will redirect to /users/show/<numeric> internally.
-        url = f"https://www.airbnb.com/users/profile/{username}"
+        # Airbnb profiles are addressed by their numeric user ID.
+        url = f"https://www.airbnb.com/users/show/{username}"
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                           "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
@@ -72,8 +71,14 @@ class AirbnbCollector(ProfileOnlyCollector):
         html = r.text
         first_m = _DISPLAY_RE.search(html)
         if not first_m:
-            # No profile data in the HTML shell = likely gone / anti-bot wall.
-            return ProfileResult(exists=False, username=username, fields={})
+            # Airbnb can return a successful app shell or challenge page without
+            # profile data. Do not mark that response as a confirmed 404.
+            return ProfileResult(
+                exists=False,
+                username=username,
+                fields={},
+                error="profile_payload_unavailable",
+            )
 
         last_m = _LAST_RE.search(html)
         avatar_m = _AVATAR_RE.search(html)
