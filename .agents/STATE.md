@@ -1,13 +1,13 @@
 # Agent State
 Current task: UnifiedCollector Full Plan (2026-10-14), one phase/commit at a time.
-Status (2026-10-15): Phase 1–5 base work and live follow-ups are pushed: watchdog allowlist `5a88905a`, Beeper fix `22acfcef`, Snapchat content tables `efa6a2c5`, and search mutex fairness `ea8791b5`. Phase 1 orphan soak passed; all 30 current Compose services are running.
-- Beeper is flowing: 1,132 messages in 12h and 255 in the 15m window ending 17:28 UTC; recent Beeper logs had no errors/HTTP 500s.
-- Lemon8 has 15 posts and 33 media rows in 12h. Reload is confirmed by `content_script_boot` at 17:36:10 UTC (v1.23.108); the page then reported `recoverable_error_shell` and an empty media event. Candidates remain at 0; For You capture is unverified.
-- Telegram has 11,893 messages, 1,648 member refreshes, and 1 join/leave event in 12h. All 16 refreshed polls were anonymous; no recent voter rows. Discussion visits are 0 because `TELEGRAM_SPIDER_ACCOUNTS` is unset.
-- Search has 7,513 results, 10 unsearched dynamic terms, and 0 indexed documents in the rolling window. Exposure still holds the shared mutex after about 4h; do not stop it. Restart exposure only after natural release.
-- Native tables remain empty for Pinterest pins, Snapchat stories/Spotlights/Highlights, and Airbnb reviews; public Airbnb GraphQL calls return errors.
-- The clean 15m stack gate is open: the scan ending 17:32 UTC found browser-ingest/Website 429s and YouTube/WhatsApp bridge errors, with no traceback lines. Reports are updated at `/tmp/unifiedcollector-plan-complete-20261014.md` and `/tmp/percontainer-12h-20261014.md`.
-Next: verify Lemon8 after Bryan's reload and populated-feed navigation; await Telegram account-scope input; monitor the natural exposure lock release and clean-window status without restarting exposure. Once release occurs, restart exposure, verify search progress, refresh the 12h report, and commit the state/report handoff.
+Status (2026-10-15): Phase 1–5 base changes are pushed: watchdog allowlist `5a88905a`, Beeper fix `22acfcef`, Snapchat content tables `efa6a2c5`, and search mutex fairness `ea8791b5`. Current live audit is captured in `.agents/handoffs/2026-10-14-1741-full-plan-resume.md`.
+- Beeper is flowing: 1,239 messages in 12h and 181 in 15m at 17:38 UTC.
+- Lemon8 has 15 posts and 33 media rows in 12h. Reload v1.23.108 is confirmed, but the topic page remains `recoverable_error_shell`; candidates are 0 pending a populated-feed capture.
+- Telegram has 11,936 messages, 1,639 refreshed member rows, 16 polls, 0 poll-voter rows, and 1 join/leave event in 12h. Discussion visits remain 0 because `TELEGRAM_SPIDER_ACCOUNTS` is unset.
+- Search has 7,453 results in 12h, 10 active unsearched terms, and 0 indexed documents. Exposure holds the shared search mutex after about 4h13m; do not stop it. Restart only after natural release.
+- Native public-content tables remain empty (Pinterest pins, Snapchat story types, Airbnb reviews). Pinterest and Snapchat have large old failed/pending target queues; inspect before changing queue state.
+- Final 15m soak is not clean: provider 429s/errors continue, one recent rate-limit-table event is HTTP 401, and no tracebacks were found. The `/tmp` reports still need a fresh 12h snapshot after fixes.
+Next: align phase 5 collectors with the locked methods and full field list; keep Telegram account scope and Lemon8 populated-feed capture pending, then verify search after the exposure lock releases and rerun the full clean-window/report gate.
 
 Batch 2 Item 3 blocker (2026-10-14): code is committed in `86dc357a`, `a863ab93`, and `cd4339e9`. The 15-minute live observation kept pending counts flat (Threads 949, Instagram 5,424) but added no completions; recent activity still reports extension 1.23.105 instead of rebuilt 1.23.107. Browser-use policy rejected Chrome internal Extensions controls and explicitly prohibits CDP/browser-command reload. Bryan was asked to reload manually; after 30+ minutes, proceeding without live completion verification.
 
