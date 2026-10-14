@@ -93,6 +93,7 @@ import re
 import time
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import quote, urlparse
@@ -225,12 +226,19 @@ class GithubCollector(BaseCollector):
         super().__init__()
         self._pats: list[str] = self._load_pats()
         self._pat_idx: int = 0
+        self._pat_cooldown_until: dict[str, float] = {}
+        self._pat_rate_limit_streaks: dict[str, int] = {}
+        self._pat_cooldowns_restored = False
+        self._anonymous_cooldown_until = 0.0
         self._sem = asyncio.Semaphore(int(os.getenv("GITHUB_MAX_CONCURRENT", "5")))
         self._batch_sem = asyncio.Semaphore(10)
         self._spider_depth = int(os.getenv("GITHUB_SPIDER_DEPTH", "4"))
         self._spider_batch_size = int(os.getenv("GITHUB_SPIDER_BATCH_SIZE", "20"))
         self._spider_user_delay = float(os.getenv("GITHUB_SPIDER_USER_DELAY", "2.0"))
         self._api_delay = float(os.getenv("GITHUB_API_DELAY", "0.1"))
+        self._anonymous_api_delay = self._env_float_min(
+            "GITHUB_ANONYMOUS_API_DELAY_SECONDS", "60", lower=0.0
+        )
         self._api_quota_target_ratio = self._env_float_range(
             "GITHUB_API_QUOTA_TARGET_RATIO", "0.85", lower=0.5, upper=0.95
         )
@@ -440,23 +448,103 @@ class GithubCollector(BaseCollector):
             h["Authorization"] = f"token {pat}"
         return h
 
-    def _select_pat_for_request(self) -> tuple[str | None, str]:
-        """Pick the PAT for one request and return its safe account label.
+    async def _restore_pat_cooldowns(self) -> None:
+        """Restore active per-token GitHub cooldowns after a worker restart."""
+        if self._pat_cooldowns_restored or self.pool is None:
+            return
+        try:
+            async with self.pool.acquire() as conn:
+                rows = await conn.fetch(
+                    """
+                    SELECT account,
+                           MAX(created_at + cooldown_seconds * interval '1 second') AS cooldown_until
+                    FROM rate_limit_events
+                    WHERE source = 'github' AND status_code = 429
+                      AND (account LIKE 'token_%' OR account = 'anonymous')
+                      AND cooldown_seconds > 0
+                      AND created_at + cooldown_seconds * interval '1 second' > NOW()
+                    GROUP BY account
+                    """,
+                    timeout=5,
+                )
+        except Exception as exc:
+            logger.debug("github: persisted PAT cooldown restore failed: %s", type(exc).__name__)
+            return
 
-        Previously the collector stayed on token_1 until it was nearly empty,
-        so a 3-PAT setup only used one quota bucket most of the hour. Rotating
-        per request spreads load while the captured account label keeps quota
-        accounting and rate-limit events tied to the token that actually made
-        the request.
-        """
+        now = time.time()
+        for row in rows:
+            until = row["cooldown_until"]
+            if until is None:
+                continue
+            if until.tzinfo is None:
+                until = until.replace(tzinfo=timezone.utc)
+            remaining = (until.astimezone(timezone.utc) - datetime.now(timezone.utc)).total_seconds()
+            if remaining > 0:
+                account = str(row["account"])
+                if account == "anonymous":
+                    self._anonymous_cooldown_until = max(
+                        self._anonymous_cooldown_until,
+                        now + remaining,
+                    )
+                else:
+                    self._pat_cooldown_until[account] = max(
+                        self._pat_cooldown_until.get(account, 0.0),
+                        now + remaining,
+                    )
+        self._pat_cooldowns_restored = True
+
+    def _select_pat_for_request(self) -> tuple[str | None, str]:
+        """Pick the next non-cooled PAT and return its safe account label."""
         if not self._pats:
-            return None, "anonymous"
-        idx = self._pat_idx
-        pat = self._pats[idx]
-        account = f"token_{idx + 1}"
-        if len(self._pats) > 1:
-            self._pat_idx = (idx + 1) % len(self._pats)
-        return pat, account
+            return (None, "cooldown") if self._anonymous_cooldown_until > time.time() else (None, "anonymous")
+
+        now = time.time()
+        for offset in range(len(self._pats)):
+            idx = (self._pat_idx + offset) % len(self._pats)
+            account = f"token_{idx + 1}"
+            cooldown_until = self._pat_cooldown_until.get(account, 0.0)
+            if cooldown_until > now:
+                continue
+            self._pat_cooldown_until.pop(account, None)
+            self._pat_idx = (idx + 1) % len(self._pats) if len(self._pats) > 1 else idx
+            return self._pats[idx], account
+        return None, "cooldown"
+
+    @staticmethod
+    def _retry_after_seconds(raw: str | None) -> int | None:
+        if not raw:
+            return None
+        try:
+            return max(0, int(float(raw)))
+        except (TypeError, ValueError):
+            pass
+        try:
+            retry_at = parsedate_to_datetime(raw)
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            return max(0, int((retry_at - datetime.now(timezone.utc)).total_seconds()))
+        except Exception:
+            return None
+
+    async def _select_available_pat(self) -> tuple[str | None, str]:
+        """Wait for the earliest active token cooldown before making a request."""
+        await self._restore_pat_cooldowns()
+        while True:
+            pat, account = self._select_pat_for_request()
+            if account != "cooldown":
+                return pat, account
+            now = time.time()
+            deadlines = [
+                deadline for deadline in self._pat_cooldown_until.values()
+                if deadline > now
+            ]
+            if self._anonymous_cooldown_until > now:
+                deadlines.append(self._anonymous_cooldown_until)
+            if not deadlines:
+                continue
+            delay = max(1.0, min(deadlines) - now)
+            logger.info("GitHub PAT pool cooling down; waiting %.0fs before the next request", delay)
+            await sleep_rate_limit(delay)
 
     def _rotate_pat(self) -> bool:
         """Rotate to the next PAT. Returns True if a different one is selected."""
@@ -653,12 +741,18 @@ class GithubCollector(BaseCollector):
         observability.
         """
         async with self._sem:
-            await asyncio.sleep(self._api_delay)
             transport_retries = self._api_transport_retries
             attempts = transport_retries + 1
             for attempt in range(1, attempts + 1):
-                pat, pat_account = self._select_pat_for_request()
+                pat, pat_account = await self._select_available_pat()
                 try:
+                    delay = (
+                        max(self._api_delay, self._anonymous_api_delay)
+                        if pat_account == "anonymous"
+                        else self._api_delay
+                    )
+                    if delay > 0:
+                        await sleep_rate_limit(delay)
                     resp = await client.get(url, headers=self._headers_for_pat(pat))
                     break
                 except httpx.TransportError as exc:
@@ -698,12 +792,7 @@ class GithubCollector(BaseCollector):
             except Exception:  # noqa: BLE001
                 logger.debug("quota.consume swallowed", exc_info=True)
 
-            retry_after = None
-            try:
-                retry_after_raw = resp.headers.get("Retry-After")
-                retry_after = int(float(retry_after_raw)) if retry_after_raw else None
-            except (TypeError, ValueError):
-                retry_after = None
+            retry_after = self._retry_after_seconds(resp.headers.get("Retry-After"))
             body = str(getattr(resp, "text", "") or "").lower()
             is_rate_limited = (
                 resp.status_code == 429
@@ -721,9 +810,32 @@ class GithubCollector(BaseCollector):
             await self._record_api_quota_snapshot(account=pat_account, url=url)
             if is_rate_limited:
                 reset_wait = max(0, (self.rate_limit_reset or 0) - int(time.time()))
-                wait = max(retry_after or 0, reset_wait) + 5
-                if wait <= 5:
-                    wait = int(os.getenv("GITHUB_RATE_LIMIT_DEFAULT_COOLDOWN_SECONDS", "300"))
+                try:
+                    base_cooldown = max(
+                        1,
+                        int(os.getenv("GITHUB_RATE_LIMIT_DEFAULT_COOLDOWN_SECONDS", "300")),
+                    )
+                    max_cooldown = max(
+                        base_cooldown,
+                        int(os.getenv("GITHUB_RATE_LIMIT_MAX_COOLDOWN_SECONDS", "21600")),
+                    )
+                except (TypeError, ValueError):
+                    base_cooldown, max_cooldown = 300, 21600
+                streak = self._pat_rate_limit_streaks.get(pat_account, 0) + 1
+                self._pat_rate_limit_streaks[pat_account] = streak
+                exponential = min(max_cooldown, base_cooldown * (2 ** min(streak - 1, 16)))
+                wait = max(retry_after or 0, reset_wait + 5 if reset_wait > 0 else 0, exponential)
+                cooldown_until = time.time() + wait
+                if pat_account == "anonymous":
+                    self._anonymous_cooldown_until = max(
+                        self._anonymous_cooldown_until,
+                        cooldown_until,
+                    )
+                else:
+                    self._pat_cooldown_until[pat_account] = max(
+                        self._pat_cooldown_until.get(pat_account, 0.0),
+                        cooldown_until,
+                    )
                 await self._record_api_rate_limit(
                     url=url,
                     resp=resp,
@@ -744,12 +856,13 @@ class GithubCollector(BaseCollector):
                     sleep_for = min(wait, max(0, max_sleep))
                     logger.warning(
                         "GitHub rate limit hit for %s; sleeping %.0fs (cooldown %ds)",
-                        self._pat_account_name(),
+                        pat_account,
                         sleep_for,
                         int(wait),
                     )
                     await sleep_rate_limit(sleep_for)
                 return None
+            self._pat_rate_limit_streaks.pop(pat_account, None)
             if adaptive_delay > 0:
                 logger.debug(
                     "GitHub adaptive quota pacing %.2fs remaining=%s limit=%s target=%.2f",

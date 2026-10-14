@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -41,6 +42,7 @@ def _isolate_drive(tmp_path, monkeypatch):
     # for real anyway, but we don't want it to import the proxy plumbing).
     monkeypatch.setenv("GITHUB_USE_TOR", "0")
     monkeypatch.setenv("TOR_PROXY_ENABLED", "0")
+    monkeypatch.setenv("GITHUB_ANONYMOUS_API_DELAY_SECONDS", "0")
     yield
 
 
@@ -415,6 +417,7 @@ async def test_api_get_records_github_quota_as_rate_limit_and_sleeps(monkeypatch
     coll._api_delay = 0
     coll._pats = ["one-token"]
     coll._quota.consume = AsyncMock()
+    monkeypatch.setenv("GITHUB_RATE_LIMIT_DEFAULT_COOLDOWN_SECONDS", "60")
     monkeypatch.setattr(github_mod.time, "time", lambda: 1_000)
     events = []
     sleeps = []
@@ -526,6 +529,51 @@ async def test_api_get_rotates_available_pat_without_sleeping(monkeypatch):
     assert coll._pat_idx == 1
     assert events[0]["account"] == "token_1"
     assert events[0]["scope"] == "repos/a/b/contributors"
+
+
+@pytest.mark.asyncio
+async def test_api_get_skips_pat_during_its_cooldown(monkeypatch):
+    coll = _new_collector()
+    coll._api_delay = 0
+    coll._pats = ["one-token", "two-token"]
+    coll._quota.consume = AsyncMock()
+    monkeypatch.setattr(github_mod.time, "time", lambda: 1_000)
+    monkeypatch.setenv("GITHUB_RATE_LIMIT_DEFAULT_COOLDOWN_SECONDS", "60")
+    monkeypatch.setattr(github_mod, "sleep_rate_limit", AsyncMock())
+    http = MagicMock()
+    http.get = AsyncMock(side_effect=[
+        _make_response(
+            status=403,
+            headers={
+                "X-RateLimit-Remaining": "0",
+                "X-RateLimit-Reset": "0",
+                "X-RateLimit-Limit": "5000",
+            },
+        ),
+        _make_response(status=200, json_body={"ok": True}),
+    ])
+
+    limited = await coll._api_get(http, "https://api.github.com/repos/a/b/issues")
+    ok = await coll._api_get(http, "https://api.github.com/repos/a/b/issues")
+
+    assert limited is None
+    assert ok is not None
+    assert [call.kwargs["headers"].get("Authorization") for call in http.get.await_args_list] == [
+        "token one-token",
+        "token two-token",
+    ]
+    assert coll._pat_cooldown_until["token_1"] == 1_060
+
+
+def test_retry_after_accepts_delta_seconds_and_http_date(monkeypatch):
+    from datetime import timedelta
+    from email.utils import format_datetime
+
+    assert GithubCollector._retry_after_seconds("12.5") == 12
+    # HTTP-date parsing uses wall clock; allow a little tolerance around construction.
+    retry_at = datetime.now(timezone.utc) + timedelta(seconds=120)
+    parsed = GithubCollector._retry_after_seconds(format_datetime(retry_at, usegmt=True))
+    assert parsed is not None and 118 <= parsed <= 120
 
 
 # ── upserts (DB seam) ─────────────────────────────────────────────────────
