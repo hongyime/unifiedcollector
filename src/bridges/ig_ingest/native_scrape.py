@@ -174,6 +174,7 @@ async def _seed_targets(conn, platform: str) -> None:
             SELECT 'pinterest', b.board_url, b.username, 'pinterest_boards', 15
               FROM pinterest_boards b
              WHERE b.board_url ~* '^https://([^/]+\\.)?pinterest\\.com/'
+               AND b.board_url !~* '/_(created|saved)/?$'
                AND NOT EXISTS (
                     SELECT 1 FROM browser_native_scrape_queue q
                      WHERE q.platform='pinterest' AND q.target_url=b.board_url

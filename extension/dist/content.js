@@ -229,7 +229,8 @@
       const boardLink = Array.from(card?.querySelectorAll("a[href]") || []).map((link) => absoluteHttps(link.href, pageUrl)).find((url) => {
         if (!url) return false;
         const parts = new URL(url).pathname.split("/").filter(Boolean);
-        return parts.length === 2 && !["pin", "search", "ideas", "_", "login", "signup"].includes(parts[0].toLowerCase());
+        const reserved2 = /* @__PURE__ */ new Set(["pin", "search", "ideas", "_", "_created", "_saved", "login", "signup"]);
+        return parts.length === 2 && !reserved2.has(parts[0].toLowerCase()) && !reserved2.has(parts[1].toLowerCase());
       }) || null;
       pins.push({
         type: "pin",
@@ -248,12 +249,12 @@
     }
     const boards = [];
     const seenBoards = /* @__PURE__ */ new Set();
-    const reserved = /* @__PURE__ */ new Set(["pin", "search", "ideas", "_", "categories", "today", "login", "signup", "explore"]);
+    const reserved = /* @__PURE__ */ new Set(["pin", "search", "ideas", "_", "_created", "_saved", "categories", "today", "login", "signup", "explore"]);
     for (const anchor of Array.from(doc.querySelectorAll("a[href]"))) {
       const href = absoluteHttps(anchor.href, pageUrl);
       if (!href || !/(^|\.)pinterest\.com$/i.test(new URL(href).hostname)) continue;
       const parts = new URL(href).pathname.split("/").filter(Boolean);
-      if (parts.length !== 2 || reserved.has(parts[0].toLowerCase())) continue;
+      if (parts.length !== 2 || reserved.has(parts[0].toLowerCase()) || reserved.has(parts[1].toLowerCase())) continue;
       const id = parts.map((part) => decodeURIComponent(part)).join(":");
       if (seenBoards.has(id)) continue;
       seenBoards.add(id);
@@ -320,8 +321,8 @@
     }
     return stories;
   }
-  function airbnbHostItem(doc, pageUrl, container) {
-    const anchor = container instanceof HTMLAnchorElement && /\/users\/(?:show|profile)\//i.test(container.pathname) ? container : container.querySelector('a[href*="/users/show/"], a[href*="/users/profile/"]');
+  function airbnbHostItem(doc, pageUrl, container, preferredAnchor) {
+    const anchor = preferredAnchor || (container instanceof HTMLAnchorElement && /\/users\/(?:show|profile)\//i.test(container.pathname) ? container : container.querySelector('a[href*="/users/show/"], a[href*="/users/profile/"]'));
     const hostUrl = absoluteHttps(anchor?.href, pageUrl);
     if (!hostUrl) return null;
     const parsed = new URL(hostUrl);
@@ -329,18 +330,22 @@
     if (!idMatch) return null;
     const hostId = decodeURIComponent(idMatch[1]);
     const text = visibleText(container, 1500) || "";
-    const rating = text.match(/\b([0-5](?:\.\d)?)\s*(?:·|\()\s*[\d,]+\s+reviews?\b/i);
+    const pageHeadings = Array.from(doc.querySelectorAll("h1,h2,h3"));
+    const hostHeadingIndex = pageHeadings.findIndex((heading) => /^meet your host$/i.test(cleanText(heading.textContent, 200) || ""));
+    const hostNameHeading = hostHeadingIndex >= 0 ? pageHeadings.slice(hostHeadingIndex + 1).find((heading) => cleanText(heading.textContent, 200)) : null;
+    const rating = text.match(/\b([0-5](?:\.\d{1,2})?)\s*(?:·|\()\s*[\d,]+\s+reviews?\b/i) || text.match(/\b([0-5](?:\.\d{1,2})?)\s+out of 5\b/i);
     const reviews = text.match(/\b([\d,]+)\s+reviews?\b/i);
+    const yearsHosting = text.match(/\b(\d{1,2}\s+years?\s+hosting)\b/i);
     const image = anchor?.querySelector("img[src]") || null;
     return {
       type: "host",
       id: hostId,
       url: hostUrl,
-      display_name: cleanText(anchor?.innerText || anchor?.getAttribute("aria-label") || image?.alt, 300),
+      display_name: cleanText(hostNameHeading?.textContent || anchor?.innerText || image?.alt, 300),
       avatar_url: absoluteHttps(image?.currentSrc || image?.src, pageUrl),
       rating: rating ? Number(rating[1]) : null,
       reviews_count: reviews ? Number(reviews[1].replace(/,/g, "")) : null,
-      host_since: null,
+      host_since: yearsHosting ? yearsHosting[1] : null,
       metadata: { page_path: new URL(pageUrl).pathname }
     };
   }
@@ -390,7 +395,9 @@
       if (item) {
         seenListings.add(String(item.id));
         output.push(item);
-        const host = airbnbHostItem(doc, pageUrl, main);
+        const profileLink = Array.from(doc.querySelectorAll('a[href*="/users/show/"], a[href*="/users/profile/"]')).find((candidate) => /host full profile/i.test(candidate.getAttribute("aria-label") || candidate.innerText || "")) || null;
+        const hostContainer = profileLink?.closest("section") || profileLink?.parentElement?.parentElement || main;
+        const host = airbnbHostItem(doc, pageUrl, hostContainer, profileLink) || airbnbHostItem(doc, pageUrl, main);
         if (host) output.push(host);
       }
     }
