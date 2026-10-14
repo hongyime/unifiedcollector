@@ -1,7 +1,7 @@
 # Agent State
-Current task: UnifiedCollector Batch 2 — complete five requested items in order, commit each separately, and write `/tmp/batch2-summary-20261014.md`.
-Status: Item 1 implementation and verification are complete pending commit. Both DM tables had 0 rows before the migration and are now absent. Removed IG DM collection paths and service/config while preserving TikTok DM; validation includes extension/frontend builds, production/dev Compose config, Python compilation, and container runtime smoke. Host pytest is unavailable (pytest/asyncpg missing); no containers were restarted.
-Next: Commit Item 1, then investigate and fix Beeper history sync. Do not modify spider files or WhatsApp bridge 1.
+Current task: Remove Instagram DM collection from UnifiedCollector.
+Status: Completed and pushed to `main` as `8197d1bd`. The live tables each had 0 rows before the drop migration; both are now absent and the migration is ledgered. Production/dev Compose parsing, extension/frontend builds, Python compilation, and diff checks passed. No containers were restarted.
+Next: No further work under this request; wait for a separate task before starting other collector changes.
 
 ## Prior handoff history
 
