@@ -370,3 +370,5 @@ Machine-specific values in this document use privacy placeholders.
 2026-10-14: Fixed the final Pinterest ownership review note: profile-scraped pins without board context now preserve an existing board association only when prior metadata marks it verified; unverified associations clear. Added a regression test for the SQL conflict expression. Focused validation passes (44 tests), compileall, Compose config, env parity, and diff check. Final review and rebuilt image remain pending.
 
 2026-10-14: Final Pinterest follow-up review found no remaining issues. Focused validation passes (44 tests), Python compileall, Compose config, env parity across 30 services, and diff check. Shared collector image rebuilt from the latest Phase 5 source; commit/push and targeted deploy remain.
+
+2026-10-14: Phase 5 committed as `8c38459e` and pushed with the pending Phase 4 fix `ff263967`; `origin/main` now points to `8c38459e`. Shared image was rebuilt from current source. Next: apply migrations, recreate Pinterest/Snapchat/Airbnb only, and verify live behavior.
