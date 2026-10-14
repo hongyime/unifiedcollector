@@ -215,6 +215,32 @@ async def test_iter_chats_paginates(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_iter_chats_stops_at_configured_page_limit(monkeypatch):
+    monkeypatch.setenv("BEEPER_DESKTOP_API_TOKEN", "x")
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={
+            "items": [{"id": f"!{len(requests)}:b"}],
+            "oldestCursor": f"c{len(requests)}",
+            "hasMore": True,
+        })
+
+    client = BeeperClient()
+    client._http = httpx.AsyncClient(
+        base_url=client.base_url,
+        transport=httpx.MockTransport(handler),
+        headers={"Authorization": "Bearer x"},
+    )
+    seen = [chat async for chat in client.iter_chats(max_pages=2)]
+
+    assert [chat["id"] for chat in seen] == ["!1:b", "!2:b"]
+    assert len(requests) == 2
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_chats_uses_documented_account_ids_query(monkeypatch):
     monkeypatch.setenv("BEEPER_DESKTOP_API_TOKEN", "x")
     requests = []
@@ -331,6 +357,7 @@ async def test_writer_upsert_chat_includes_participants():
         "network": "Discord",
         "title": "#ducks",
         "type": "group",
+        "lastActivity": "2026-10-14T16:00:00Z",
         "isReadOnly": False,
         "participants": {
             "items": [
@@ -343,6 +370,7 @@ async def test_writer_upsert_chat_includes_participants():
     assert conn.execute.await_count == 3
     chat_sql = conn.execute.await_args_list[0].args[0]
     assert "INSERT INTO beeper_shadow_chats" in chat_sql
+    assert conn.execute.await_args_list[0].args[14].isoformat() == "2026-10-14T16:00:00+00:00"
 
 
 @pytest.mark.asyncio
@@ -1228,6 +1256,7 @@ async def test_sync_messages_bounds_each_chat_timeout(monkeypatch, tmp_path, cap
     assert writer.update_sync_state.await_args.args[0] == "!slow:beeper.local"
     assert writer.update_sync_state.await_args.kwargs["error"] == "TimeoutError"
     sql = conn.fetch.await_args.args[0]
+    assert "c.last_message_ts >= now() - interval '7 days'" in sql
     assert "COALESCE(s.last_error, '') LIKE 'TimeoutError%'" in sql
     assert "COALESCE(s.last_error, '') LIKE 'BeeperTransientError%'" in sql
     assert any(

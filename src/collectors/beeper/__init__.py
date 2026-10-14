@@ -321,10 +321,15 @@ class BeeperClient:
         return resp.content
 
     async def iter_chats(
-        self, *, account_id: Optional[str] = None, page_size: int = _BEEPER_PAGE_SIZE
+        self,
+        *,
+        account_id: Optional[str] = None,
+        page_size: int = _BEEPER_PAGE_SIZE,
+        max_pages: int | None = None,
     ) -> AsyncIterator[dict]:
         cursor: Optional[str] = None
         seen_cursors: set[str] = set()
+        page_count = 0
         while True:
             page = await self.chats(
                 cursor=cursor,
@@ -332,12 +337,19 @@ class BeeperClient:
                 account_id=account_id,
                 direction="before",
             )
+            page_count += 1
             items = page.get("items", []) if isinstance(page, dict) else page
             for item in items:
                 yield item
             has_more = page.get("hasMore", False) if isinstance(page, dict) else False
             next_cursor = page.get("oldestCursor") if isinstance(page, dict) else None
-            if not has_more or not items or not next_cursor or next_cursor in seen_cursors:
+            if (
+                not has_more
+                or not items
+                or (max_pages is not None and page_count >= max(1, int(max_pages)))
+                or not next_cursor
+                or next_cursor in seen_cursors
+            ):
                 return
             seen_cursors.add(next_cursor)
             cursor = next_cursor
@@ -603,7 +615,9 @@ class BeeperWriter:
                 chat.get("isArchived"),
                 chat.get("isMuted"),
                 chat.get("isLowPriority"),
-                _parse_ts(_opt(chat, "lastMessage", "timestamp")) or _parse_ts(chat.get("lastMessageTimestamp")),
+                _parse_ts(_opt(chat, "lastMessage", "timestamp"))
+                or _parse_ts(chat.get("lastMessageTimestamp"))
+                or _parse_ts(chat.get("lastActivity")),
                 json.dumps(chat, default=str),
             )
 
@@ -1504,7 +1518,11 @@ class BeeperCollector(BaseCollector):
         if w is None:
             return 0
         count = 0
-        async for chat in self.client.iter_chats(page_size=_BEEPER_PAGE_SIZE):
+        max_pages = max(1, min(10, int(os.getenv("BEEPER_CHAT_PAGES_PER_CYCLE", "3"))))
+        async for chat in self.client.iter_chats(
+            page_size=_BEEPER_PAGE_SIZE,
+            max_pages=max_pages,
+        ):
             await w.upsert_chat(chat)
             count += 1
             if self._stop.is_set():
@@ -1541,7 +1559,7 @@ class BeeperCollector(BaseCollector):
                     AND COALESCE(s.last_error, '') LIKE '%NOT_FOUND%'
                 )
                 ORDER BY
-                    CASE WHEN s.newest_cursor IS NOT NULL THEN 1 ELSE 0 END DESC,
+                    CASE WHEN c.last_message_ts >= now() - interval '7 days' THEN 0 ELSE 1 END ASC,
                     CASE
                         WHEN COALESCE(s.last_error, '') LIKE 'TimeoutError%' THEN 1
                         WHEN COALESCE(s.last_error, '') LIKE 'BeeperTransientError%' THEN 1
@@ -1549,6 +1567,7 @@ class BeeperCollector(BaseCollector):
                     END ASC,
                     s.last_synced_at ASC NULLS FIRST,
                     c.last_message_ts DESC NULLS LAST,
+                    CASE WHEN s.newest_cursor IS NOT NULL THEN 1 ELSE 0 END DESC,
                     COALESCE(s.backfill_complete, FALSE) ASC
                 LIMIT $1
                 """,
