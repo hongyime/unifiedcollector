@@ -192,7 +192,7 @@ async def _seed_targets(conn, platform: str) -> None:
         await conn.execute(
             """
             INSERT INTO browser_native_scrape_queue (platform, target_url, username, source)
-            SELECT 'snapchat', 'https://www.snapchat.com/add/' || btrim(username) || '/',
+            SELECT 'snapchat', 'https://www.snapchat.com/@' || btrim(username),
                    btrim(username), 'snapchat_profiles'
               FROM snapchat_profiles p
              WHERE btrim(p.username) ~ '^[A-Za-z0-9._-]{1,100}$'

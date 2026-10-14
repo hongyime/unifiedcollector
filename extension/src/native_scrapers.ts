@@ -164,23 +164,27 @@ function snapchatStoryItems(doc: Document, pageUrl: string): NativeScrapeItem[] 
       !/^\/discover(?:\/|$)/i.test(parsed.pathname)) return [];
   const username = snapchatUsername(pageUrl);
   const nodes = Array.from(doc.querySelectorAll<HTMLElement>(
-    '[data-story-id], [data-testid*="story" i], a[href*="/story/"], [aria-label*="public story" i], main [data-testid*="discover-card" i]',
+    '[data-story-id], [data-testid*="story" i], a[href*="/story/"], a[href*="/p/"], ' +
+    '[aria-label*="public story" i], button[aria-label*="Profile Picture" i], main [data-testid*="discover-card" i]',
   ));
   const stories: NativeScrapeItem[] = [];
   const seen = new Set<string>();
   for (const node of nodes) {
-    const media = node.querySelector<HTMLVideoElement>("video") || null;
-    const image = node.querySelector<HTMLImageElement>("img[src]") || null;
-    const anchor = node instanceof HTMLAnchorElement ? node : node.querySelector<HTMLAnchorElement>("a[href]");
+    const card = node.closest<HTMLElement>('[data-testid*="story" i], [data-testid*="discover" i], article, [role="listitem"]') ||
+      node.parentElement || node;
+    const media = card.querySelector<HTMLVideoElement>("video") || null;
+    const image = card.querySelector<HTMLImageElement>("img[src]") || null;
+    const anchor = node instanceof HTMLAnchorElement ? node : card.querySelector<HTMLAnchorElement>('a[href*="/story/"], a[href*="/p/"]');
     const storyUrl = absoluteHttps(anchor?.href, pageUrl) || pageUrl;
     const mediaUrl = absoluteHttps(media?.currentSrc || media?.src || image?.currentSrc || image?.src, pageUrl);
-    const title = cleanText(node.getAttribute("aria-label") || visibleText(node, 500), 500);
+    const title = cleanText(node.getAttribute("aria-label") || visibleText(card, 500), 500);
     const linkedUsername = Array.from(node.querySelectorAll<HTMLAnchorElement>('a[href*="/@"], a[href*="/add/"]'))
       .map((link) => snapchatUsername(link.href))
       .find((value) => value) || null;
+    const labelUsername = (node.getAttribute("aria-label") || "").match(/Profile Picture\s+([A-Za-z0-9._-]+)/i)?.[1] || null;
     const rawId = node.getAttribute("data-story-id") || node.getAttribute("data-item-id") ||
-      storyUrl.match(/\/story\/([^/?#]+)/i)?.[1] || "";
-    const storyUsername = username || linkedUsername;
+      storyUrl.match(/\/(?:story|p)\/([^/?#]+)/i)?.[1] || "";
+    const storyUsername = username || linkedUsername || labelUsername;
     const id = cleanText(rawId, 200) || stableId("story", `${storyUsername || "public"}|${storyUrl}|${mediaUrl || ""}|${title || ""}`);
     if (seen.has(id) || (!mediaUrl && !title)) continue;
     seen.add(id);
@@ -195,7 +199,7 @@ function snapchatStoryItems(doc: Document, pageUrl: string): NativeScrapeItem[] 
       thumbnail_url: absoluteHttps(image?.currentSrc || image?.src || media?.poster, pageUrl),
       posted_at: time,
       expires_at: null,
-      metadata: { page_path: parsed.pathname, visible_public_profile_story: true },
+      metadata: { page_path: parsed.pathname, visible_public_story: true },
     });
     if (stories.length >= 25) break;
   }
