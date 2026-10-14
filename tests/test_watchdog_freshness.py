@@ -1,7 +1,37 @@
 import importlib
+import re
 import time
+from pathlib import Path
 
 import pytest
+
+
+def _liveness_row(container: str, service: str, state: str) -> dict:
+    return {
+        "Names": [f"/{container}"],
+        "State": state,
+        "Labels": {"com.docker.compose.service": service},
+    }
+
+
+def test_liveness_service_allowlist_matches_compose_services():
+    import src.watchdog.freshness as freshness
+
+    compose_path = Path(__file__).resolve().parents[1] / "docker/docker-compose.yml"
+    services: set[str] = set()
+    in_services = False
+    for line in compose_path.read_text(encoding="utf-8").splitlines():
+        if line == "services:":
+            in_services = True
+            continue
+        if in_services and line and not line.startswith((" ", "#")):
+            break
+        if in_services:
+            match = re.match(r"^  ([A-Za-z0-9_-]+):\s*$", line)
+            if match:
+                services.add(match.group(1))
+
+    assert freshness.EXPECTED_COMPOSE_SERVICES == services
 
 
 def test_watchdog_stale_strava_zero_disables_source_check(monkeypatch):
@@ -580,6 +610,41 @@ async def test_telegram_default_stale_threshold_is_1h(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_container_sweep_does_not_restart_removed_compose_services(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgres://collector:collector@localhost/unifiedcollector")
+    import src.watchdog.freshness as freshness
+
+    freshness = importlib.reload(freshness)
+    monkeypatch.setattr(freshness, "_liveness_restarts", {})
+    started: list[str] = []
+
+    async def fake_list():
+        return [
+            {
+                "Names": ["/unifiedcollector_collector_light"],
+                "State": "exited",
+                "Labels": {"com.docker.compose.service": "collector_light"},
+            },
+            {
+                "Names": ["/unifiedcollector_collector_exposure"],
+                "State": "exited",
+                "Labels": {"com.docker.compose.service": "collector_exposure"},
+            },
+        ]
+
+    async def fake_start(name: str) -> int:
+        started.append(name)
+        return 204
+
+    monkeypatch.setattr(freshness, "_list_project_containers", fake_list)
+    monkeypatch.setattr(freshness, "_start_container", fake_start)
+
+    await freshness._sweep_container_liveness(now=1_000_000.0)
+
+    assert started == ["unifiedcollector_collector_exposure"]
+
+
+@pytest.mark.asyncio
 async def test_container_sweep_restarts_stopped_container(monkeypatch):
     """A single stopped project container is started once via the Docker API."""
     monkeypatch.setenv("DATABASE_URL", "postgres://collector:collector@localhost/unifiedcollector")
@@ -593,8 +658,8 @@ async def test_container_sweep_restarts_stopped_container(monkeypatch):
     async def fake_list():
         # Two containers: one running (skip), one exited (restart target).
         return [
-            {"Names": ["/unifiedcollector_backup"], "State": "exited"},
-            {"Names": ["/unifiedcollector_scheduler"], "State": "running"},
+            _liveness_row("unifiedcollector_collector_exposure", "collector_exposure", "exited"),
+            _liveness_row("unifiedcollector_scheduler", "scheduler", "running"),
         ]
 
     async def fake_start(name: str) -> int:
@@ -606,9 +671,9 @@ async def test_container_sweep_restarts_stopped_container(monkeypatch):
 
     await freshness._sweep_container_liveness(now=1_000_000.0)
 
-    assert started == ["unifiedcollector_backup"]
+    assert started == ["unifiedcollector_collector_exposure"]
     # One attempt recorded in history for the crash-loop cap.
-    assert freshness._liveness_restarts["unifiedcollector_backup"] == [1_000_000.0]
+    assert freshness._liveness_restarts["unifiedcollector_collector_exposure"] == [1_000_000.0]
 
 
 @pytest.mark.asyncio
@@ -630,7 +695,7 @@ async def test_container_sweep_respects_crash_loop_cap(monkeypatch):
     monkeypatch.setattr(
         freshness,
         "_liveness_restarts",
-        {"unifiedcollector_backup": [now - 900, now - 600, now - 100]},
+        {"unifiedcollector_collector_exposure": [now - 900, now - 600, now - 100]},
     )
     # Also drop LIVENESS_MAX_RESTARTS explicit assertion in this test's scope:
     assert freshness.LIVENESS_MAX_RESTARTS == 3
@@ -639,7 +704,7 @@ async def test_container_sweep_respects_crash_loop_cap(monkeypatch):
     started: list[str] = []
 
     async def fake_list():
-        return [{"Names": ["/unifiedcollector_backup"], "State": "exited"}]
+        return [_liveness_row("unifiedcollector_collector_exposure", "collector_exposure", "exited")]
 
     async def fake_start(name: str) -> int:
         started.append(name)
@@ -652,7 +717,7 @@ async def test_container_sweep_respects_crash_loop_cap(monkeypatch):
 
     assert started == []  # capped, must not fire
     # History untouched (still 3 entries — the sweep never appended a 4th).
-    assert len(freshness._liveness_restarts["unifiedcollector_backup"]) == 3
+    assert len(freshness._liveness_restarts["unifiedcollector_collector_exposure"]) == 3
 
 
 @pytest.mark.asyncio
@@ -670,13 +735,13 @@ async def test_container_sweep_prunes_old_attempts_outside_window(monkeypatch):
     monkeypatch.setattr(
         freshness,
         "_liveness_restarts",
-        {"unifiedcollector_backup": [now - 5000, now - 4000, now - 3000]},
+        {"unifiedcollector_collector_exposure": [now - 5000, now - 4000, now - 3000]},
     )
 
     started: list[str] = []
 
     async def fake_list():
-        return [{"Names": ["/unifiedcollector_backup"], "State": "exited"}]
+        return [_liveness_row("unifiedcollector_collector_exposure", "collector_exposure", "exited")]
 
     async def fake_start(name: str) -> int:
         started.append(name)
@@ -687,8 +752,8 @@ async def test_container_sweep_prunes_old_attempts_outside_window(monkeypatch):
 
     await freshness._sweep_container_liveness(now=now)
 
-    assert started == ["unifiedcollector_backup"]
-    assert freshness._liveness_restarts["unifiedcollector_backup"] == [now]
+    assert started == ["unifiedcollector_collector_exposure"]
+    assert freshness._liveness_restarts["unifiedcollector_collector_exposure"] == [now]
 
 
 @pytest.mark.asyncio
@@ -704,10 +769,10 @@ async def test_container_sweep_ignores_healthy(monkeypatch):
 
     async def fake_list():
         return [
-            {"Names": ["/unifiedcollector_scheduler"], "State": "running"},
-            {"Names": ["/unifiedcollector_collector_telegram"], "State": "running"},
-            {"Names": ["/unifiedcollector_collector_website"], "State": "restarting"},
-            {"Names": ["/unifiedcollector_wa_bridge_1"], "State": "paused"},
+            _liveness_row("unifiedcollector_scheduler", "scheduler", "running"),
+            _liveness_row("unifiedcollector_collector_telegram", "collector_telegram", "running"),
+            _liveness_row("unifiedcollector_collector_website", "collector_website", "restarting"),
+            _liveness_row("unifiedcollector_wa_bridge_1", "wa-bridge-1", "paused"),
         ]
 
     async def fake_start(name: str) -> int:
@@ -768,7 +833,7 @@ async def test_container_sweep_skips_self(monkeypatch):
     async def fake_list():
         # Hypothetically the watchdog reports itself as exited — should still
         # be skipped by name check.
-        return [{"Names": ["/unifiedcollector_watchdog"], "State": "exited"}]
+        return [_liveness_row("unifiedcollector_watchdog", "watchdog", "exited")]
 
     async def fake_start(name: str) -> int:
         started.append(name)
@@ -795,8 +860,8 @@ async def test_container_sweep_treats_dead_and_created_as_stopped(monkeypatch):
 
     async def fake_list():
         return [
-            {"Names": ["/unifiedcollector_backup"], "State": "dead"},
-            {"Names": ["/unifiedcollector_scheduler"], "State": "created"},
+            _liveness_row("unifiedcollector_collector_exposure", "collector_exposure", "dead"),
+            _liveness_row("unifiedcollector_scheduler", "scheduler", "created"),
         ]
 
     async def fake_start(name: str) -> int:
@@ -809,7 +874,7 @@ async def test_container_sweep_treats_dead_and_created_as_stopped(monkeypatch):
     await freshness._sweep_container_liveness(now=1_000_000.0)
 
     assert sorted(started) == sorted(
-        ["unifiedcollector_backup", "unifiedcollector_scheduler"]
+        ["unifiedcollector_collector_exposure", "unifiedcollector_scheduler"]
     )
 
 

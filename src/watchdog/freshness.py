@@ -365,10 +365,11 @@ async def _restart(container: str) -> None:
 # most exits, but the 2026-08 backup incident showed that under some daemon
 # conditions (SIGKILL 137 recorded as "stopped" rather than "exited"), even
 # `restart: unless-stopped` sits idle. This sweep is the safety net for that
-# gap: list all unifiedcollector_ containers, and if any is stopped/dead/
-# created, POST /containers/<name>/start. Uses the same Docker Engine HTTP API
-# over the mounted socket as `_restart` above; NO docker CLI dependency, no
-# image rebuild.
+# gap: list unifiedcollector_ containers, then restart stopped/dead/created
+# containers only when their Compose service is in the current project allowlist.
+# Removed Compose services remain visible to Docker and must not be revived.
+# Uses the same Docker Engine HTTP API over the mounted socket as `_restart`
+# above; NO docker CLI dependency, no image rebuild.
 #
 # Safety cap: track our own start attempts per container, and if we've tried
 # more than LIVENESS_MAX_RESTARTS in the last LIVENESS_WINDOW_SECONDS, back off
@@ -378,6 +379,41 @@ async def _restart(container: str) -> None:
 LIVENESS_ENABLED = os.getenv("WATCHDOG_LIVENESS_ENABLED", "1") == "1"
 LIVENESS_MAX_RESTARTS = int(os.getenv("WATCHDOG_LIVENESS_MAX_RESTARTS", "3"))
 LIVENESS_WINDOW_SECONDS = int(os.getenv("WATCHDOG_LIVENESS_WINDOW_SECONDS", "1800"))  # 30 min
+# Keep this synchronized with the default services in docker/docker-compose.yml.
+# Removed Compose services remain visible to Docker's API as stopped containers;
+# prefix matching alone would resurrect those orphans indefinitely.
+EXPECTED_COMPOSE_SERVICES = frozenset({
+    "postgres",
+    "collector_telegram",
+    "dashboard",
+    "collector_bluesky",
+    "collector_tiktok",
+    "rabbitmq",
+    "wa-bridge-1",
+    "browser_cookie_vault",
+    "collector_beeper",
+    "collector_strava",
+    "collector_lemon8",
+    "collector_paypal",
+    "collector_pinterest",
+    "redis",
+    "realtime_feed",
+    "collector_airbnb",
+    "collector_search",
+    "collector_snapchat",
+    "collector_spiderfoot",
+    "browser_ingest",
+    "collector_whatsapp",
+    "collector_youtube",
+    "collector_github",
+    "collector_instagram",
+    "collector_website",
+    "scheduler",
+    "collector_exposure",
+    "onboard_bot",
+    "wa-bridge-2",
+    "watchdog",
+})
 # States that mean "not running and not recovering itself right now" — restart
 # candidates. `restarting` means Docker is already retrying (leave it alone);
 # `paused` is intentional (leave it alone); `running` is fine. Everything else
@@ -387,7 +423,7 @@ _liveness_restarts: dict[str, list[float]] = {}
 
 
 async def _list_project_containers() -> list[dict]:
-    """List all containers whose name starts with 'unifiedcollector_' (any state).
+    """List project containers whose name starts with 'unifiedcollector_' (any state).
 
     Uses Docker Engine HTTP API over the mounted unix socket. Returns raw
     /containers/json rows so callers can read State/Names directly.
@@ -420,7 +456,7 @@ def _extract_project_name(names: list) -> str | None:
 
 
 async def _sweep_container_liveness(now: float) -> None:
-    """Restart any expected unifiedcollector_ container that is not running.
+    """Restart any stopped container belonging to a current Compose service.
 
     Runs alongside _tick / _dlq_tick. Uses Docker Engine HTTP API for state
     queries and container start. Safety cap: skip a container that has been
@@ -437,6 +473,9 @@ async def _sweep_container_liveness(now: float) -> None:
     for c in containers:
         name = _extract_project_name(c.get("Names") or [])
         if not name:
+            continue
+        service = (c.get("Labels") or {}).get("com.docker.compose.service")
+        if service not in EXPECTED_COMPOSE_SERVICES:
             continue
         # Never restart ourselves — mid-loop suicide is a footgun and Docker's
         # own restart policy already covers us.
