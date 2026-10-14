@@ -177,12 +177,24 @@ async def test_client_missing_token_raises(monkeypatch):
 async def test_iter_chats_paginates(monkeypatch):
     monkeypatch.setenv("BEEPER_DESKTOP_API_TOKEN", "x")
     pages = [
-        {"items": [{"id": "!1:b"}, {"id": "!2:b"}], "nextCursor": "c1"},
-        {"items": [{"id": "!3:b"}], "nextCursor": None},
+        {
+            "items": [{"id": "!1:b"}, {"id": "!2:b"}],
+            "oldestCursor": "c1",
+            "newestCursor": "n1",
+            "hasMore": True,
+        },
+        {
+            "items": [{"id": "!3:b"}],
+            "oldestCursor": "c2",
+            "newestCursor": "n1",
+            "hasMore": False,
+        },
     ]
     call_count = {"n": 0}
+    requests = []
 
     def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
         page = pages[min(call_count["n"], len(pages) - 1)]
         call_count["n"] += 1
         return httpx.Response(200, json=page)
@@ -197,6 +209,29 @@ async def test_iter_chats_paginates(monkeypatch):
     async for chat in client.iter_chats():
         seen.append(chat["id"])
     assert seen == ["!1:b", "!2:b", "!3:b"]
+    assert [request.url.params.get("cursor") for request in requests] == [None, "c1"]
+    assert all(request.url.params.get("direction") == "before" for request in requests)
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_chats_uses_documented_account_ids_query(monkeypatch):
+    monkeypatch.setenv("BEEPER_DESKTOP_API_TOKEN", "x")
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"items": [], "hasMore": False})
+
+    client = BeeperClient()
+    client._http = httpx.AsyncClient(
+        base_url=client.base_url,
+        transport=httpx.MockTransport(handler),
+        headers={"Authorization": "Bearer x"},
+    )
+    await client.chats(account_id="account-1")
+    assert requests[0].url.params.get("accountIDs") == "account-1"
+    assert requests[0].url.params.get("accountID") is None
     await client.close()
 
 

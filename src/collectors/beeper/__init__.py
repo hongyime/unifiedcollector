@@ -17,8 +17,9 @@ Auth: Bearer token from BEEPER_DESKTOP_API_TOKEN env (created by the user via
 Beeper Desktop Settings → Developer → Access Tokens). Token does NOT expire
 on its own; the user can revoke it from the same screen.
 
-Network: defaults to `http://host.docker.internal:23373`. The Docker collector
-service needs `extra_hosts: ["host.docker.internal:host-gateway"]` in compose.
+Network: the production worker uses the host network so it can call Beeper's
+loopback-only API at `127.0.0.1:23373`. It reaches Postgres through the
+configured host-side port.
 """
 
 from __future__ import annotations
@@ -282,12 +283,13 @@ class BeeperClient:
         cursor: Optional[str] = None,
         limit: int = 50,
         account_id: Optional[str] = None,
+        direction: str = "before",
     ) -> dict:
-        params = {"limit": limit}
+        params: dict[str, Any] = {"limit": limit, "direction": direction}
         if cursor:
             params["cursor"] = cursor
         if account_id:
-            params["accountID"] = account_id
+            params["accountIDs"] = [account_id]
         return await self._get("/v1/chats", params=params)
 
     async def messages(
@@ -322,16 +324,23 @@ class BeeperClient:
         self, *, account_id: Optional[str] = None, page_size: int = _BEEPER_PAGE_SIZE
     ) -> AsyncIterator[dict]:
         cursor: Optional[str] = None
+        seen_cursors: set[str] = set()
         while True:
             page = await self.chats(
-                cursor=cursor, limit=page_size, account_id=account_id
+                cursor=cursor,
+                limit=page_size,
+                account_id=account_id,
+                direction="before",
             )
             items = page.get("items", []) if isinstance(page, dict) else page
             for item in items:
                 yield item
-            cursor = page.get("nextCursor") if isinstance(page, dict) else None
-            if not cursor or not items:
+            has_more = page.get("hasMore", False) if isinstance(page, dict) else False
+            next_cursor = page.get("oldestCursor") if isinstance(page, dict) else None
+            if not has_more or not items or not next_cursor or next_cursor in seen_cursors:
                 return
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
 
     async def iter_messages(
         self,

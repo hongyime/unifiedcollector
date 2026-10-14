@@ -738,13 +738,17 @@ services:
     image: unifiedcollector-collector:latest
     container_name: unifiedcollector_collector_beeper
     init: true  # reap subprocess zombies so recreate can't wedge
+    # Beeper Desktop exposes its Local API on host loopback only. This worker
+    # needs host networking; Postgres remains reachable through its published
+    # host port below.
+    network_mode: host
     command: python -m src.main worker --source beeper
     mem_limit: 768m
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:${POSTGRES_HOST_PORT:-5433}/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
-      BEEPER_DESKTOP_API_URL: http://host.docker.internal:23373
+      BEEPER_DESKTOP_API_URL: http://127.0.0.1:23373
       # Larger pages = fewer Beeper Desktop Local API round-trips per sync.
       BEEPER_PAGE_SIZE: "150"
       # Stability (2026-06-21, Bryan reported recurring "beeper disconnected"):
@@ -779,8 +783,6 @@ services:
       BEEPER_TOMBSTONE_RETRY_MARKER: "2026-07-29-initial-cache-probe"
       BEEPER_TOMBSTONE_RETRY_LIMIT: "5"
       BEEPER_TOMBSTONE_RETRY_MIN_AGE_DAYS: "7"
-    extra_hosts:
-      - "host.docker.internal:172.20.0.1"
     cap_add:
       - SYS_PTRACE
     volumes:
