@@ -94,6 +94,7 @@ import time
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+from uuid import UUID
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import quote, urlparse
@@ -2000,7 +2001,7 @@ class GithubCollector(BaseCollector):
                 "utf-8", "ignore"
             )
             await self._upsert_readme(
-                readme.get("repository_id") or 0,
+                repo_uuid,
                 content,
                 readme.get("sha"),
                 readme.get("size"),
@@ -2449,17 +2450,13 @@ class GithubCollector(BaseCollector):
                 json.dumps(repo_data, default=str),
             )
 
-    async def _upsert_readme(self, repo_id: int, content: str, sha: str, size: int):
+    async def _upsert_readme(self, repo_uuid: UUID, content: str, sha: str, size: int):
         async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT id FROM github_repos WHERE platform_repo_id = $1", repo_id
+            await conn.execute(
+                "INSERT INTO github_readmes (repo_id, content, sha, size, collected_at) "
+                "VALUES ($1, $2, $3, $4, NOW())",
+                repo_uuid, content, sha, size,
             )
-            if row:
-                await conn.execute(
-                    "INSERT INTO github_readmes (repo_id, content, sha, size, collected_at) "
-                    "VALUES ($1, $2, $3, $4, NOW())",
-                    row["id"], content, sha, size,
-                )
 
     async def _upsert_commit(self, repo_id, commit: dict):
         # GitHub returns null for "commit", "commit.author", and top-level

@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
+from uuid import uuid4
 
 import pytest
 
@@ -122,6 +123,30 @@ def _new_collector(monkeypatch=None) -> GithubCollector:
     coll = GithubCollector()
     coll.set_pool(_make_pool())
     return coll
+
+
+@pytest.mark.asyncio
+async def test_collect_repo_content_links_readme_to_resolved_repository_uuid():
+    coll = _new_collector()
+    repo_uuid = uuid4()
+    coll.pool._conn.fetchrow.return_value = {"id": repo_uuid}
+    coll._api_get = AsyncMock(return_value=_make_response(json_body={
+        "content": "c2FtcGxl",
+        "sha": "sha123",
+        "size": 6,
+    }))
+    coll._paginate = AsyncMock(return_value=[])
+    coll._collect_weak_repo_fanout = AsyncMock()
+
+    await coll._collect_repo_content(
+        object(), "owner/repo", "1", "owner", repo_pid=123,
+    )
+
+    coll.pool._conn.execute.assert_awaited_once()
+    args = coll.pool._conn.execute.await_args.args
+    assert "INSERT INTO github_readmes" in args[0]
+    assert args[1:] == (repo_uuid, "sample", "sha123", 6)
+    coll.pool._conn.fetchrow.assert_awaited_once()
 
 
 # ── module-level helpers ──────────────────────────────────────────────────
