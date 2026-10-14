@@ -89,12 +89,16 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import io
+import json
 import logging
 import os
 import random
 import re
 import tempfile
 import time
+import zipfile
+import xml.etree.ElementTree as ET
+import zlib
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -120,6 +124,7 @@ from src.core.vault import (
     write_atomic_artifact,
     write_atomic_artifact_from_path,
 )
+from .bucket_crawler import expand_dorks
 
 logger = logging.getLogger(__name__)
 
@@ -159,6 +164,190 @@ _DOC_CONTENT_TYPES = (
     "application/vnd.ms-powerpoint",
     "application/vnd.oasis.opendocument",
     "application/rtf", "text/rtf", "text/csv",
+)
+_DOC_CONTENT_TYPE_EXTENSIONS = {
+    "application/msword": ".doc",
+    "application/vnd.ms-excel": ".xls",
+    "application/vnd.ms-powerpoint": ".ppt",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+    "application/vnd.oasis.opendocument.text": ".odt",
+    "application/vnd.oasis.opendocument.spreadsheet": ".ods",
+    "application/vnd.oasis.opendocument.presentation": ".odp",
+    "application/rtf": ".rtf",
+    "text/rtf": ".rtf",
+    "text/csv": ".csv",
+}
+
+
+def _document_extension_from_content_type(content_type: str) -> str | None:
+    media_type = (content_type or "").split(";", 1)[0].strip().lower()
+    return _DOC_CONTENT_TYPE_EXTENSIONS.get(media_type)
+
+_DYNAMIC_TERM_STOPWORDS = frozenset({
+    "about", "after", "again", "also", "and", "are", "because", "been", "before",
+    "being", "but", "can", "class", "com", "could", "day", "did", "does", "for",
+    "from", "get", "had", "has", "have", "her", "here", "him", "his", "how",
+    "http", "https", "into", "its", "just", "like", "more", "most", "new", "not",
+    "now", "off", "one", "only", "our", "out", "over", "she", "school", "see",
+    "some", "than", "that", "the", "their", "them", "then", "there", "these", "they",
+    "this", "those", "through", "too", "under", "use", "very", "was", "well", "were",
+    "what", "when", "where", "which", "who", "will", "with", "www", "year", "your",
+})
+
+_DYNAMIC_TERM_SOURCE_QUERIES = (
+    ("instagram_profiles", """
+        SELECT 'instagram' AS platform, id::text AS source_reference,
+               username, bio AS text_blob, ARRAY[]::text[] AS hashtags
+          FROM instagram_profiles
+         WHERE updated_at >= now() - interval '90 days'
+           AND (username IS NOT NULL OR bio IS NOT NULL)
+         ORDER BY updated_at DESC LIMIT $1
+    """),
+    ("tiktok_profiles", """
+        SELECT 'tiktok' AS platform, id::text AS source_reference,
+               username, bio AS text_blob, ARRAY[]::text[] AS hashtags
+          FROM tiktok_profiles
+         WHERE updated_at >= now() - interval '90 days'
+           AND (username IS NOT NULL OR bio IS NOT NULL)
+         ORDER BY updated_at DESC LIMIT $1
+    """),
+    ("lemon8_profiles", """
+        SELECT 'lemon8' AS platform, id::text AS source_reference,
+               username, bio AS text_blob, ARRAY[]::text[] AS hashtags
+          FROM lemon8_profiles
+         WHERE updated_at >= now() - interval '90 days'
+           AND (username IS NOT NULL OR bio IS NOT NULL)
+         ORDER BY updated_at DESC LIMIT $1
+    """),
+    ("pinterest_profiles", """
+        SELECT 'pinterest' AS platform, username AS source_reference,
+               username, bio AS text_blob, ARRAY[]::text[] AS hashtags
+          FROM pinterest_profiles
+         WHERE probed_at >= now() - interval '90 days'
+           AND (username IS NOT NULL OR bio IS NOT NULL)
+         ORDER BY probed_at DESC LIMIT $1
+    """),
+    ("snapchat_profiles", """
+        SELECT 'snapchat' AS platform, username AS source_reference,
+               username, display_name AS text_blob, ARRAY[]::text[] AS hashtags
+          FROM snapchat_profiles
+         WHERE probed_at >= now() - interval '90 days'
+           AND username IS NOT NULL
+         ORDER BY probed_at DESC LIMIT $1
+    """),
+    ("facebook_profiles", """
+        SELECT 'facebook' AS platform, id::text AS source_reference,
+               username, bio AS text_blob, ARRAY[]::text[] AS hashtags
+          FROM facebook_profiles
+         WHERE updated_at >= now() - interval '90 days'
+           AND (username IS NOT NULL OR bio IS NOT NULL)
+         ORDER BY updated_at DESC LIMIT $1
+    """),
+    ("x_profiles", """
+        SELECT 'x' AS platform, id::text AS source_reference,
+               username, bio AS text_blob, ARRAY[]::text[] AS hashtags
+          FROM x_profiles
+         WHERE updated_at >= now() - interval '90 days'
+           AND (username IS NOT NULL OR bio IS NOT NULL)
+         ORDER BY updated_at DESC LIMIT $1
+    """),
+    ("bluesky_profiles", """
+        SELECT 'bluesky' AS platform, did AS source_reference,
+               username, bio AS text_blob, ARRAY[]::text[] AS hashtags
+          FROM bluesky_profiles
+         WHERE probed_at >= now() - interval '90 days'
+           AND (username IS NOT NULL OR bio IS NOT NULL)
+         ORDER BY probed_at DESC LIMIT $1
+    """),
+    ("youtube_channels", """
+        SELECT 'youtube' AS platform, id::text AS source_reference,
+               custom_url AS username, description AS text_blob, keywords AS hashtags
+          FROM youtube_channels
+         WHERE updated_at >= now() - interval '90 days'
+           AND (custom_url IS NOT NULL OR description IS NOT NULL OR keywords IS NOT NULL)
+         ORDER BY updated_at DESC LIMIT $1
+    """),
+    ("instagram_posts", """
+        SELECT 'instagram' AS platform, p.id::text AS source_reference,
+               u.username, p.caption AS text_blob, p.hashtags
+          FROM instagram_posts p
+          LEFT JOIN instagram_profiles u ON u.id = p.profile_id
+         WHERE p.collected_at >= now() - interval '90 days'
+           AND (p.caption IS NOT NULL OR p.hashtags IS NOT NULL)
+         ORDER BY p.collected_at DESC LIMIT $1
+    """),
+    ("tiktok_posts", """
+        SELECT 'tiktok' AS platform, p.id::text AS source_reference,
+               u.username, concat_ws(' ', p.title, p.description) AS text_blob, p.hashtags
+          FROM tiktok_posts p
+          LEFT JOIN tiktok_profiles u ON u.id = p.profile_id
+         WHERE p.collected_at >= now() - interval '90 days'
+           AND (p.title IS NOT NULL OR p.description IS NOT NULL OR p.hashtags IS NOT NULL)
+         ORDER BY p.collected_at DESC LIMIT $1
+    """),
+    ("lemon8_posts", """
+        SELECT 'lemon8' AS platform, id::text AS source_reference,
+               username, concat_ws(' ', title, description) AS text_blob, hashtags
+          FROM lemon8_posts
+         WHERE collected_at >= now() - interval '90 days'
+           AND (title IS NOT NULL OR description IS NOT NULL OR hashtags IS NOT NULL)
+         ORDER BY collected_at DESC LIMIT $1
+    """),
+    ("threads_posts", """
+        SELECT 'threads' AS platform, id::text AS source_reference,
+               author_username AS username, caption AS text_blob, hashtags
+          FROM threads_posts
+         WHERE collected_at >= now() - interval '90 days'
+           AND (caption IS NOT NULL OR hashtags IS NOT NULL)
+         ORDER BY collected_at DESC LIMIT $1
+    """),
+    ("facebook_posts", """
+        SELECT 'facebook' AS platform, id::text AS source_reference,
+               author_username AS username, caption AS text_blob, hashtags
+          FROM facebook_posts
+         WHERE collected_at >= now() - interval '90 days'
+           AND (caption IS NOT NULL OR hashtags IS NOT NULL)
+         ORDER BY collected_at DESC LIMIT $1
+    """),
+    ("x_posts", """
+        SELECT 'x' AS platform, id::text AS source_reference,
+               author_username AS username, caption AS text_blob, hashtags
+          FROM x_posts
+         WHERE collected_at >= now() - interval '90 days'
+           AND (caption IS NOT NULL OR hashtags IS NOT NULL)
+         ORDER BY collected_at DESC LIMIT $1
+    """),
+    ("pinterest_pins", """
+        SELECT 'pinterest' AS platform, pin_id AS source_reference,
+               username, concat_ws(' ', title, description) AS text_blob,
+               ARRAY[]::text[] AS hashtags
+          FROM pinterest_pins
+         WHERE collected_at >= now() - interval '90 days'
+           AND (title IS NOT NULL OR description IS NOT NULL OR username IS NOT NULL)
+         ORDER BY collected_at DESC LIMIT $1
+    """),
+    ("youtube_videos", """
+        SELECT 'youtube' AS platform, v.id::text AS source_reference,
+               c.custom_url AS username, concat_ws(' ', v.title, v.description) AS text_blob,
+               v.tags AS hashtags
+          FROM youtube_videos v
+          LEFT JOIN youtube_channels c ON c.id = v.channel_id
+         WHERE v.collected_at >= now() - interval '90 days'
+           AND (v.title IS NOT NULL OR v.description IS NOT NULL OR v.tags IS NOT NULL)
+         ORDER BY v.collected_at DESC LIMIT $1
+    """),
+    ("youtube_community_posts", """
+        SELECT 'youtube' AS platform, p.id::text AS source_reference,
+               c.custom_url AS username, p.text AS text_blob,
+               ARRAY[]::text[] AS hashtags
+          FROM youtube_community_posts p
+          LEFT JOIN youtube_channels c ON c.platform_channel_id = p.channel_id
+         WHERE p.collected_at >= now() - interval '90 days'
+           AND (p.text IS NOT NULL OR c.custom_url IS NOT NULL)
+         ORDER BY p.collected_at DESC LIMIT $1
+    """),
 )
 
 ICON_KEYWORDS = _parse_ICON_KEYWORDS
@@ -253,6 +442,23 @@ class SearchCollector(BaseCollector):
         self._download_docs = os.getenv("SEARCH_DOWNLOAD_DOCS", "1") == "1"
         self._download_videos = os.getenv("SEARCH_DOWNLOAD_VIDEOS", "1") == "1"
         self._max_doc_bytes = int(os.getenv("SEARCH_MAX_DOC_BYTES", str(50 * 1024 * 1024)))
+        self._document_index_enabled = os.getenv("SEARCH_DOCUMENT_INDEX_ENABLED", "1") == "1"
+        self._max_document_text_chars = min(
+            200_000,
+            max(1_000, int(os.getenv("SEARCH_MAX_DOCUMENT_TEXT_CHARS", "100000"))),
+        )
+        self._max_document_archive_bytes = min(
+            200 * 1024 * 1024,
+            max(1_000_000, int(os.getenv("SEARCH_MAX_DOCUMENT_ARCHIVE_BYTES", str(100 * 1024 * 1024)))),
+        )
+        self._dynamic_terms_enabled = os.getenv("SEARCH_DYNAMIC_TERMS_ENABLED", "1") == "1"
+        self._dynamic_term_cap = min(10, max(0, int(os.getenv("SEARCH_DYNAMIC_TERM_CAP", "10"))))
+        self._dynamic_source_limit = min(500, max(1, int(os.getenv("SEARCH_DYNAMIC_SOURCE_ROWS", "100"))))
+        self._dynamic_term_ttl_days = min(90, max(1, int(os.getenv("SEARCH_DYNAMIC_TERM_TTL_DAYS", "30"))))
+        self._dynamic_refresh_hours = min(168, max(1, int(os.getenv("SEARCH_DYNAMIC_REFRESH_HOURS", "12"))))
+        self._dynamic_query_interval_days = min(
+            30, max(1, int(os.getenv("SEARCH_DYNAMIC_QUERY_INTERVAL_DAYS", "7")))
+        )
         # 0 = no video size cap (user decision); videos are streamed to disk.
         self._max_video_bytes = int(os.getenv("SEARCH_MAX_VIDEO_BYTES", "0"))
         self._video_chunk_bytes = int(os.getenv("SEARCH_VIDEO_CHUNK_BYTES", str(1024 * 1024)))
@@ -291,6 +497,7 @@ class SearchCollector(BaseCollector):
         self._duplicates_skipped = 0
         self._search_scope_cooldowns: dict[str, float] = {}
         self._search_rate_limit_streaks: dict[str, int] = {}
+        self._last_search_query_rate_limited = False
 
         # Register Serper quota with the unified tracker if available.
         self._register_serper_quota()
@@ -641,6 +848,210 @@ class SearchCollector(BaseCollector):
         path.mkdir(parents=True, exist_ok=True)
         return path
 
+    @staticmethod
+    def _extract_dynamic_term_candidates(rows: Iterable[dict], limit: int = 10) -> list[dict[str, str | None]]:
+        """Extract a small, balanced set of username, hashtag, and text terms."""
+        counts: dict[tuple[str, str], int] = {}
+        sources: dict[tuple[str, str], tuple[str, str | None]] = {}
+        word_pattern = re.compile(r"[^\W_][\w.-]{2,31}", re.UNICODE)
+
+        def add(term: str, kind: str, row: dict) -> None:
+            normalized = re.sub(r"\s+", " ", term.strip().lstrip("@#")).casefold()
+            if len(normalized) < 2 or len(normalized) > 80:
+                return
+            if kind == "keyword" and (len(normalized) < 3 or normalized in _DYNAMIC_TERM_STOPWORDS):
+                return
+            if kind == "username" and not re.fullmatch(r"[\w.-]{2,80}", normalized, re.UNICODE):
+                return
+            if kind == "hashtag" and not re.fullmatch(r"[\w-]{2,80}", normalized, re.UNICODE):
+                return
+            key = (kind, normalized)
+            counts[key] = counts.get(key, 0) + 1
+            sources.setdefault(
+                key,
+                (str(row.get("platform") or "unknown"),
+                 str(row.get("source_reference")) if row.get("source_reference") is not None else None),
+            )
+
+        for row in rows:
+            username = str(row.get("username") or "").strip()
+            if username:
+                if "://" in username:
+                    username = urlparse(username).path.rstrip("/").rsplit("/", 1)[-1]
+                elif "/" in username:
+                    username = username.rstrip("/").rsplit("/", 1)[-1]
+                add(username, "username", row)
+
+            hashtags = row.get("hashtags") or []
+            if isinstance(hashtags, str):
+                hashtags = [hashtags]
+            for hashtag in hashtags:
+                for value in word_pattern.findall(str(hashtag).replace("#", " ")):
+                    add(value, "hashtag", row)
+
+            text_blob = str(row.get("text_blob") or "")[:4_000]
+            text_blob = re.sub(r"https?://\S+|@[\w.]+|#[\w-]+", " ", text_blob)
+            for keyword in set(word_pattern.findall(text_blob)):
+                add(keyword, "keyword", row)
+
+        priorities = {"username": 0, "hashtag": 1, "keyword": 2}
+        selected: list[tuple[str, str]] = []
+        for kind, quota in (("username", 4), ("hashtag", 3), ("keyword", 3)):
+            ranked = sorted(
+                ((key, count) for key, count in counts.items() if key[0] == kind),
+                key=lambda item: (-item[1], item[0][1]),
+            )
+            selected.extend(key for key, _ in ranked[:quota])
+        unique_selected: list[tuple[str, str]] = []
+        selected_terms: set[str] = set()
+        for key in selected:
+            if key[1] not in selected_terms:
+                unique_selected.append(key)
+                selected_terms.add(key[1])
+        if len(unique_selected) < max(0, limit):
+            remainder = sorted(
+                (key for key in counts if key not in selected and key[1] not in selected_terms),
+                key=lambda key: (-counts[key], priorities[key[0]], key[1]),
+            )
+            unique_selected.extend(remainder[: max(0, limit) - len(unique_selected)])
+
+        return [
+            {
+                "term": term,
+                "term_kind": kind,
+                "source_platform": sources[(kind, term)][0],
+                "source_reference": sources[(kind, term)][1],
+            }
+            for kind, term in unique_selected[: max(0, limit)]
+        ]
+
+    async def _refresh_dynamic_search_terms(self, conn) -> None:
+        refresh_due = await conn.fetchval(
+            """
+            SELECT NOT EXISTS (
+                SELECT 1 FROM service_cursors
+                 WHERE service = 'search_dynamic_terms_v1'
+                   AND last_processed_at > now() - ($1 * interval '1 hour')
+            )
+            """,
+            self._dynamic_refresh_hours,
+        )
+        if not refresh_due:
+            return
+
+        source_rows = []
+        for source_name, query in _DYNAMIC_TERM_SOURCE_QUERIES:
+            try:
+                source_rows.extend(
+                    await conn.fetch(query, self._dynamic_source_limit, timeout=10)
+                )
+            except Exception as exc:
+                logger.debug("dynamic search source skipped table=%s error=%s", source_name, type(exc).__name__)
+
+        candidates = self._extract_dynamic_term_candidates(source_rows, self._dynamic_term_cap)
+        if candidates:
+            await conn.executemany(
+                """
+                INSERT INTO search_dynamic_terms (
+                    term, term_kind, source_platform, source_reference, expires_at
+                ) VALUES ($1, $2, $3, $4, now() + ($5 * interval '1 day'))
+                ON CONFLICT (term) DO UPDATE SET
+                    term_kind = EXCLUDED.term_kind,
+                    source_platform = EXCLUDED.source_platform,
+                    source_reference = EXCLUDED.source_reference,
+                    last_seen_at = now(),
+                    expires_at = EXCLUDED.expires_at,
+                    updated_at = now()
+                """,
+                [
+                    (item["term"], item["term_kind"], item["source_platform"],
+                     item["source_reference"], self._dynamic_term_ttl_days)
+                    for item in candidates
+                ],
+            )
+        await conn.execute("DELETE FROM search_dynamic_terms WHERE expires_at <= now()")
+        await conn.execute(
+            """
+            DELETE FROM search_dynamic_terms
+             WHERE term NOT IN (
+                SELECT term FROM search_dynamic_terms
+                 WHERE expires_at > now()
+                 ORDER BY last_seen_at DESC, search_count ASC, term
+                 LIMIT $1
+             )
+            """,
+            self._dynamic_term_cap,
+        )
+        await conn.execute(
+            """
+            INSERT INTO service_cursors (service, last_processed_at, status)
+            VALUES ('search_dynamic_terms_v1', now(), 'idle')
+            ON CONFLICT (service) DO UPDATE SET
+                last_processed_at = now(), status = 'idle'
+            """
+        )
+        logger.info("Refreshed %d dynamic search terms from %d recent source rows", len(candidates), len(source_rows))
+
+    async def _prepare_dynamic_search_queries(self) -> list[dict[str, Any]]:
+        if not self._dynamic_terms_enabled or self._dynamic_term_cap <= 0 or self.pool is None:
+            return []
+        try:
+            async with self.pool.acquire() as conn:
+                await self._refresh_dynamic_search_terms(conn)
+                rows = await conn.fetch(
+                    """
+                    SELECT term, term_kind, source_platform, source_reference, template_cursor
+                      FROM search_dynamic_terms
+                     WHERE expires_at > now() AND next_search_at <= now()
+                     ORDER BY next_search_at, last_searched_at NULLS FIRST,
+                              last_seen_at DESC, term
+                     LIMIT $1
+                    """,
+                    self._dynamic_term_cap,
+                )
+            items = []
+            for row in rows:
+                term = str(row["term"])
+                templates = expand_dorks([term])
+                if not templates:
+                    continue
+                cursor = int(row["template_cursor"] or 0) % len(templates)
+                items.append({
+                    **dict(row),
+                    "query": templates[cursor],
+                    "next_template_cursor": (cursor + 1) % len(templates),
+                })
+            return items
+        except Exception as exc:
+            logger.debug("dynamic search query preparation skipped: %s", type(exc).__name__)
+            return []
+
+    async def _mark_dynamic_search_query(self, item: dict[str, Any], *, succeeded: bool) -> None:
+        if self.pool is None:
+            return
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE search_dynamic_terms
+                       SET last_searched_at = CASE WHEN $2 THEN now() ELSE last_searched_at END,
+                           next_search_at = now() + CASE
+                               WHEN $2 THEN ($3 * interval '1 day')
+                               ELSE interval '2 hours'
+                           END,
+                           search_count = search_count + CASE WHEN $2 THEN 1 ELSE 0 END,
+                           template_cursor = CASE WHEN $2 THEN $4 ELSE template_cursor END,
+                           updated_at = now()
+                     WHERE term = $1
+                    """,
+                    item["term"],
+                    succeeded,
+                    self._dynamic_query_interval_days,
+                    item["next_template_cursor"],
+                )
+        except Exception as exc:
+            logger.debug("dynamic search result schedule update skipped: %s", type(exc).__name__)
+
     async def collect(self, targets: list[str]):
         # Pace between queries to reduce search-engine 429s (the ddgs brave
         # backend throttles aggressively). Env-tunable; 0 disables.
@@ -648,8 +1059,11 @@ class SearchCollector(BaseCollector):
         # A target that is a URL is a DIRECT seed (open directory / cloud bucket):
         # crawl it straight away (expand_paste_sites -> _spider_page, which also
         # enumerates S3/GCS ListBucketResult buckets). Everything else is a query.
+        dynamic_items = await self._prepare_dynamic_search_queries()
+        dynamic_by_query = {item["query"]: item for item in dynamic_items}
         direct = [t for t in targets if t.startswith(("http://", "https://"))]
-        queries = [t for t in targets if not t.startswith(("http://", "https://"))]
+        static_queries = [t for t in targets if not t.startswith(("http://", "https://"))]
+        queries = list(dict.fromkeys([*(item["query"] for item in dynamic_items), *static_queries]))
         if direct:
             logger.info("Crawling %d direct seed URL(s) (open dir / bucket)", len(direct))
             try:
@@ -664,11 +1078,18 @@ class SearchCollector(BaseCollector):
                 break
             logger.info("Collecting search/%s", query)
             try:
-                await self.search_query(query)
+                results = await self.search_query(query)
+                if query in dynamic_by_query:
+                    succeeded = bool(results) or not self._last_search_query_rate_limited
+                    await self._mark_dynamic_search_query(
+                        dynamic_by_query[query], succeeded=succeeded,
+                    )
                 await self.checkpoint.save_progress(query)
                 await self.heartbeat_source_health()
             except Exception as e:
                 logger.exception("Failed search/%s: %s", query, e)
+                if query in dynamic_by_query:
+                    await self._mark_dynamic_search_query(dynamic_by_query[query], succeeded=False)
                 await self.send_to_dlq(query, query, str(e))
             if query_delay > 0 and not self._stop.is_set():
                 await asyncio.sleep(query_delay)
@@ -689,6 +1110,11 @@ class SearchCollector(BaseCollector):
         persists them to ``search_results``.
         """
         engines = tuple(engines) if engines else self.DEFAULT_ENGINES
+        self._last_search_query_rate_limited = not any((
+            "ddg" in engines and self._DDGS is not None,
+            "bing" in engines and self._BS is not None,
+            "serper" in engines and bool(self._serper_api_key),
+        ))
         all_results: dict[str, dict] = {}  # url -> result dict (dedupe across engines)
         rank_counter = 0
 
@@ -735,6 +1161,7 @@ class SearchCollector(BaseCollector):
                     hit["rank"] = rank_counter
                     all_results[url] = hit
             else:
+                self._last_search_query_rate_limited = True
                 await self._record_search_rate_limit(
                     engine="serper",
                     account=self._serper_api_key[:8] or None,
@@ -937,8 +1364,11 @@ class SearchCollector(BaseCollector):
         yahoo_cooling = await self._search_scope_cooldown_active("yahoo", "search.yahoo.com")
         bing_cooling = await self._search_scope_cooldown_active("bing", "bing.com")
         if yahoo_cooling and bing_cooling:
+            self._last_search_query_rate_limited = True
             logger.info("[DDG] Yahoo and Bing providers cooling down; skipping requests")
             return []
+        if yahoo_cooling or bing_cooling:
+            self._last_search_query_rate_limited = True
 
         loop = asyncio.get_event_loop()
         text_rate_limit: dict[str, str] | None = None
@@ -1041,6 +1471,7 @@ class SearchCollector(BaseCollector):
         text_hits = [] if yahoo_cooling else await _paced_ddg_call(_do_text, "search.yahoo.com")
         image_hits = [] if bing_cooling else await _paced_ddg_call(_do_images, "bing.com")
         if text_rate_limit is not None:
+            self._last_search_query_rate_limited = True
             await self._record_search_rate_limit(
                 engine="yahoo",
                 scope="search.yahoo.com",
@@ -1049,6 +1480,7 @@ class SearchCollector(BaseCollector):
                 metadata={"query": query, "kind": "text", **text_rate_limit},
             )
         if image_rate_limit is not None:
+            self._last_search_query_rate_limited = True
             await self._record_search_rate_limit(
                 engine="bing",
                 scope="bing.com",
@@ -1088,6 +1520,7 @@ class SearchCollector(BaseCollector):
                 url = f"{DEFAULT_BING_DOMAIN}/search?q={encoded_query}&first={page}"
                 scope = "bing.com"
                 if await self._search_scope_cooldown_active("bing", scope):
+                    self._last_search_query_rate_limited = True
                     break
                 try:
                     async def _get_bing():
@@ -1108,6 +1541,7 @@ class SearchCollector(BaseCollector):
                             resp = retry_resp
                     if resp.status_code != 200:
                         if resp.status_code == 429:
+                            self._last_search_query_rate_limited = True
                             await self._record_search_rate_limit(
                                 engine="bing",
                                 scope=scope,
@@ -1179,6 +1613,7 @@ class SearchCollector(BaseCollector):
                 scope = "google.serper.dev"
                 account = self._serper_api_key[:8] or None
                 if await self._search_scope_cooldown_active("serper", scope):
+                    self._last_search_query_rate_limited = True
                     break
                 try:
                     async def _post_serper():
@@ -1206,6 +1641,7 @@ class SearchCollector(BaseCollector):
                         if retry_resp is not None:
                             resp = retry_resp
                     if resp.status_code == 429:
+                        self._last_search_query_rate_limited = True
                         await self._record_search_rate_limit(
                             engine="serper",
                             account=account,
@@ -1629,12 +2065,21 @@ class SearchCollector(BaseCollector):
         q_name = (query or "spider")[:50]
 
         if is_pdf:
-            saved = await self._save_pdf(q_slug, q_name, cid, data, source_url or url)
+            saved = await self._save_pdf(
+                q_slug, q_name, cid, data, source_url or url,
+                title=hit.get("title"), snippet=hit.get("snippet"), search_query=query,
+            )
             if saved:
                 self._domain_pacing.count("pdfs_found")
             return saved
         if is_doc:
-            saved = await self._save_document(q_slug, q_name, cid, data, source_url or url, ext)
+            document_ext = ext if ext in DOC_EXTENSIONS else (
+                _document_extension_from_content_type(ctype) or ext
+            )
+            saved = await self._save_document(
+                q_slug, q_name, cid, data, source_url or url, document_ext,
+                title=hit.get("title"), snippet=hit.get("snippet"), search_query=query,
+            )
             if saved:
                 self._domain_pacing.count("docs_found")
             return saved
@@ -1748,6 +2193,191 @@ class SearchCollector(BaseCollector):
         self._known_ids.add(content_id)
         return True
 
+    @staticmethod
+    def _extract_document_text(
+        data: bytes,
+        extension: str,
+        *,
+        fitz_module=None,
+        max_pages: int = 50,
+        max_chars: int = 100_000,
+        max_archive_bytes: int = 100 * 1024 * 1024,
+    ) -> tuple[str, str, int | None]:
+        """Extract bounded text from common document formats without executing content."""
+        ext = (extension or "").lower()
+        if ext == ".pdf":
+            if fitz_module is None:
+                return "", "metadata_only", None
+            try:
+                document = fitz_module.open(stream=data, filetype="pdf")
+                try:
+                    page_limit = min(len(document), max(0, max_pages))
+                    parts = []
+                    page_count = 0
+                    for index in range(page_limit):
+                        parts.append(document.load_page(index).get_text("text"))
+                        page_count += 1
+                        if sum(map(len, parts)) >= max_chars:
+                            break
+                    return "\n".join(parts)[:max_chars], "pymupdf", page_count
+                finally:
+                    document.close()
+            except Exception:
+                return "", "metadata_only", None
+
+        if ext in {".txt", ".csv", ".rtf"}:
+            try:
+                text = data.decode("utf-8-sig")
+            except UnicodeDecodeError:
+                text = data.decode("cp1252", errors="replace")
+            if ext == ".rtf":
+                text = re.sub(r"\\'[0-9a-fA-F]{2}", " ", text)
+                text = re.sub(r"\\par\b", "\n", text, flags=re.IGNORECASE)
+                text = re.sub(r"\\[a-zA-Z]+-?\d*\s?", " ", text)
+                text = text.replace("{", " ").replace("}", " ")
+            return text[:max_chars], "rtf" if ext == ".rtf" else "text", None
+
+        if ext not in {".docx", ".xlsx", ".pptx", ".odt", ".ods", ".odp"}:
+            return "", "metadata_only", None
+
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                infos = archive.infolist()
+                if len(infos) > 2_000:
+                    return "", "archive_limit", None
+                remaining_archive_bytes = max(0, max_archive_bytes)
+                if ext in {".docx", ".odt"}:
+                    selected = [
+                        info for info in infos
+                        if info.filename == "word/document.xml"
+                        or info.filename == "content.xml"
+                        or info.filename.startswith(("word/header", "word/footer", "word/footnotes", "word/endnotes"))
+                    ]
+                elif ext == ".xlsx":
+                    selected = [
+                        info for info in infos
+                        if info.filename == "xl/sharedStrings.xml"
+                        or re.fullmatch(r"xl/worksheets/sheet\d+\.xml", info.filename)
+                    ]
+                else:
+                    selected = [
+                        info for info in infos
+                        if re.fullmatch(r"ppt/slides/slide\d+\.xml", info.filename)
+                        or info.filename == "content.xml"
+                    ]
+
+                parts = []
+                remaining = max_chars
+                limited = False
+                for info in selected:
+                    if remaining <= 0 or remaining_archive_bytes <= 0:
+                        limited = True
+                        break
+                    entry_limit = min(8 * 1024 * 1024, remaining_archive_bytes)
+                    entry_parts = []
+                    entry_bytes = 0
+                    with archive.open(info) as member:
+                        while entry_bytes < entry_limit:
+                            chunk = member.read(min(64 * 1024, entry_limit - entry_bytes))
+                            if not chunk:
+                                break
+                            entry_parts.append(chunk)
+                            entry_bytes += len(chunk)
+                    remaining_archive_bytes -= entry_bytes
+                    if entry_bytes >= entry_limit:
+                        limited = True
+                    root = ET.fromstring(b"".join(entry_parts))
+                    if ext in {".odt", ".ods", ".odp"}:
+                        extracted = " ".join(part.strip() for part in root.itertext() if part and part.strip())
+                    else:
+                        names = {"t", "v"} if ext == ".xlsx" else {"t"}
+                        extracted = " ".join(
+                            node.text.strip() for node in root.iter()
+                            if node.tag.rsplit("}", 1)[-1] in names and node.text and node.text.strip()
+                        )
+                    if extracted:
+                        parts.append(extracted[:remaining])
+                        remaining -= len(extracted)
+                method = "opendocument" if ext in {".odt", ".ods", ".odp"} else "openxml"
+                if limited:
+                    method = f"{method}_limited"
+                return "\n".join(parts)[:max_chars], method, None
+        except (
+            OSError, ValueError, RuntimeError, EOFError, zlib.error,
+            zipfile.BadZipFile, ET.ParseError,
+        ):
+            return "", "metadata_only", None
+
+    async def _index_downloaded_document(
+        self,
+        *,
+        content_id: str,
+        data: bytes,
+        extension: str,
+        source_url: str,
+        title: str | None,
+        snippet: str | None,
+        search_query: str,
+    ) -> None:
+        if not self._document_index_enabled or self.pool is None:
+            return
+        try:
+            content_text, extraction_method, page_count = await asyncio.to_thread(
+                self._extract_document_text,
+                data,
+                extension,
+                fitz_module=self._fitz,
+                max_pages=self._max_pdf_pages,
+                max_chars=self._max_document_text_chars,
+                max_archive_bytes=self._max_document_archive_bytes,
+            )
+            # PostgreSQL text values reject NUL bytes, which can occur in
+            # malformed or binary-looking files that still decode as text.
+            content_text = content_text.replace("\x00", " ")
+            metadata = {
+                "search_query": search_query[:500],
+                "snippet": (snippet or "")[:2_000],
+                "source_host": urlparse(source_url).netloc[:255],
+                "byte_size": len(data),
+                "indexed_chars": len(content_text),
+            }
+            async with self.pool.acquire() as conn:
+                media_item_id = await conn.fetchval(
+                    "SELECT id FROM media_items WHERE source = 'search' AND content_id = $1 LIMIT 1",
+                    content_id,
+                )
+                if media_item_id is None:
+                    return
+                await conn.execute(
+                    """
+                    INSERT INTO search_document_index (
+                        media_item_id, source_url, title, file_extension, sha256,
+                        content_text, extraction_method, page_count, metadata
+                    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb)
+                    ON CONFLICT (media_item_id) DO UPDATE SET
+                        source_url = EXCLUDED.source_url,
+                        title = EXCLUDED.title,
+                        file_extension = EXCLUDED.file_extension,
+                        sha256 = EXCLUDED.sha256,
+                        content_text = EXCLUDED.content_text,
+                        extraction_method = EXCLUDED.extraction_method,
+                        page_count = EXCLUDED.page_count,
+                        metadata = EXCLUDED.metadata,
+                        indexed_at = now()
+                    """,
+                    media_item_id,
+                    source_url,
+                    (title or "")[:1_000] or None,
+                    (extension or ".bin")[:20],
+                    hashlib.sha256(data).hexdigest(),
+                    content_text,
+                    extraction_method,
+                    page_count,
+                    json.dumps(metadata),
+                )
+        except Exception as exc:
+            logger.debug("document text index update skipped content_id=%s error=%s", content_id, type(exc).__name__)
+
     async def _save_pdf(
         self,
         entity_id: str,
@@ -1755,6 +2385,10 @@ class SearchCollector(BaseCollector):
         content_id: str,
         data: bytes,
         source_url: str,
+        *,
+        title: str | None = None,
+        snippet: str | None = None,
+        search_query: str | None = None,
     ) -> bool:
         # Persist the PDF blob first (dedup'd by content_id)
         filename = self.build_filename(
@@ -1816,6 +2450,16 @@ class SearchCollector(BaseCollector):
         except Exception as e:
             logger.debug("insert_media_item failed: %s", e)
 
+        await self._index_downloaded_document(
+            content_id=content_id,
+            data=data,
+            extension=".pdf",
+            source_url=source_url,
+            title=title or entity_name,
+            snippet=snippet,
+            search_query=search_query or entity_name,
+        )
+
         # Optionally rasterise pages → JPGs
         if self._fitz is not None:
             await loop.run_in_executor(
@@ -1833,6 +2477,10 @@ class SearchCollector(BaseCollector):
         data: bytes,
         source_url: str,
         ext: str,
+        *,
+        title: str | None = None,
+        snippet: str | None = None,
+        search_query: str | None = None,
     ) -> bool:
         """Persist an office/text document (word/ppt/excel/csv/txt/rtf) with
         content_type 'document'. Byte-capped."""
@@ -1895,6 +2543,16 @@ class SearchCollector(BaseCollector):
                 await self.send_to_dlq(entity_id, content_id, f"vault artifact partial: {artifact.error}")
         except Exception as e:
             logger.debug("insert_media_item failed: %s", e)
+
+        await self._index_downloaded_document(
+            content_id=content_id,
+            data=data,
+            extension=clean_ext if clean_ext.startswith(".") else f".{clean_ext}",
+            source_url=source_url,
+            title=title or entity_name,
+            snippet=snippet,
+            search_query=search_query or entity_name,
+        )
         self._known_ids.add(content_id)
         return True
 

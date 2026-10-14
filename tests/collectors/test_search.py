@@ -34,6 +34,7 @@ import httpx
 import pytest
 
 from src.collectors import search as search_mod
+from src.collectors.search.bucket_crawler import expand_dorks
 from src.collectors.search import SearchCollector
 
 
@@ -49,6 +50,11 @@ def _set_clean_env(monkeypatch):
         "SEARCH_CACHE_TTL_HOURS", "SEARCH_MAX_PDF_PAGES",
         "SEARCH_DOMAIN_DELAY_SECONDS", "SEARCH_DOMAIN_JITTER_SECONDS",
         "SEARCH_RATE_LIMIT_COOLDOWN_SECONDS", "SEARCH_RATE_LIMIT_MAX_COOLDOWN_SECONDS",
+        "SEARCH_DYNAMIC_TERMS_ENABLED", "SEARCH_DYNAMIC_TERM_CAP",
+        "SEARCH_DYNAMIC_TERM_TTL_DAYS", "SEARCH_DYNAMIC_REFRESH_HOURS",
+        "SEARCH_DYNAMIC_QUERY_INTERVAL_DAYS", "SEARCH_DOCUMENT_INDEX_ENABLED",
+        "SEARCH_DYNAMIC_SOURCE_ROWS", "SEARCH_MAX_DOCUMENT_TEXT_CHARS",
+        "SEARCH_MAX_DOCUMENT_ARCHIVE_BYTES",
         "SERPER_API_KEY", "SERPER_DAILY_QUOTA",
     ):
         monkeypatch.delenv(var, raising=False)
@@ -57,6 +63,7 @@ def _set_clean_env(monkeypatch):
     monkeypatch.setenv("SEARCH_SPIDER_PAGES", "0")
     monkeypatch.setenv("SEARCH_DOMAIN_DELAY_SECONDS", "0")
     monkeypatch.setenv("SEARCH_DOMAIN_JITTER_SECONDS", "0")
+    monkeypatch.setenv("SEARCH_DYNAMIC_TERMS_ENABLED", "0")
 
 
 def _make_pool():
@@ -442,6 +449,7 @@ async def test_search_bing_does_not_retry_429_and_respects_retry_after(monkeypat
     record_event.assert_awaited_once()
     assert record_event.await_args.kwargs["cooldown_seconds"] == 1200
     assert coll._search_scope_cooldown_remaining("bing", "bing.com") > 1100
+    assert coll._last_search_query_rate_limited is True
 
 
 @pytest.mark.asyncio
@@ -767,6 +775,248 @@ async def test_save_document_writes_vault_blob(monkeypatch, tmp_path):
     assert kwargs["source_url"] == "https://example.com/doc.txt"
     assert kwargs["metadata"]["vault_artifact"]["ok"] is True
     coll.send_to_dlq.assert_not_awaited()
+
+
+def test_dynamic_term_extraction_is_balanced_and_capped():
+    rows = [
+        {
+            "platform": "instagram",
+            "source_reference": "profile-1",
+            "username": "Alice.Photo",
+            "text_blob": "Weekend photography and wildlife photography in Singapore",
+            "hashtags": ["#wildlifephoto", "#singaporetrip"],
+        },
+        {
+            "platform": "tiktok",
+            "source_reference": "post-2",
+            "username": "bob_travels",
+            "text_blob": "Rare orchids growing beside the trail",
+            "hashtags": ["orchidwatch"],
+        },
+    ]
+
+    terms = SearchCollector._extract_dynamic_term_candidates(rows, limit=10)
+    by_kind = {kind: [row["term"] for row in terms if row["term_kind"] == kind]
+               for kind in ("username", "hashtag", "keyword")}
+
+    assert len(terms) <= 10
+    assert "alice.photo" in by_kind["username"]
+    assert "wildlifephoto" in by_kind["hashtag"]
+    assert "photography" in by_kind["keyword"]
+    assert "orchids" in by_kind["keyword"]
+
+
+def test_dynamic_term_sources_cover_additional_social_profiles_and_posts():
+    source_names = {name for name, _query in search_mod._DYNAMIC_TERM_SOURCE_QUERIES}
+
+    assert {
+        "facebook_profiles",
+        "x_profiles",
+        "bluesky_profiles",
+        "x_posts",
+        "youtube_community_posts",
+    } <= source_names
+
+
+@pytest.mark.asyncio
+async def test_collect_runs_dynamic_dork_queries_before_static_targets(monkeypatch):
+    _set_clean_env(monkeypatch)
+    coll = SearchCollector()
+    coll.search_query = AsyncMock(return_value=[])
+    coll.checkpoint.save_progress = AsyncMock()
+    coll._prepare_dynamic_search_queries = AsyncMock(return_value=[{
+        "term": "alice",
+        "query": 'site:s3.amazonaws.com alice',
+        "next_template_cursor": 1,
+    }])
+    coll._mark_dynamic_search_query = AsyncMock()
+
+    await coll.collect(["static query"])
+
+    assert [call.args[0] for call in coll.search_query.await_args_list] == [
+        'site:s3.amazonaws.com alice', "static query",
+    ]
+    coll._mark_dynamic_search_query.assert_awaited_once_with(
+        coll._prepare_dynamic_search_queries.return_value[0], succeeded=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_collect_retries_dynamic_query_after_rate_limit(monkeypatch):
+    _set_clean_env(monkeypatch)
+    coll = SearchCollector()
+    async def rate_limited(_query):
+        coll._last_search_query_rate_limited = True
+        return []
+
+    coll.search_query = AsyncMock(side_effect=rate_limited)
+    coll.checkpoint.save_progress = AsyncMock()
+    item = {
+        "term": "alice",
+        "query": 'site:s3.amazonaws.com alice',
+        "next_template_cursor": 1,
+    }
+    coll._prepare_dynamic_search_queries = AsyncMock(return_value=[item])
+    coll._mark_dynamic_search_query = AsyncMock()
+
+    await coll.collect([])
+
+    coll._mark_dynamic_search_query.assert_awaited_once_with(item, succeeded=False)
+
+
+@pytest.mark.asyncio
+async def test_dynamic_search_query_uses_rotating_approved_dork(monkeypatch):
+    _set_clean_env(monkeypatch)
+    monkeypatch.setenv("SEARCH_DYNAMIC_TERMS_ENABLED", "1")
+    monkeypatch.setenv("SEARCH_DYNAMIC_TERM_CAP", "1")
+    coll = SearchCollector()
+    pool = _make_pool()
+    pool._conn.fetchval = AsyncMock(return_value=True)
+
+    async def fetch(query, *args, **kwargs):
+        if "FROM search_dynamic_terms" in query:
+            return [{
+                "term": "alice",
+                "term_kind": "username",
+                "source_platform": "instagram",
+                "source_reference": "profile-1",
+                "template_cursor": 2,
+            }]
+        return []
+
+    pool._conn.fetch = AsyncMock(side_effect=fetch)
+    coll.set_pool(pool)
+
+    items = await coll._prepare_dynamic_search_queries()
+
+    assert len(items) == 1
+    assert items[0]["query"] == expand_dorks(["alice"])[2]
+    assert items[0]["next_template_cursor"] == 3
+
+
+def test_document_text_extraction_handles_text_rtf_and_docx():
+    import io
+    import zipfile
+
+    text, method, page_count = SearchCollector._extract_document_text(
+        b"Searchable plain text", ".txt"
+    )
+    assert text == "Searchable plain text"
+    assert method == "text" and page_count is None
+
+    rtf, method, _ = SearchCollector._extract_document_text(
+        b"{\\rtf1\nPublic \\b document\\b0 text\\par}", ".rtf"
+    )
+    assert "Public" in rtf and "document" in rtf and "\\rtf" not in rtf
+    assert method == "rtf"
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr(
+            "word/document.xml",
+            '<w:document xmlns:w="urn:word"><w:t>Public report text</w:t></w:document>',
+        )
+    docx_text, method, _ = SearchCollector._extract_document_text(
+        buffer.getvalue(), ".docx"
+    )
+    assert "Public report text" in docx_text
+    assert method == "openxml"
+
+
+def test_document_text_extraction_bounds_actual_zip_member_reads(monkeypatch):
+    import io
+    import zipfile
+
+    archive_data = io.BytesIO()
+    with zipfile.ZipFile(archive_data, "w") as archive:
+        archive.writestr(
+            "word/document.xml",
+            '<w:document xmlns:w="urn:word"><w:t>small</w:t></w:document>',
+        )
+
+    oversized_xml = (
+        b'<w:document xmlns:w="urn:word"><w:t>'
+        + b"x" * 2_000_000
+        + b"</w:t></w:document>"
+    )
+    bytes_read = 0
+    original_open = zipfile.ZipFile.open
+
+    class CountingReader(io.BytesIO):
+        def read(self, size=-1):
+            nonlocal bytes_read
+            chunk = super().read(size)
+            bytes_read += len(chunk)
+            return chunk
+
+    def open_member(self, name, mode="r", pwd=None, *, force_zip64=False):
+        if getattr(name, "filename", name) == "word/document.xml":
+            return CountingReader(oversized_xml)
+        return original_open(self, name, mode, pwd, force_zip64=force_zip64)
+
+    monkeypatch.setattr(zipfile.ZipFile, "open", open_member)
+    _text, _method, _pages = SearchCollector._extract_document_text(
+        archive_data.getvalue(), ".docx", max_archive_bytes=1_000_000
+    )
+
+    assert bytes_read <= 1_000_000
+
+
+def test_document_extension_can_be_inferred_from_content_type():
+    assert search_mod._document_extension_from_content_type(
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document; charset=binary"
+    ) == ".docx"
+
+
+def test_document_text_extraction_keeps_metadata_path_for_corrupt_zip(monkeypatch):
+    import io
+    import zipfile
+    import zlib
+
+    archive_data = io.BytesIO()
+    with zipfile.ZipFile(archive_data, "w") as archive:
+        archive.writestr("word/document.xml", "<document/>")
+    original_open = zipfile.ZipFile.open
+
+    def open_member(self, name, mode="r", pwd=None, *, force_zip64=False):
+        if getattr(name, "filename", name) == "word/document.xml":
+            raise zlib.error("invalid compressed data")
+        return original_open(self, name, mode, pwd, force_zip64=force_zip64)
+
+    monkeypatch.setattr(zipfile.ZipFile, "open", open_member)
+    text, method, page_count = SearchCollector._extract_document_text(
+        archive_data.getvalue(), ".docx"
+    )
+
+    assert text == ""
+    assert method == "metadata_only"
+    assert page_count is None
+
+
+@pytest.mark.asyncio
+async def test_document_index_writes_extracted_text_and_metadata(monkeypatch):
+    _set_clean_env(monkeypatch)
+    coll = SearchCollector()
+    pool = _make_pool()
+    pool._conn.fetchval = AsyncMock(return_value="media-id")
+    coll.set_pool(pool)
+
+    await coll._index_downloaded_document(
+        content_id="doc-1",
+        data=b"Document body for text index",
+        extension=".txt",
+        source_url="https://example.com/report.txt",
+        title="Annual report",
+        snippet="Public report",
+        search_query="annual report",
+    )
+
+    sql, *args = pool._conn.execute.await_args.args
+    assert "INSERT INTO search_document_index" in sql
+    assert args[4] == hashlib.sha256(b"Document body for text index").hexdigest()
+    assert args[5] == "Document body for text index"
+    assert args[6] == "text"
+    assert '"search_query": "annual report"' in args[8]
 
 
 class _SearchVideoResponse:
