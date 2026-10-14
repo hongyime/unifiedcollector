@@ -15,7 +15,10 @@
     { id: "lemon8", label: "Lemon8", url: "https://www.lemon8-app.com/topic/singapore?region=sg", host: "www.lemon8-app.com", cookieUrl: "https://www.lemon8-app.com", cookie: "sessionid", scraper: true, noLogin: true },
     { id: "x", label: "Twitter / X", url: "https://x.com/home", host: "x.com", aliasHosts: ["twitter.com"], cookieUrl: "https://x.com", cookie: "auth_token", scraper: true },
     { id: "facebook", label: "Facebook", url: "https://www.facebook.com/", host: "www.facebook.com", cookieUrl: "https://www.facebook.com", cookie: "c_user", scraper: true },
-    { id: "strava", label: "Strava", url: "https://www.strava.com/dashboard", host: "www.strava.com", cookieUrl: "https://www.strava.com", cookie: "_strava4_session", scraper: true }
+    { id: "strava", label: "Strava", url: "https://www.strava.com/dashboard", host: "www.strava.com", cookieUrl: "https://www.strava.com", cookie: "_strava4_session", scraper: true },
+    { id: "pinterest", label: "Pinterest", url: "https://www.pinterest.com/", host: "pinterest.com", cookieUrl: "https://www.pinterest.com", cookie: "_pinterest_sess", scraper: true, noLogin: true },
+    { id: "snapchat", label: "Snapchat", url: "https://www.snapchat.com/", host: "snapchat.com", cookieUrl: "https://www.snapchat.com", cookie: "", scraper: true, noLogin: true },
+    { id: "airbnb", label: "Airbnb", url: "https://www.airbnb.com/", host: "airbnb.com", aliasHosts: ["airbnb.com.sg", "airbnb.co.uk", "airbnb.co.kr"], cookieUrl: "https://www.airbnb.com", cookie: "", scraper: true, noLogin: true }
   ];
 
   // src/platforms.js

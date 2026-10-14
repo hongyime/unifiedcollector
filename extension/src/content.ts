@@ -29,6 +29,11 @@ import {
   lsNum,
   lsSet,
 } from "./shared/storage_helpers.js";
+import {
+  extractNativePageItems,
+  nativePageMatchesTarget,
+  nativePageUsername,
+} from "./native_scrapers.js";
 
 
 (() => {
@@ -151,6 +156,8 @@ const RETRYABLE_SEND_TIMEOUT_TYPES = new Set([
   "getTikTokRevisitTarget",
   "getBrowserMediaRevisitTarget",
   "getStravaRouteQueue",
+  "getNativeScrapeTarget",
+  "getNativeScrapeState",
   "igCooldown",
 ]);
 
@@ -206,6 +213,8 @@ const DIRECT_SEND_TIMEOUT_MS_BY_TYPE = {
   users: 20000,
   dms: 30000,
   strava_streams: 30000,
+  nativeScrape: 30000,
+  getNativeScrapeTarget: 10000,
   pageHealth: 15000,
   loopStatus: 10000,
   cycleReport: 10000,
@@ -320,6 +329,14 @@ function directFallbackRequest(msg, error) {
       owner: msg.owner || msg.account || null,
       streams: msg.streams || {},
       point_count: msg.point_count || null,
+    }],
+    nativeScrape: ["/social/native-scrape", {
+      platform,
+      target_id: msg.target_id ?? null,
+      page_url: msg.page_url || location.href,
+      username: msg.username || null,
+      status: msg.status || "success",
+      items: Array.isArray(msg.items) ? msg.items : [],
     }],
   };
   if (!jsonRoutes[type]) return null;
@@ -3871,15 +3888,108 @@ const strava = {
   },
 };
 
+async function nativeScrapeCycle(platform) {
+  const stateResponse = await send({ type: "getNativeScrapeState", platform }, { retries: 1, timeoutMs: 10000 }).catch(() => null);
+  const state = stateResponse && stateResponse.target ? stateResponse.target : null;
+  let saved = 0;
+  let targets = 0;
+
+  if (state && Number.isInteger(Number(state.id))) {
+    const matches = nativePageMatchesTarget(platform, location.href, String(state.url || ""));
+    const items = matches ? extractNativePageItems(platform, document, location.href) : [];
+    const result = await send({
+      type: "nativeScrape",
+      platform,
+      target_id: Number(state.id),
+      page_url: location.href,
+      username: state.username || nativePageUsername(platform, location.href),
+      status: matches ? "success" : "unavailable",
+      items,
+    }, { retries: 1, timeoutMs: 30000 }).catch(() => null);
+    await send({ type: "clearNativeScrapeState" }, { retries: 0, timeoutMs: 5000 }).catch(() => null);
+    if (result && result.ok) {
+      targets += items.length;
+      saved += Object.values(result.accepted || {}).reduce((sum, count) => sum + Number(count || 0), 0);
+    }
+  } else {
+    const nextResponse = await send({ type: "getNativeScrapeTarget", platform }, { retries: 1, timeoutMs: 12000 }).catch(() => null);
+    const target = nextResponse && nextResponse.target ? nextResponse.target : null;
+    const items = extractNativePageItems(platform, document, location.href);
+    if (target && target.target_url && nativePageMatchesTarget(platform, location.href, String(target.target_url))) {
+      const result = await send({
+        type: "nativeScrape",
+        platform,
+        target_id: Number(target.id),
+        page_url: location.href,
+        username: target.username || nativePageUsername(platform, location.href),
+        status: "success",
+        items,
+      }, { retries: 1, timeoutMs: 30000 }).catch(() => null);
+      await send({ type: "clearNativeScrapeState" }, { retries: 0, timeoutMs: 5000 }).catch(() => null);
+      if (result && result.ok) {
+        targets += items.length;
+        saved += Object.values(result.accepted || {}).reduce((sum, count) => sum + Number(count || 0), 0);
+      }
+    } else {
+      if (items.length) {
+        const result = await send({
+          type: "nativeScrape",
+          platform,
+          target_id: null,
+          page_url: location.href,
+          username: nativePageUsername(platform, location.href),
+          status: "success",
+          items,
+        }, { retries: 1, timeoutMs: 30000 }).catch(() => null);
+        if (result && result.ok) {
+          targets += items.length;
+          saved += Object.values(result.accepted || {}).reduce((sum, count) => sum + Number(count || 0), 0);
+        }
+      }
+      if (target && target.target_url) {
+        await hsleep(2500);
+        location.href = String(target.target_url);
+        return { targets: targets + 1, saved, discovered: 0 };
+      }
+    }
+  }
+
+  const nextResponse = await send({ type: "getNativeScrapeTarget", platform }, { retries: 1, timeoutMs: 12000 }).catch(() => null);
+  const next = nextResponse && nextResponse.target ? nextResponse.target : null;
+  if (next && next.target_url && !nativePageMatchesTarget(platform, location.href, String(next.target_url))) {
+    await hsleep(2500);
+    location.href = String(next.target_url);
+    return { targets: targets + 1, saved, discovered: 0 };
+  }
+  return { targets, saved, discovered: 0 };
+}
+
+const pinterest = {
+  id: "pinterest", host: "pinterest.com", label: "Pinterest",
+  async runCycle() { return nativeScrapeCycle("pinterest"); },
+};
+
+const snapchat = {
+  id: "snapchat", host: "snapchat.com", label: "Snapchat",
+  async runCycle() { return nativeScrapeCycle("snapchat"); },
+};
+
+const airbnb = {
+  id: "airbnb", host: "airbnb.com", aliasHosts: ["airbnb.com.sg", "airbnb.co.uk", "airbnb.co.kr"], label: "Airbnb",
+  async runCycle() { return nativeScrapeCycle("airbnb"); },
+};
+
 // ===========================================================================
 // Registry + dispatch
 // ===========================================================================
-const PLATFORMS = [instagram, tiktok, lemon8, x, threads, facebook, strava];
+const PLATFORMS = [instagram, tiktok, lemon8, x, threads, facebook, strava, pinterest, snapchat, airbnb];
 
 function currentPlatform() {
   const host = location.hostname;
   if (host === "twitter.com" || host.endsWith(".twitter.com")) return x;
-  return PLATFORMS.find((p) => host === p.host || host.endsWith("." + p.host)) || null;
+  return PLATFORMS.find((p) => [p.host, ...((p.aliasHosts) || [])]
+    .filter(Boolean)
+    .some((candidate) => host === candidate || host.endsWith("." + candidate))) || null;
 }
 
 // ===========================================================================
@@ -3911,6 +4021,9 @@ const LOOP_STALE_MS_BY_PLATFORM = {
   lemon8: 5 * 60 * 1000,
   threads: 5 * 60 * 1000,
   strava: 6 * 60 * 1000,
+  pinterest: 15 * 60 * 1000,
+  snapchat: 15 * 60 * 1000,
+  airbnb: 15 * 60 * 1000,
 };
 const ONE_SHOT_STALE_MS = 8 * 60 * 1000;
 const ONE_SHOT_STALE_MS_BY_PLATFORM = {
@@ -4039,6 +4152,9 @@ const PASS_REST_MS_BY_PLATFORM = {
   x: 120000,
   facebook: 120000,
   strava: 90000,
+  pinterest: 240000,
+  snapchat: 300000,
+  airbnb: 300000,
 };
 function passRestMs(platformId) {
   return PASS_REST_MS_BY_PLATFORM[platformId] || PASS_REST_MS;

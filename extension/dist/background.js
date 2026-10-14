@@ -15,7 +15,10 @@
     { id: "lemon8", label: "Lemon8", url: "https://www.lemon8-app.com/topic/singapore?region=sg", host: "www.lemon8-app.com", cookieUrl: "https://www.lemon8-app.com", cookie: "sessionid", scraper: true, noLogin: true },
     { id: "x", label: "Twitter / X", url: "https://x.com/home", host: "x.com", aliasHosts: ["twitter.com"], cookieUrl: "https://x.com", cookie: "auth_token", scraper: true },
     { id: "facebook", label: "Facebook", url: "https://www.facebook.com/", host: "www.facebook.com", cookieUrl: "https://www.facebook.com", cookie: "c_user", scraper: true },
-    { id: "strava", label: "Strava", url: "https://www.strava.com/dashboard", host: "www.strava.com", cookieUrl: "https://www.strava.com", cookie: "_strava4_session", scraper: true }
+    { id: "strava", label: "Strava", url: "https://www.strava.com/dashboard", host: "www.strava.com", cookieUrl: "https://www.strava.com", cookie: "_strava4_session", scraper: true },
+    { id: "pinterest", label: "Pinterest", url: "https://www.pinterest.com/", host: "pinterest.com", cookieUrl: "https://www.pinterest.com", cookie: "_pinterest_sess", scraper: true, noLogin: true },
+    { id: "snapchat", label: "Snapchat", url: "https://www.snapchat.com/", host: "snapchat.com", cookieUrl: "https://www.snapchat.com", cookie: "", scraper: true, noLogin: true },
+    { id: "airbnb", label: "Airbnb", url: "https://www.airbnb.com/", host: "airbnb.com", aliasHosts: ["airbnb.com.sg", "airbnb.co.uk", "airbnb.co.kr"], cookieUrl: "https://www.airbnb.com", cookie: "", scraper: true, noLogin: true }
   ];
 
   // src/shared/log.ts
@@ -1043,7 +1046,7 @@
   var _mainWorldHookHostRe = /(^|\.)((instagram|tiktok|strava)\.com|threads\.com|x\.com|twitter\.com|facebook\.com)$/i;
   var SCRAPER_TABS_PINNED_KEY = "ucPinScraperTabs";
   var EXPANDED_PLATFORM_TABS_KEY = "ucOpenExpandedPlatformTabs";
-  var AUTO_SCRAPER_PLATFORM_IDS = /* @__PURE__ */ new Set(["instagram", "threads", "tiktok", "lemon8", "x", "facebook", "strava"]);
+  var AUTO_SCRAPER_PLATFORM_IDS = /* @__PURE__ */ new Set(["instagram", "threads", "tiktok", "lemon8", "x", "facebook", "strava", "pinterest", "snapchat", "airbnb"]);
   async function scraperTabsPinned() {
     try {
       const stored = await chrome.storage.local.get([SCRAPER_TABS_PINNED_KEY]);
@@ -2543,6 +2546,85 @@
               sendResponse({ ok: r.ok, ...j });
             } catch (e) {
               sendResponse({ ok: false, target: null, error: String(e.message || e) });
+            }
+            break;
+          }
+          case "getNativeScrapeTarget": {
+            try {
+              const platform = String(msg.platform || "").trim().toLowerCase();
+              const qs = new URLSearchParams({ platform });
+              const r = await fetch(base + "/social/native-scrape-target?" + qs.toString());
+              const j = await r.json().catch(() => ({}));
+              const tabId = sender && sender.tab && Number.isInteger(sender.tab.id) ? sender.tab.id : null;
+              if (r.ok && tabId !== null && j.target && j.target.id != null) {
+                await chrome.storage.local.set({
+                  [`ucNativeScrapeTarget:${tabId}`]: {
+                    platform,
+                    id: Number(j.target.id),
+                    url: String(j.target.target_url || ""),
+                    username: j.target.username || null
+                  }
+                });
+              }
+              sendResponse({ ok: r.ok, ...j });
+            } catch (e) {
+              sendResponse({ ok: false, target: null, error: String(e.message || e) });
+            }
+            break;
+          }
+          case "getNativeScrapeState": {
+            try {
+              const tabId = sender && sender.tab && Number.isInteger(sender.tab.id) ? sender.tab.id : null;
+              if (tabId === null) {
+                sendResponse({ ok: true, target: null });
+                break;
+              }
+              const key = `ucNativeScrapeTarget:${tabId}`;
+              const stored = await chrome.storage.local.get([key]);
+              const target = stored && stored[key] ? stored[key] : null;
+              if (target && msg.platform && target.platform !== String(msg.platform).toLowerCase()) {
+                await chrome.storage.local.remove([key]);
+                sendResponse({ ok: true, target: null });
+              } else {
+                sendResponse({ ok: true, target });
+              }
+            } catch (e) {
+              sendResponse({ ok: false, target: null, error: String(e.message || e) });
+            }
+            break;
+          }
+          case "clearNativeScrapeState": {
+            try {
+              const tabId = sender && sender.tab && Number.isInteger(sender.tab.id) ? sender.tab.id : null;
+              if (tabId !== null) await chrome.storage.local.remove([`ucNativeScrapeTarget:${tabId}`]);
+              sendResponse({ ok: true });
+            } catch (e) {
+              sendResponse({ ok: false, error: String(e.message || e) });
+            }
+            break;
+          }
+          case "nativeScrape": {
+            try {
+              const r = await fetch(base + "/social/native-scrape", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(withExtensionVersion({
+                  platform: msg.platform,
+                  target_id: msg.target_id ?? null,
+                  page_url: msg.page_url,
+                  username: msg.username || null,
+                  status: msg.status || "success",
+                  items: Array.isArray(msg.items) ? msg.items : []
+                }))
+              });
+              const j = await r.json().catch(() => ({}));
+              const tabId = sender && sender.tab && Number.isInteger(sender.tab.id) ? sender.tab.id : null;
+              if ((r.ok || r.status === 409) && tabId !== null && msg.target_id != null) {
+                await chrome.storage.local.remove([`ucNativeScrapeTarget:${tabId}`]);
+              }
+              sendResponse({ ok: r.ok, ...j });
+            } catch (e) {
+              sendResponse({ ok: false, error: String(e.message || e) });
             }
             break;
           }

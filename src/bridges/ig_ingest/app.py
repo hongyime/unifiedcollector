@@ -44,6 +44,7 @@ from .middleware import (
     lane_isolation_middleware,
     request_timeout_middleware,
 )
+from .native_scrape import native_scrape_ingest, native_scrape_target
 from .revisit import (
     browser_revisit_result,
     browser_revisit_target,
@@ -91,6 +92,8 @@ def build_app():
     app.router.add_post("/social/ingest-upload", ingest_upload)
     app.router.add_post("/social/ingest-upload-binary", ingest_upload_binary)
     app.router.add_post("/social/browser-media-candidates", browser_media_candidates)
+    app.router.add_get("/social/native-scrape-target", native_scrape_target)
+    app.router.add_post("/social/native-scrape", native_scrape_ingest)
     app.router.add_post("/social/discover", discover)
     app.router.add_post("/social/target-status", target_status_handler)
     app.router.add_post("/social/posts", posts_handler)

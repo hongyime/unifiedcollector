@@ -1048,7 +1048,7 @@ const _tpath = (u) => { try { return new URL(u).pathname.split("?")[0].replace(/
 const _mainWorldHookHostRe = /(^|\.)((instagram|tiktok|strava)\.com|threads\.com|x\.com|twitter\.com|facebook\.com)$/i;
 const SCRAPER_TABS_PINNED_KEY = "ucPinScraperTabs";
 const EXPANDED_PLATFORM_TABS_KEY = "ucOpenExpandedPlatformTabs";
-const AUTO_SCRAPER_PLATFORM_IDS = new Set(["instagram", "threads", "tiktok", "lemon8", "x", "facebook", "strava"]);
+const AUTO_SCRAPER_PLATFORM_IDS = new Set(["instagram", "threads", "tiktok", "lemon8", "x", "facebook", "strava", "pinterest", "snapchat", "airbnb"]);
 
 async function scraperTabsPinned() {
   try {
@@ -2666,6 +2666,85 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           sendResponse({ ok: r.ok, ...j });
         } catch (e) {
           sendResponse({ ok: false, target: null, error: String(e.message || e) });
+        }
+        break;
+      }
+      case "getNativeScrapeTarget": {
+        try {
+          const platform = String(msg.platform || "").trim().toLowerCase();
+          const qs = new URLSearchParams({ platform });
+          const r = await fetch(base + "/social/native-scrape-target?" + qs.toString());
+          const j = await r.json().catch(() => ({}));
+          const tabId = sender && sender.tab && Number.isInteger(sender.tab.id) ? sender.tab.id : null;
+          if (r.ok && tabId !== null && j.target && j.target.id != null) {
+            await chrome.storage.local.set({
+              [`ucNativeScrapeTarget:${tabId}`]: {
+                platform,
+                id: Number(j.target.id),
+                url: String(j.target.target_url || ""),
+                username: j.target.username || null,
+              },
+            });
+          }
+          sendResponse({ ok: r.ok, ...j });
+        } catch (e) {
+          sendResponse({ ok: false, target: null, error: String(e.message || e) });
+        }
+        break;
+      }
+      case "getNativeScrapeState": {
+        try {
+          const tabId = sender && sender.tab && Number.isInteger(sender.tab.id) ? sender.tab.id : null;
+          if (tabId === null) {
+            sendResponse({ ok: true, target: null });
+            break;
+          }
+          const key = `ucNativeScrapeTarget:${tabId}`;
+          const stored = await chrome.storage.local.get([key]);
+          const target = stored && stored[key] ? stored[key] : null;
+          if (target && msg.platform && target.platform !== String(msg.platform).toLowerCase()) {
+            await chrome.storage.local.remove([key]);
+            sendResponse({ ok: true, target: null });
+          } else {
+            sendResponse({ ok: true, target });
+          }
+        } catch (e) {
+          sendResponse({ ok: false, target: null, error: String(e.message || e) });
+        }
+        break;
+      }
+      case "clearNativeScrapeState": {
+        try {
+          const tabId = sender && sender.tab && Number.isInteger(sender.tab.id) ? sender.tab.id : null;
+          if (tabId !== null) await chrome.storage.local.remove([`ucNativeScrapeTarget:${tabId}`]);
+          sendResponse({ ok: true });
+        } catch (e) {
+          sendResponse({ ok: false, error: String(e.message || e) });
+        }
+        break;
+      }
+      case "nativeScrape": {
+        try {
+          const r = await fetch(base + "/social/native-scrape", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(withExtensionVersion({
+              platform: msg.platform,
+              target_id: msg.target_id ?? null,
+              page_url: msg.page_url,
+              username: msg.username || null,
+              status: msg.status || "success",
+              items: Array.isArray(msg.items) ? msg.items : [],
+            })),
+          });
+          const j = await r.json().catch(() => ({}));
+          const tabId = sender && sender.tab && Number.isInteger(sender.tab.id) ? sender.tab.id : null;
+          if ((r.ok || r.status === 409) && tabId !== null && msg.target_id != null) {
+            await chrome.storage.local.remove([`ucNativeScrapeTarget:${tabId}`]);
+          }
+          sendResponse({ ok: r.ok, ...j });
+        } catch (e) {
+          sendResponse({ ok: false, error: String(e.message || e) });
         }
         break;
       }

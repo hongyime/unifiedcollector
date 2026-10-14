@@ -36,6 +36,7 @@ logger = logging.getLogger("social_ingest")
 
 _STRUCTURED_CAPTURE_PATHS = {
     "/social/browser-media-candidates",
+    "/social/native-scrape",
     "/social/comments",
     "/social/discover",
     "/social/dm-decoded",
@@ -60,6 +61,7 @@ _HEARTBEAT_LANE_PATHS = {
 _REVISIT_LANE_PATHS = {
     "/social/browser-revisit-target",
     "/social/browser-revisit-result",
+    "/social/native-scrape-target",
     "/social/tiktok-revisit-target",
     "/social/tiktok-revisit-result",
     "/social/x-profile-target",
@@ -81,6 +83,7 @@ _WRITE_LANE_PATHS = {
     "/social/ingest",
     "/social/ingest-upload",
     "/social/ingest-upload-binary",
+    "/social/native-scrape",
     "/social/posts",
     "/social/profile",
     "/social/seed",

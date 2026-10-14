@@ -176,6 +176,295 @@
     return "";
   }
 
+  // src/native_scrapers.ts
+  function cleanText(value, limit = 1e3) {
+    if (typeof value !== "string") return null;
+    const text = value.replace(/\s+/g, " ").trim();
+    return text ? text.slice(0, limit) : null;
+  }
+  function absoluteHttps(raw, pageUrl) {
+    if (!raw) return null;
+    try {
+      const url = new URL(raw, pageUrl);
+      return url.protocol === "https:" ? url.href.slice(0, 2048) : null;
+    } catch {
+      return null;
+    }
+  }
+  function stableId(prefix, value) {
+    let hash = 2166136261;
+    for (let i = 0; i < value.length; i += 1) {
+      hash ^= value.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+    return `${prefix}_${(hash >>> 0).toString(16)}`;
+  }
+  function visibleText(node, limit = 1200) {
+    if (!(node instanceof HTMLElement)) return null;
+    return cleanText(node.innerText || node.textContent || "", limit);
+  }
+  function pinterestUsername(pageUrl) {
+    try {
+      const first = new URL(pageUrl).pathname.split("/").filter(Boolean)[0] || "";
+      return /^(pin|search|ideas|_|categories|today|login|signup)$/i.test(first) ? null : cleanText(first, 100);
+    } catch {
+      return null;
+    }
+  }
+  function pinterestItems(doc, pageUrl) {
+    const username = pinterestUsername(pageUrl);
+    const pins = [];
+    const seenPins = /* @__PURE__ */ new Set();
+    for (const anchor of Array.from(doc.querySelectorAll('a[href*="/pin/"]'))) {
+      const pinUrl = absoluteHttps(anchor.href, pageUrl);
+      if (!pinUrl || !/^(?:www\.)?pinterest\.com$/i.test(new URL(pinUrl).hostname)) continue;
+      const match = new URL(pinUrl).pathname.match(/\/pin\/([A-Za-z0-9_-]+)/i);
+      if (!match || seenPins.has(match[1])) continue;
+      seenPins.add(match[1]);
+      const card = anchor.closest(
+        '[data-test-id="pinWrapper"], [data-test-id="pin"], [role="listitem"], article'
+      ) || anchor.parentElement;
+      const image = card?.querySelector("img[src]") || null;
+      const destination = Array.from(card?.querySelectorAll("a[href^='http']") || []).map((link) => absoluteHttps(link.href, pageUrl)).find((url) => url && !/(^|\.)pinterest\.com$/i.test(new URL(url).hostname)) || null;
+      const boardLink = Array.from(card?.querySelectorAll("a[href]") || []).map((link) => absoluteHttps(link.href, pageUrl)).find((url) => {
+        if (!url) return false;
+        const parts = new URL(url).pathname.split("/").filter(Boolean);
+        return parts.length === 2 && !["pin", "search", "ideas", "_", "login", "signup"].includes(parts[0].toLowerCase());
+      }) || null;
+      pins.push({
+        type: "pin",
+        id: match[1],
+        username,
+        url: pinUrl,
+        board_url: boardLink,
+        board_id: boardLink ? new URL(boardLink).pathname.split("/").filter(Boolean).slice(0, 2).join(":") : null,
+        title: cleanText(anchor.getAttribute("aria-label") || card?.querySelector("h1,h2,h3,[title]")?.textContent || image?.alt, 500),
+        description: visibleText(card, 800),
+        image_url: absoluteHttps(image?.currentSrc || image?.src, pageUrl),
+        destination_url: destination,
+        metadata: { page_path: new URL(pageUrl).pathname }
+      });
+      if (pins.length >= 40) break;
+    }
+    const boards = [];
+    const seenBoards = /* @__PURE__ */ new Set();
+    const reserved = /* @__PURE__ */ new Set(["pin", "search", "ideas", "_", "categories", "today", "login", "signup", "explore"]);
+    for (const anchor of Array.from(doc.querySelectorAll("a[href]"))) {
+      const href = absoluteHttps(anchor.href, pageUrl);
+      if (!href || !/(^|\.)pinterest\.com$/i.test(new URL(href).hostname)) continue;
+      const parts = new URL(href).pathname.split("/").filter(Boolean);
+      if (parts.length !== 2 || reserved.has(parts[0].toLowerCase())) continue;
+      const id = parts.map((part) => decodeURIComponent(part)).join(":");
+      if (seenBoards.has(id)) continue;
+      seenBoards.add(id);
+      const card = anchor.closest('[data-test-id*="board" i], [role="listitem"], article') || anchor;
+      const countMatch = (visibleText(card, 500) || "").match(/([\d,]+)\s+pins?\b/i);
+      boards.push({
+        type: "board",
+        id,
+        username: parts[0],
+        url: href,
+        title: cleanText(anchor.getAttribute("aria-label") || anchor.innerText || anchor.textContent, 500),
+        pin_count: countMatch ? Number(countMatch[1].replace(/,/g, "")) : null,
+        metadata: { page_path: new URL(pageUrl).pathname }
+      });
+      if (boards.length >= 10) break;
+    }
+    return [...pins, ...boards].slice(0, 50);
+  }
+  function snapchatUsername(pageUrl) {
+    try {
+      const match = new URL(pageUrl).pathname.match(/^\/(?:add|profile)\/([^/]+)/i);
+      return match ? cleanText(decodeURIComponent(match[1]), 100) : null;
+    } catch {
+      return null;
+    }
+  }
+  function snapchatStoryItems(doc, pageUrl) {
+    const parsed = new URL(pageUrl);
+    if (!/^\/(?:add|profile)\//i.test(parsed.pathname)) return [];
+    const username = snapchatUsername(pageUrl);
+    const nodes = Array.from(doc.querySelectorAll(
+      '[data-story-id], [data-testid*="story" i], a[href*="/story/"], [aria-label*="public story" i]'
+    ));
+    const stories = [];
+    const seen = /* @__PURE__ */ new Set();
+    for (const node of nodes) {
+      const media = node.querySelector("video") || null;
+      const image = node.querySelector("img[src]") || null;
+      const anchor = node instanceof HTMLAnchorElement ? node : node.querySelector("a[href]");
+      const storyUrl = absoluteHttps(anchor?.href, pageUrl) || pageUrl;
+      const mediaUrl = absoluteHttps(media?.currentSrc || media?.src || image?.currentSrc || image?.src, pageUrl);
+      const title = cleanText(node.getAttribute("aria-label") || visibleText(node, 500), 500);
+      const rawId = node.getAttribute("data-story-id") || node.getAttribute("data-item-id") || storyUrl.match(/\/story\/([^/?#]+)/i)?.[1] || "";
+      const id = cleanText(rawId, 200) || stableId("story", `${username || "public"}|${storyUrl}|${mediaUrl || ""}|${title || ""}`);
+      if (seen.has(id) || !mediaUrl && !title) continue;
+      seen.add(id);
+      const time = node.querySelector("time[datetime]")?.dateTime || null;
+      stories.push({
+        type: "story",
+        id,
+        username,
+        title,
+        url: storyUrl,
+        media_url: mediaUrl,
+        thumbnail_url: absoluteHttps(image?.currentSrc || image?.src || media?.poster, pageUrl),
+        posted_at: time,
+        expires_at: null,
+        metadata: { page_path: parsed.pathname, visible_public_profile_story: true }
+      });
+      if (stories.length >= 25) break;
+    }
+    return stories;
+  }
+  function airbnbHostItem(doc, pageUrl, container) {
+    const anchor = container instanceof HTMLAnchorElement && /\/users\/(?:show|profile)\//i.test(container.pathname) ? container : container.querySelector('a[href*="/users/show/"], a[href*="/users/profile/"]');
+    const hostUrl = absoluteHttps(anchor?.href, pageUrl);
+    if (!hostUrl) return null;
+    const parsed = new URL(hostUrl);
+    const idMatch = parsed.pathname.match(/\/users\/(?:show|profile)\/([^/?#]+)/i);
+    if (!idMatch) return null;
+    const hostId = decodeURIComponent(idMatch[1]);
+    const text = visibleText(container, 1500) || "";
+    const rating = text.match(/\b([0-5](?:\.\d)?)\s*(?:·|\()\s*[\d,]+\s+reviews?\b/i);
+    const reviews = text.match(/\b([\d,]+)\s+reviews?\b/i);
+    const image = anchor?.querySelector("img[src]") || null;
+    return {
+      type: "host",
+      id: hostId,
+      url: hostUrl,
+      display_name: cleanText(anchor?.innerText || anchor?.getAttribute("aria-label") || image?.alt, 300),
+      avatar_url: absoluteHttps(image?.currentSrc || image?.src, pageUrl),
+      rating: rating ? Number(rating[1]) : null,
+      reviews_count: reviews ? Number(reviews[1].replace(/,/g, "")) : null,
+      host_since: null,
+      metadata: { page_path: new URL(pageUrl).pathname }
+    };
+  }
+  function airbnbListingItem(doc, pageUrl, anchor, card) {
+    const listingUrl = absoluteHttps(anchor.href, pageUrl);
+    if (!listingUrl || !/(^|\.)airbnb\.(com|com\.sg|co\.uk|co\.kr)$/i.test(new URL(listingUrl).hostname)) return null;
+    const match = new URL(listingUrl).pathname.match(/\/rooms\/(\d+)/i);
+    if (!match) return null;
+    const text = visibleText(card, 1800) || "";
+    const titleNode = card.querySelector("h1,h2,h3,[data-testid*='title' i]");
+    const image = card.querySelector("img[src]");
+    const rating = text.match(/\b([0-5](?:\.\d)?)\s*(?:·|\()\s*[\d,]+\s+reviews?\b/i) || text.match(/\bRated\s+([0-5](?:\.\d)?)/i);
+    const reviews = text.match(/\b([\d,]+)\s+reviews?\b/i);
+    const bedrooms = text.match(/\b(\d+(?:\.\d+)?)\s+bedrooms?\b/i);
+    const bathrooms = text.match(/\b(\d+(?:\.\d+)?)\s+bathrooms?\b/i);
+    const guests = text.match(/\b(\d+)\s+guests?\b/i);
+    const host = airbnbHostItem(doc, pageUrl, card);
+    return {
+      type: "listing",
+      id: match[1],
+      url: listingUrl,
+      host_id: host?.id || null,
+      host_name: host?.display_name || null,
+      host_profile_url: host?.url || null,
+      title: cleanText(titleNode?.textContent || anchor.getAttribute("aria-label") || image?.alt, 500),
+      location: cleanText(card.querySelector('[data-testid*="location" i]')?.textContent || null, 500),
+      image_url: absoluteHttps(image?.currentSrc || image?.src, pageUrl),
+      rating: rating ? Number(rating[1]) : null,
+      reviews_count: reviews ? Number(reviews[1].replace(/,/g, "")) : null,
+      property_type: null,
+      bedrooms: bedrooms ? Number(bedrooms[1]) : null,
+      bathrooms: bathrooms ? Number(bathrooms[1]) : null,
+      max_guests: guests ? Number(guests[1]) : null,
+      metadata: { page_path: new URL(pageUrl).pathname }
+    };
+  }
+  function airbnbItems(doc, pageUrl) {
+    const parsed = new URL(pageUrl);
+    const output = [];
+    const seenListings = /* @__PURE__ */ new Set();
+    const roomId = parsed.pathname.match(/\/rooms\/(\d+)/i)?.[1];
+    if (roomId) {
+      const main = doc.querySelector("main") || doc.body;
+      const anchor = doc.querySelector(`a[href*="/rooms/${roomId}"]`) || document.createElement("a");
+      if (!anchor.href) anchor.href = pageUrl;
+      const item = airbnbListingItem(doc, pageUrl, anchor, main);
+      if (item) {
+        seenListings.add(String(item.id));
+        output.push(item);
+        const host = airbnbHostItem(doc, pageUrl, main);
+        if (host) output.push(host);
+      }
+    }
+    if (/\/s\//i.test(parsed.pathname)) {
+      for (const anchor of Array.from(doc.querySelectorAll('a[href*="/rooms/"]'))) {
+        const card = anchor.closest('[data-testid="card-container"], [data-testid*="listing-card" i], article, li') || anchor.parentElement || anchor;
+        const item = airbnbListingItem(doc, pageUrl, anchor, card);
+        if (!item || seenListings.has(String(item.id))) continue;
+        seenListings.add(String(item.id));
+        output.push(item);
+        if (output.length >= 30) break;
+      }
+    }
+    if (/\/users\/(?:show|profile)\//i.test(parsed.pathname)) {
+      const main = doc.querySelector("main") || doc.body;
+      const id = parsed.pathname.match(/\/users\/(?:show|profile)\/([^/?#]+)/i)?.[1];
+      if (id) {
+        const text = visibleText(main, 1500) || "";
+        const reviews = text.match(/\b([\d,]+)\s+reviews?\b/i);
+        const rating = text.match(/\b([0-5](?:\.\d)?)\b[^\n]{0,50}\breviews?\b/i);
+        const image = main.querySelector("img[src]");
+        output.push({
+          type: "host",
+          id: decodeURIComponent(id),
+          url: pageUrl,
+          display_name: cleanText(main.querySelector("h1,h2")?.textContent, 300),
+          avatar_url: absoluteHttps(image?.currentSrc || image?.src, pageUrl),
+          rating: rating ? Number(rating[1]) : null,
+          reviews_count: reviews ? Number(reviews[1].replace(/,/g, "")) : null,
+          host_since: null,
+          metadata: { page_path: parsed.pathname }
+        });
+      }
+    }
+    return output.slice(0, 30);
+  }
+  function extractNativePageItems(platform, doc, pageUrl) {
+    try {
+      if (platform === "pinterest") return pinterestItems(doc, pageUrl);
+      if (platform === "snapchat") return snapchatStoryItems(doc, pageUrl);
+      if (platform === "airbnb") return airbnbItems(doc, pageUrl);
+    } catch {
+      return [];
+    }
+    return [];
+  }
+  function nativePageMatchesTarget(platform, pageUrl, targetUrl) {
+    try {
+      const page = new URL(pageUrl);
+      const target = new URL(targetUrl);
+      if (platform === "airbnb") {
+        const pageId = page.pathname.match(/\/(rooms|users\/(?:show|profile))\/([^/?#]+)/i);
+        const targetId = target.pathname.match(/\/(rooms|users\/(?:show|profile))\/([^/?#]+)/i);
+        return Boolean(pageId && targetId && pageId[1].toLowerCase() === targetId[1].toLowerCase() && pageId[2] === targetId[2]);
+      }
+      const pageHost = page.hostname.toLowerCase().replace(/^www\./, "");
+      const targetHost = target.hostname.toLowerCase().replace(/^www\./, "");
+      const cleanPath = (pathname) => pathname.replace(/\/+$/, "") || "/";
+      return pageHost === targetHost && cleanPath(page.pathname) === cleanPath(target.pathname);
+    } catch {
+      return false;
+    }
+  }
+  function nativePageUsername(platform, pageUrl) {
+    try {
+      const parsed = new URL(pageUrl);
+      if (platform === "pinterest") return pinterestUsername(pageUrl);
+      if (platform === "snapchat") return snapchatUsername(pageUrl);
+      if (platform === "airbnb") {
+        return parsed.pathname.match(/\/users\/(?:show|profile)\/([^/?#]+)/i)?.[1] || null;
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  }
+
   // src/content.ts
   (() => {
     const UC_CONTENT_VERSION = (() => {
@@ -253,6 +542,8 @@
       "getTikTokRevisitTarget",
       "getBrowserMediaRevisitTarget",
       "getStravaRouteQueue",
+      "getNativeScrapeTarget",
+      "getNativeScrapeState",
       "igCooldown"
     ]);
     function deadlineError(name, message) {
@@ -293,6 +584,8 @@
       users: 2e4,
       dms: 3e4,
       strava_streams: 3e4,
+      nativeScrape: 3e4,
+      getNativeScrapeTarget: 1e4,
       pageHealth: 15e3,
       loopStatus: 1e4,
       cycleReport: 1e4,
@@ -403,6 +696,14 @@
           owner: msg.owner || msg.account || null,
           streams: msg.streams || {},
           point_count: msg.point_count || null
+        }],
+        nativeScrape: ["/social/native-scrape", {
+          platform,
+          target_id: msg.target_id ?? null,
+          page_url: msg.page_url || location.href,
+          username: msg.username || null,
+          status: msg.status || "success",
+          items: Array.isArray(msg.items) ? msg.items : []
         }]
       };
       if (!jsonRoutes[type]) return null;
@@ -3852,11 +4153,109 @@
         return { targets: 1, saved: 0, discovered: 0 };
       }
     };
-    const PLATFORMS = [instagram, tiktok, lemon8, x, threads, facebook, strava];
+    async function nativeScrapeCycle(platform) {
+      const stateResponse = await send({ type: "getNativeScrapeState", platform }, { retries: 1, timeoutMs: 1e4 }).catch(() => null);
+      const state = stateResponse && stateResponse.target ? stateResponse.target : null;
+      let saved = 0;
+      let targets = 0;
+      if (state && Number.isInteger(Number(state.id))) {
+        const matches = nativePageMatchesTarget(platform, location.href, String(state.url || ""));
+        const items = matches ? extractNativePageItems(platform, document, location.href) : [];
+        const result = await send({
+          type: "nativeScrape",
+          platform,
+          target_id: Number(state.id),
+          page_url: location.href,
+          username: state.username || nativePageUsername(platform, location.href),
+          status: matches ? "success" : "unavailable",
+          items
+        }, { retries: 1, timeoutMs: 3e4 }).catch(() => null);
+        await send({ type: "clearNativeScrapeState" }, { retries: 0, timeoutMs: 5e3 }).catch(() => null);
+        if (result && result.ok) {
+          targets += items.length;
+          saved += Object.values(result.accepted || {}).reduce((sum, count) => sum + Number(count || 0), 0);
+        }
+      } else {
+        const nextResponse2 = await send({ type: "getNativeScrapeTarget", platform }, { retries: 1, timeoutMs: 12e3 }).catch(() => null);
+        const target = nextResponse2 && nextResponse2.target ? nextResponse2.target : null;
+        const items = extractNativePageItems(platform, document, location.href);
+        if (target && target.target_url && nativePageMatchesTarget(platform, location.href, String(target.target_url))) {
+          const result = await send({
+            type: "nativeScrape",
+            platform,
+            target_id: Number(target.id),
+            page_url: location.href,
+            username: target.username || nativePageUsername(platform, location.href),
+            status: "success",
+            items
+          }, { retries: 1, timeoutMs: 3e4 }).catch(() => null);
+          await send({ type: "clearNativeScrapeState" }, { retries: 0, timeoutMs: 5e3 }).catch(() => null);
+          if (result && result.ok) {
+            targets += items.length;
+            saved += Object.values(result.accepted || {}).reduce((sum, count) => sum + Number(count || 0), 0);
+          }
+        } else {
+          if (items.length) {
+            const result = await send({
+              type: "nativeScrape",
+              platform,
+              target_id: null,
+              page_url: location.href,
+              username: nativePageUsername(platform, location.href),
+              status: "success",
+              items
+            }, { retries: 1, timeoutMs: 3e4 }).catch(() => null);
+            if (result && result.ok) {
+              targets += items.length;
+              saved += Object.values(result.accepted || {}).reduce((sum, count) => sum + Number(count || 0), 0);
+            }
+          }
+          if (target && target.target_url) {
+            await hsleep(2500);
+            location.href = String(target.target_url);
+            return { targets: targets + 1, saved, discovered: 0 };
+          }
+        }
+      }
+      const nextResponse = await send({ type: "getNativeScrapeTarget", platform }, { retries: 1, timeoutMs: 12e3 }).catch(() => null);
+      const next = nextResponse && nextResponse.target ? nextResponse.target : null;
+      if (next && next.target_url && !nativePageMatchesTarget(platform, location.href, String(next.target_url))) {
+        await hsleep(2500);
+        location.href = String(next.target_url);
+        return { targets: targets + 1, saved, discovered: 0 };
+      }
+      return { targets, saved, discovered: 0 };
+    }
+    const pinterest = {
+      id: "pinterest",
+      host: "pinterest.com",
+      label: "Pinterest",
+      async runCycle() {
+        return nativeScrapeCycle("pinterest");
+      }
+    };
+    const snapchat = {
+      id: "snapchat",
+      host: "snapchat.com",
+      label: "Snapchat",
+      async runCycle() {
+        return nativeScrapeCycle("snapchat");
+      }
+    };
+    const airbnb = {
+      id: "airbnb",
+      host: "airbnb.com",
+      aliasHosts: ["airbnb.com.sg", "airbnb.co.uk", "airbnb.co.kr"],
+      label: "Airbnb",
+      async runCycle() {
+        return nativeScrapeCycle("airbnb");
+      }
+    };
+    const PLATFORMS = [instagram, tiktok, lemon8, x, threads, facebook, strava, pinterest, snapchat, airbnb];
     function currentPlatform() {
       const host = location.hostname;
       if (host === "twitter.com" || host.endsWith(".twitter.com")) return x;
-      return PLATFORMS.find((p) => host === p.host || host.endsWith("." + p.host)) || null;
+      return PLATFORMS.find((p) => [p.host, ...p.aliasHosts || []].filter(Boolean).some((candidate) => host === candidate || host.endsWith("." + candidate))) || null;
     }
     let LOOP_RUNNING = false;
     let LOOP_STARTED_AT = 0;
@@ -3877,7 +4276,10 @@
       tiktok: 5 * 60 * 1e3,
       lemon8: 5 * 60 * 1e3,
       threads: 5 * 60 * 1e3,
-      strava: 6 * 60 * 1e3
+      strava: 6 * 60 * 1e3,
+      pinterest: 15 * 60 * 1e3,
+      snapchat: 15 * 60 * 1e3,
+      airbnb: 15 * 60 * 1e3
     };
     const ONE_SHOT_STALE_MS = 8 * 60 * 1e3;
     const ONE_SHOT_STALE_MS_BY_PLATFORM = {
@@ -3988,7 +4390,10 @@
       threads: 12e4,
       x: 12e4,
       facebook: 12e4,
-      strava: 9e4
+      strava: 9e4,
+      pinterest: 24e4,
+      snapchat: 3e5,
+      airbnb: 3e5
     };
     function passRestMs(platformId) {
       return PASS_REST_MS_BY_PLATFORM[platformId] || PASS_REST_MS;
