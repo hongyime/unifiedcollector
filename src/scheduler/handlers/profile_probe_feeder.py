@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import time as _time
 
+from src.collectors.bluesky.identity import resolve_and_enqueue_bluesky_candidates
 from src.scheduler.handlers.base import SchedulerContext
 
 logger = logging.getLogger(__name__)
@@ -112,10 +113,8 @@ raw_candidates AS (
 eligible AS (
     SELECT source, username, enqueued_by, seen_at, evidence_rank
     FROM raw_candidates
-    WHERE (
-          (source = 'bluesky' AND username ~ '^(did:plc:[a-z0-9]{10,}|[a-z0-9][a-z0-9.-]{0,125}\.[a-z0-9][a-z0-9.-]{0,125})$')
-          OR (source <> 'bluesky' AND username ~ '^[a-z0-9][a-z0-9._-]{1,79}$')
-      )
+    WHERE source <> 'bluesky'
+      AND username ~ '^[a-z0-9][a-z0-9._-]{1,79}$'
       AND NOT (source = 'pinterest' AND username IN
           ('pin', 'search', 'explore', 'ideas', 'business', 'today', 'login', 'settings', 'help'))
       AND NOT EXISTS (
@@ -153,6 +152,130 @@ FROM inserted
 GROUP BY source
 """
 
+_BLUESKY_CANDIDATES_SQL = r"""
+WITH direct_candidates AS (
+    SELECT
+        lower((regexp_match(
+            dl.url,
+            'bsky\.app/profile/((did:(plc:[a-zA-Z0-9]{10,}|web:[a-zA-Z0-9._:%-]+)|[a-zA-Z0-9][a-zA-Z0-9.-]{0,251}[a-zA-Z0-9]))',
+            'i'
+        ))[1]) AS username,
+        'spider_discovered_links'::text AS enqueued_by,
+        false AS cross_platform,
+        0 AS evidence_rank,
+        dl.discovered_at AS seen_at
+    FROM discovered_links AS dl
+    WHERE lower(dl.domain) ~ '(^|\.)bsky\.app$'
+      AND dl.url ~* 'bsky\.app/profile/((did:(plc:[a-zA-Z0-9]{10,}|web:[a-zA-Z0-9._:%-]+)|[a-zA-Z0-9][a-zA-Z0-9.-]{0,251}[a-zA-Z0-9]))'
+      AND NOT EXISTS (
+          SELECT 1
+          FROM profile_probe_queue AS existing
+          WHERE existing.source = 'bluesky'
+            AND lower(btrim(existing.username, '@')) = lower((regexp_match(
+                dl.url,
+                'bsky\.app/profile/((did:(plc:[a-zA-Z0-9]{10,}|web:[a-zA-Z0-9._:%-]+)|[a-zA-Z0-9][a-zA-Z0-9.-]{0,251}[a-zA-Z0-9]))',
+                'i'
+            ))[1])
+            AND existing.status NOT IN ('404', 'error')
+      )
+),
+failed_queue_candidates AS (
+    SELECT
+        lower(btrim(queue.username, '@')) AS username,
+        COALESCE(queue.enqueued_by, 'previous_bluesky_probe') AS enqueued_by,
+        COALESCE(queue.enqueued_by, '') LIKE 'cross_platform:%' AS cross_platform,
+        1 AS evidence_rank,
+        COALESCE(queue.probed_at, queue.added_at) AS seen_at
+    FROM profile_probe_queue AS queue
+    WHERE queue.source = 'bluesky'
+      AND queue.status IN ('404', 'error')
+      AND queue.username !~* '^did:(plc:[a-z0-9]{10,}|web:[a-z0-9._:%-]+)$'
+),
+social_candidates AS (
+    SELECT
+        lower(btrim(su.username, '@')) AS username,
+        ('cross_platform:' || (array_agg(
+            su.platform
+            ORDER BY CASE su.platform
+                WHEN 'instagram' THEN 0
+                WHEN 'tiktok' THEN 1
+                WHEN 'threads' THEN 2
+                WHEN 'x' THEN 3
+                WHEN 'facebook' THEN 4
+                WHEN 'lemon8' THEN 5
+                WHEN 'youtube' THEN 6
+                WHEN 'github' THEN 7
+                WHEN 'strava' THEN 8
+                WHEN 'telegram' THEN 9
+                ELSE 10
+            END,
+            COALESCE(su.last_seen, su.first_seen) DESC NULLS LAST,
+            su.platform
+        ))[1])::text AS enqueued_by,
+        true AS cross_platform,
+        2 AS evidence_rank,
+        max(COALESCE(su.last_seen, su.first_seen)) AS seen_at
+    FROM social_users AS su
+    WHERE su.username IS NOT NULL
+      AND su.platform NOT IN ('snapchat', 'paypal', 'airbnb', 'bluesky', 'pinterest')
+      AND lower(btrim(su.username, '@')) ~ '^[a-z0-9][a-z0-9._-]{1,79}$'
+      AND NOT EXISTS (
+          SELECT 1
+          FROM profile_probe_queue AS existing
+          WHERE existing.source = 'bluesky'
+            AND lower(btrim(existing.username, '@')) = lower(btrim(su.username, '@'))
+      )
+    GROUP BY lower(btrim(su.username, '@'))
+),
+raw_candidates AS (
+    SELECT username, enqueued_by, cross_platform, evidence_rank, seen_at
+    FROM direct_candidates
+    UNION ALL
+    SELECT username, enqueued_by, cross_platform, evidence_rank, seen_at
+    FROM failed_queue_candidates
+    UNION ALL
+    SELECT username, enqueued_by, cross_platform, evidence_rank, seen_at
+    FROM social_candidates
+),
+deduplicated AS (
+    SELECT DISTINCT ON (username)
+        username, enqueued_by, cross_platform, evidence_rank, seen_at
+    FROM raw_candidates
+    WHERE username IS NOT NULL
+    ORDER BY username, evidence_rank, seen_at DESC NULLS LAST, enqueued_by
+),
+normalized AS (
+    SELECT
+        username,
+        enqueued_by,
+        cross_platform,
+        evidence_rank,
+        seen_at,
+        CASE
+            WHEN username ~* '^did:' THEN username
+            WHEN cross_platform OR position('.' IN username) = 0
+                THEN username || '.bsky.social'
+            ELSE username
+        END AS resolution_handle
+    FROM deduplicated
+),
+uncached AS (
+    SELECT normalized.*
+    FROM normalized
+    WHERE normalized.username ~* '^did:'
+       OR NOT EXISTS (
+           SELECT 1
+           FROM bluesky_handle_resolution_cache AS cache
+           WHERE cache.handle = normalized.resolution_handle
+             AND cache.resolved_at > now() - INTERVAL '7 days'
+       )
+)
+SELECT username, enqueued_by, cross_platform
+FROM uncached
+ORDER BY evidence_rank, seen_at DESC NULLS LAST, username
+LIMIT $1
+"""
+
 
 class ProfileProbeFeederHandler:
     """Periodically seed the profile-only probe queue at a bounded rate."""
@@ -183,11 +306,23 @@ class ProfileProbeFeederHandler:
                 async with conn.transaction():
                     await conn.execute("SET LOCAL statement_timeout = '60s'")
                     rows = await conn.fetch(_FEED_SQL, batch_per_source)
+                    bluesky_candidates = await conn.fetch(
+                        _BLUESKY_CANDIDATES_SQL, batch_per_source,
+                    )
             queued = {row["source"]: row["queued"] for row in rows}
+            bluesky = await resolve_and_enqueue_bluesky_candidates(
+                ctx.pool, bluesky_candidates,
+            )
             logger.info(
-                "profile_probe_feeder: queued=%s batch_per_source=%d",
+                "profile_probe_feeder: queued=%s batch_per_source=%d "
+                "bluesky_resolved=%d bluesky_unresolvable=%d "
+                "bluesky_queued=%d bluesky_deferred=%d",
                 {source: queued.get(source, 0) for source in _SOURCES},
                 batch_per_source,
+                bluesky["resolved"],
+                bluesky["unresolvable"],
+                bluesky["queued"],
+                bluesky["deferred"],
             )
         except Exception:
             logger.warning("profile_probe_feeder failed", exc_info=True)

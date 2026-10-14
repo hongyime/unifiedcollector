@@ -1,7 +1,7 @@
 # Agent State
-Current task: Remove Instagram DM collection from UnifiedCollector.
-Status: Completed and pushed to `main` as `8197d1bd`. The live tables each had 0 rows before the drop migration; both are now absent and the migration is ledgered. Production/dev Compose parsing, extension/frontend builds, Python compilation, and diff checks passed. No containers were restarted.
-Next: No further work under this request; wait for a separate task before starting other collector changes.
+Current task: Fix and verify Bluesky profile collection; commit and push to main.
+Status: Live baseline `bluesky_profiles=0`. The resolver checked 100 candidates at one request/second, cached 98 misses outside the probe queue, and queued only 2 DIDs. The Bluesky probe stored 1 profile row; the other DID returned 404. Seven focused behavior checks plus compilation and diff checks passed; pytest is unavailable. The cache migration is recorded with a matching live checksum.
+Next: The current long-running scheduler/collector images were not rebuilt; normal deployment from main is still needed for ongoing automatic resolution. Preserve the separate in-progress Instagram DM changes in the shared worktree; they were not included in this task.
 
 ## Prior handoff history
 

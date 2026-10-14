@@ -1,17 +1,15 @@
 """Bluesky profile probe (Do Next #3).
 
-Bluesky has a proper public API. Two-hop resolve:
-1. https://bsky.app/profile/<username> to extract the did:plc:... DID.
-2. https://public.api.bsky.app/xrpc/app.bsky.actor.getProfile?actor=<did>
-   for the structured profile.
-
-Source: tools.myosint.training "Bluesky ID to Profile" + "Bluesky ID Revealer".
+The profile feeder resolves usernames with ``com.atproto.identity.resolveHandle``
+and queues the returned DID. This collector calls
+``app.bsky.actor.getProfile`` with that DID and stores the structured profile.
 """
 from __future__ import annotations
 
 import json
 import logging
 import re
+from datetime import datetime, timezone
 
 import httpx
 
@@ -20,6 +18,19 @@ from src.core.profile_only_collector import ProfileOnlyCollector, ProfileResult
 logger = logging.getLogger(__name__)
 
 _DID_RE = re.compile(r"(did:plc:[a-z0-9]+)", re.IGNORECASE)
+
+
+def _parse_indexed_at(value: object) -> datetime | None:
+    """Convert the API's RFC 3339 indexedAt string for Postgres timestamptz."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 class BlueskyCollector(ProfileOnlyCollector):
@@ -75,7 +86,7 @@ class BlueskyCollector(ProfileOnlyCollector):
                 "follower_count": payload.get("followersCount"),
                 "following_count": payload.get("followsCount"),
                 "posts_count": payload.get("postsCount"),
-                "indexed_at": payload.get("indexedAt"),
+                "indexed_at": _parse_indexed_at(payload.get("indexedAt")),
             },
             raw_payload=payload,
         )
