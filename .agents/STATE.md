@@ -1,6 +1,6 @@
 # Agent State
 Current task: Complete the UnifiedCollector Full Plan (2026-10-14), one phase/commit at a time, including the later verified-account, follow-priority, and one-tab requirements.
-Status (2026-10-15 23:50 UTC): Phase 1 and the Beeper history verification pass. Search, Telegram discussion visits, Lemon8 extension capture, Pinterest pin detail coverage, Snapchat highlights, and live reload/queue checks remain open. The current tree is on `main` at `2646d5e5` and has uncommitted extension, bridge, native collector, and checklist changes. Extension v1.23.110 is built but live heartbeats still show v1.23.108.
+Status (2026-10-15 23:54 UTC): Phase 1 and Beeper history verification pass. Social preference work (explicit badge filtering, followed-target priority, and one-tab cleanup) is committed and pushed as `e1c72014`; source/runtime validation remains. Search, Telegram discussion visits, Lemon8 extension capture, Pinterest pin detail coverage, Snapchat highlights, and live reload/queue checks remain open. Extension v1.23.110 is built but live heartbeats still show v1.23.108.
 
 ## Agreed operating rules
 
@@ -20,7 +20,7 @@ Status (2026-10-15 23:50 UTC): Phase 1 and the Beeper history verification pass.
 - [~] Phase 5a Pinterest: 432 boards and 137 pins. 136 pins have titles, 1 has a description, and none have destination links or repin/comment counts. Implement/verify the missing pin detail fields.
 - [~] Phase 5b Snapchat: 2,205 profiles, 9 stories, and 24 Spotlights; `snapchat_highlights` has 0 rows. Verify whether public highlights are discoverable and persist them when available.
 - [~] Phase 5c Airbnb: 4 listings, 6 hosts, and 14 reviews; listing descriptions/photos/amenities and review text are present on most rows. Confirm the direct GraphQL path and finish field/live verification.
-- [~] Later user requirements: explicit badge filters and followed-target priority are local, statically validated, and not yet live-confirmed. Verify queue order and fresh captures after rollout; retain historical rows.
+- [~] Later user requirements: explicit badge filters and followed-target priority are committed/pushed in `e1c72014`, statically validated, and not yet live-confirmed. Verify queue order and fresh captures after rollout; retain historical rows.
 - [~] One tab per platform: source/build includes normalized `www`/bare matching, expanded-tab reset, and duplicate cleanup. Live version is still v1.23.108; reload v1.23.110 and audit tab counts.
 - [ ] After all phase gates clear, run a fresh clean 15-minute soak and refresh the per-container rolling 12-hour report; write `/tmp/unifiedcollector-plan-complete-20261014.md`.
 
