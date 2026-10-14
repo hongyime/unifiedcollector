@@ -303,12 +303,10 @@ from src.dashboard.api.social import (  # noqa: E402,F401
     _SOCIAL_HTML,
 )
 
-# DM routes (/instagram/dms/*, /tiktok/dms/*, /dm/telemetry) extracted to
+# TikTok DM routes and telemetry extracted to
 # api/dm.py during PERF-002 sub-plan 4A step 16 (cluster 5).
 from src.dashboard.api.dm import (  # noqa: E402,F401
     router as _dm_router,
-    list_ig_dm_threads,
-    ig_dm_thread_messages,
     list_tt_dm_threads,
     tt_dm_thread_messages,
     dm_telemetry,
@@ -2358,12 +2356,7 @@ def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: 
             detail = f"{detail} Last seen {age_text} ago."
         if issue.get("kind") == "hook_stale":
             platform = str(issue.get("platform") or source or "this platform").lower()
-            if platform == "instagram":
-                hook_target = "the Instagram Direct inbox tab"
-            elif platform == "tiktok":
-                hook_target = "the TikTok Messages tab"
-            else:
-                hook_target = "the platform messaging tab"
+            hook_target = "the TikTok Messages tab" if platform == "tiktok" else "the platform messaging tab"
             if manage_url:
                 next_action = (
                     f"Open or focus {hook_target}, then check for a fresh DM hook heartbeat. "
@@ -3844,7 +3837,7 @@ def _thumbnail_placeholder(label: str, detail: str = "") -> Response:
 
 # ── WhatsApp: Chats & messages (Baileys bridge → RabbitMQ → collector) ──
 #
-# Same two-pane pattern as /instagram/dms/threads + /instagram/dms/thread/{id}
+# Same two-pane pattern as /tiktok/dms/threads + /tiktok/dms/thread/{id}
 # but backed by whatsapp_chats + whatsapp_messages + whatsapp_users. The path
 # param on the message endpoint is the platform_chat_id (JID e.g.
 # 6591234567@s.whatsapp.net or 120363xxx@g.us) — chat_id in the DB is a uuid
@@ -3856,9 +3849,7 @@ def _thumbnail_placeholder(label: str, detail: str = "") -> Response:
 
 
 
-# ── Instagram: DMs (captured ban-safely by the extension observing direct_v2) ──
-
-# DM routes (/instagram/dms/*, /tiktok/dms/*, /dm/telemetry) extracted to
+# TikTok DM routes and telemetry extracted to
 # api/dm.py during PERF-002 4A step 16 (cluster 5).
 
 # ── WhatsApp: Links ──

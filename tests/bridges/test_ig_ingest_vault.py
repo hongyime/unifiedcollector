@@ -1494,6 +1494,19 @@ def test_dm_hook_heartbeat_fails_open_when_db_is_stuck(monkeypatch):
     assert payload["reason"] == "db_write_timeout"
 
 
+def test_instagram_dm_collection_endpoint_is_gone_and_legacy_samples_are_rejected():
+    from src.bridges.ig_ingest.app import build_app
+
+    app = build_app()
+    paths = {route.resource.canonical for route in app.router.routes()}
+    assert "/social/dms" not in paths
+
+    req = _FakeRequest({}, {"platform": "instagram", "b64": "AAAA"})
+    resp = asyncio.run(ig_ingest.dm_sample_handler(req))
+    assert resp.status == 400
+    assert json.loads(resp.text)["error"] == "unsupported_platform"
+
+
 def test_ig_cooldown_fails_open_when_db_is_stuck(monkeypatch):
     monkeypatch.setattr(ig_ingest, "IG_COOLDOWN_READ_TIMEOUT_SECONDS", 0.01)
     req = _FakeRequest(

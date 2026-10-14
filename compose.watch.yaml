@@ -1,5 +1,5 @@
 # Explicit source-sync overlay for SMB/remote Docker hosts. No rebuild actions.
-x-watch-ignore: &watch-ignore ["**/.[eE][nN][vV]*", "**/*[sS][eE][cC][rR][eE][tT]*", "**/*[cC][rR][eE][dD][eE][nN][tT][iI][aA][lL]*", "**/*.[pP][eE][mM]", "**/*.[kK][eE][yY]", "**/*.[pP]12", "**/*.[pP][fF][xX]", "**/__pycache__/**", "**/*.pyc", "**/node_modules/**", "**/.venv/**", "**/dist/**", "**/build/**", "**/requirements*.txt", "**/requirements.lock", "**/package.json", "**/package-lock.json", "**/pyproject.toml", "**/uv.lock", "!collectors/instagram_dm/credentials.py"]
+x-watch-ignore: &watch-ignore ["**/.[eE][nN][vV]*", "**/*[sS][eE][cC][rR][eE][tT]*", "**/*[cC][rR][eE][dD][eE][nN][tT][iI][aA][lL]*", "**/*.[pP][eE][mM]", "**/*.[kK][eE][yY]", "**/*.[pP]12", "**/*.[pP][fF][xX]", "**/__pycache__/**", "**/*.pyc", "**/node_modules/**", "**/.venv/**", "**/dist/**", "**/build/**", "**/requirements*.txt", "**/requirements.lock", "**/package.json", "**/package-lock.json", "**/pyproject.toml", "**/uv.lock"]
 services:
   db-init:
     volumes: !override []
@@ -159,20 +159,6 @@ services:
         initial_sync: true
         ignore: *watch-ignore
   collector_instagram:
-    volumes: !override ["dev-data:/app/data", "dev-sessions:/app/sessions"]
-    develop:
-      watch:
-      - action: sync
-        path: ./src
-        target: /app/src
-        initial_sync: true
-        ignore: *watch-ignore
-      - action: sync
-        path: ./config
-        target: /app/config
-        initial_sync: true
-        ignore: *watch-ignore
-  collector_instagram_dm:
     volumes: !override ["dev-data:/app/data", "dev-sessions:/app/sessions"]
     develop:
       watch:

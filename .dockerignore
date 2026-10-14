@@ -86,4 +86,3 @@ research/
 **/*.[pP][fF][xX]
 
 # Functional tracked source; private credential data remains excluded.
-!src/collectors/instagram_dm/credentials.py

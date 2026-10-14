@@ -134,7 +134,7 @@ from .middleware import (  # noqa: E402,F401
 # via ``ig_ingest._BROWSER_CONTENT_HINT_CACHE``, etc.
 _BROWSER_CONTENT_HINT_CACHE: dict[str, tuple[float, dict]] = {}
 _BROWSER_CONTENT_HINT_INFLIGHT: set[str] = set()
-_DM_PROBE_TARGET_TABLES = {platform: ["dm_probe_log"] for platform in KNOWN_PLATFORMS}
+_DM_PROBE_TARGET_TABLES = {"tiktok": ["dm_probe_log"]}
 
 _BROWSER_CAPTURE_TARGET_TABLES = {
     "profile": {
@@ -151,16 +151,10 @@ _BROWSER_CAPTURE_TARGET_TABLES = {
     "comments": {
         "instagram": ["instagram_comments"],
     },
-    "dms": {
-        "instagram": ["instagram_dm_thread", "instagram_dm"],
-    },
     "dm_probe": _DM_PROBE_TARGET_TABLES,
     "dm_sample": _DM_PROBE_TARGET_TABLES,
     "dm_frame": _DM_PROBE_TARGET_TABLES,
-    "dm_decoded": {
-        "instagram": ["instagram_dm_thread", "instagram_dm"],
-        "tiktok": ["tiktok_dm_thread", "tiktok_dm"],
-    },
+    "dm_decoded": {"tiktok": ["tiktok_dm_thread", "tiktok_dm"]},
     "strava_streams": {
         "strava": ["strava_activities", "strava_gps_streams"],
     },
@@ -3031,74 +3025,6 @@ async def users_handler(request):
     return _cors(web.json_response({"recorded": n}))
 
 
-async def _record_dms(pool, threads, owner) -> int:
-    """Persist Instagram DM threads + messages observed by the extension."""
-    if not threads:
-        return 0
-    owner_id = str((owner or {}).get("id") or "")
-    owner_acct = (owner or {}).get("username") or owner_id or None
-    n = 0
-    async with pool.acquire() as conn:
-        for th in threads:
-            if not isinstance(th, dict):
-                continue
-            tid = str(th.get("thread_id") or th.get("thread_v2_id") or "")
-            if not tid:
-                continue
-            users = th.get("users") or []
-            umap = {str(u.get("pk") or u.get("id") or ""): (u.get("username") or None) for u in users if isinstance(u, dict)}
-            parts = [v or k for k, v in umap.items()]
-            try:
-                await conn.execute(
-                    "INSERT INTO instagram_dm_thread (thread_id, title, participants, owner_account, last_activity, updated_at) "
-                    "VALUES ($1,$2,$3,$4, now(), now()) "
-                    "ON CONFLICT (thread_id) DO UPDATE SET title=COALESCE(EXCLUDED.title, instagram_dm_thread.title), "
-                    "participants=EXCLUDED.participants, owner_account=COALESCE(EXCLUDED.owner_account, instagram_dm_thread.owner_account), updated_at=now()",
-                    tid, th.get("thread_title") or th.get("title"), parts, owner_acct)
-            except Exception:
-                logger.debug("dm thread upsert failed %s", tid, exc_info=True)
-            for it in (th.get("items") or []):
-                if not isinstance(it, dict):
-                    continue
-                mid = str(it.get("item_id") or it.get("id") or "")
-                if not mid:
-                    continue
-                sender = str(it.get("user_id") or "")
-                # text lives in .text (text items) or nested link/clip/etc — best-effort.
-                txt = it.get("text")
-                if not txt and isinstance(it.get("link"), dict):
-                    txt = it["link"].get("text")
-                ts = it.get("timestamp")
-                try:
-                    ts_s = float(ts) / 1_000_000 if ts and float(ts) > 1e14 else (float(ts) if ts else None)
-                except Exception:
-                    ts_s = None
-                try:
-                    await conn.execute(
-                        "INSERT INTO instagram_dm (message_id, thread_id, sender_id, sender_username, text, item_type, \"timestamp\", is_from_me, owner_account, collected_at) "
-                        "VALUES ($1,$2,$3,$4,$5,$6, CASE WHEN $7::float8 IS NULL THEN NULL ELSE to_timestamp($7) END, $8, $9, now()) "
-                        "ON CONFLICT (message_id) DO NOTHING",
-                        mid, tid, sender, umap.get(sender), txt, it.get("item_type"),
-                        ts_s, bool(owner_id and sender == owner_id), owner_acct)
-                    n += 1
-                except Exception:
-                    logger.debug("dm item upsert failed %s", mid, exc_info=True)
-    return n
-
-
-async def dms_handler(request):
-    body = await _safe_json(request)
-    pool = request.app["pool"]
-    platform = _norm_platform(body.get("platform") or "instagram")
-    await _archive_browser_capture(pool, platform, "dms", body)
-    try:
-        n = await _record_dms(pool, body.get("threads") or [], body.get("owner"))
-        return _cors(web.json_response({"recorded": n}))
-    except Exception:
-        logger.exception("dms handler failed")
-        return _cors(web.json_response({"recorded": 0, "error": "db"}, status=500))
-
-
 async def _dm_probe_log_write(pool, platform, event_type, body, frame_size=None):
     """Best-effort write to dm_probe_log for the dashboard telemetry panel
     (P1.2). Swallows every error — telemetry must never break capture.
@@ -3271,92 +3197,6 @@ async def _upsert_tt_decoded(pool, owner, threads, messages):
                 msg_n += 1
     except Exception:
         logger.exception("tt dm_decoded upsert failed")
-        raise
-    return thread_n, msg_n
-
-
-async def _upsert_ig_decoded(pool, owner, threads, messages):
-    """Instagram DM upsert into instagram_dm{,_thread}. The wire path is
-    intentionally different from TikTok: IG uses MQTT-over-WSS + Thrift on
-    edge-chat.instagram.com/chat, AND a GraphQL/direct_v2 HTTP path the
-    extension already observes. Both paths funnel through here.
-
-    Scaffolding today — no real MQTT/Thrift decoder in inject.js, so most IG
-    decoded payloads will come from the GraphQL harvester (see extension/
-    inject.js:harvestIGGraphQL) which extracts inbox/thread structures from
-    /api/graphql/ and /graphql/query/ responses.
-    """
-    thread_n = 0
-    msg_n = 0
-    try:
-        async with pool.acquire() as conn:
-            for t in threads:
-                if not isinstance(t, dict):
-                    continue
-                tid = (t.get("thread_id") or t.get("conversation_id") or "").strip()
-                if not tid:
-                    continue
-                await conn.execute(
-                    """
-                    INSERT INTO instagram_dm_thread
-                        (thread_id, title, participants, owner_account, last_activity)
-                    VALUES ($1, $2, $3, $4, $5)
-                    ON CONFLICT (thread_id) DO UPDATE SET
-                        title         = COALESCE(EXCLUDED.title,
-                                                 instagram_dm_thread.title),
-                        participants  = COALESCE(EXCLUDED.participants,
-                                                 instagram_dm_thread.participants),
-                        owner_account = COALESCE(EXCLUDED.owner_account,
-                                                 instagram_dm_thread.owner_account),
-                        last_activity = GREATEST(EXCLUDED.last_activity,
-                                                 instagram_dm_thread.last_activity),
-                        updated_at    = now()
-                    """,
-                    tid,
-                    (t.get("title") or None),
-                    (t.get("participants") or None),
-                    (t.get("owner_account") or owner or None),
-                    _parse_ts_ms(t.get("last_activity_ms")),
-                )
-                thread_n += 1
-            for m in messages:
-                if not isinstance(m, dict):
-                    continue
-                mid = str(m.get("message_id") or "").strip()
-                tid = (m.get("thread_id") or m.get("conversation_id") or "").strip()
-                if not mid or not tid:
-                    continue
-                sender_id = m.get("sender_id")
-                sender_id_s = str(sender_id) if sender_id is not None else None
-                # is_from_me: prefer client hint (extension had cookie-derived
-                # ds_user_id), fall back to sender_id vs owner match.
-                if isinstance(m.get("is_from_me"), bool):
-                    is_from_me = m["is_from_me"]
-                else:
-                    is_from_me = bool(owner) and sender_id_s == owner
-                await conn.execute(
-                    """
-                    INSERT INTO instagram_dm
-                        (message_id, thread_id, sender_id, sender_username,
-                         text, item_type, "timestamp", is_from_me, owner_account)
-                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-                    ON CONFLICT (message_id) DO UPDATE SET
-                        text            = COALESCE(EXCLUDED.text, instagram_dm.text),
-                        item_type       = COALESCE(EXCLUDED.item_type, instagram_dm.item_type),
-                        "timestamp"     = COALESCE(EXCLUDED."timestamp", instagram_dm."timestamp"),
-                        sender_username = COALESCE(EXCLUDED.sender_username, instagram_dm.sender_username)
-                    """,
-                    mid, tid, sender_id_s,
-                    m.get("sender_username"),
-                    m.get("text"),
-                    m.get("item_type"),
-                    _parse_ts_ms(m.get("timestamp_ms") or m.get("create_time_ms")),
-                    is_from_me,
-                    owner or None,
-                )
-                msg_n += 1
-    except Exception:
-        logger.exception("ig dm_decoded upsert failed")
         raise
     return thread_n, msg_n
 

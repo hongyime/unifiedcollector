@@ -80,17 +80,15 @@ pwsh scripts/start-scraper-chrome-cdp.ps1
 # Bring up the stack
 docker compose -f docker/docker-compose.yml up -d
 
-# collector_spiderfoot starts with that command. Instagram DM stays opt-in:
-# docker compose -f docker/docker-compose.yml --profile instagram-dm up -d
+# collector_spiderfoot starts with that command.
 
 # Register host-side scheduled tasks (browser autorecover + tab maintenance)
 pwsh scripts/register-browser-autorecover-task.ps1
 pwsh scripts/register-browser-maintenance-task.ps1
 ```
 
-Success looks like `docker compose ps` reporting all 28 default services `Up`
-with `(healthy)` on the 22 that define healthchecks (`instagram-dm` stays
-opt-in), and
+Success looks like `docker compose ps` reporting all 28 services `Up`
+with `(healthy)` on the 22 that define healthchecks, and
 `curl http://localhost:8700/health` returning `{"status":"ok",...}`.
 
 ## Environment Configuration
@@ -140,7 +138,6 @@ The full variable catalogue (names, purposes) lives in the tracked
 | `DB_IDLE_IN_TRANSACTION_TIMEOUT_MS` | No | `300000` | Postgres reaps IIT sessions past this |
 | `RECON_ALLOWLIST` | No | empty | Comma-separated domains in scope for enrichment |
 | `RECON_ALLOW_UNSCOPED` | No | `0` | `1` to allow OSINT outside allowlist (use with care) |
-| `COMPOSE_PROFILES` | No | empty | Set to `instagram-dm` to bring up the DM collector |
 
 The full list (240+ variables) is in `.env.example` +
 `docker/env/*.env.example`.
@@ -562,6 +559,4 @@ docker compose --env-file .env.dev -f compose.dev.yaml -f compose.watch.yaml exe
 
 The same strict initializer is used on first startup: deferred/empty schema
 initialization fails visibly, and its database pool closes even after an error.
-It starts no collectors, schedulers or notification jobs. The existing functional
-`src/collectors/instagram_dm/credentials.py` module remains source through an exact
-filename exception; its contents were not inspected in the privacy audit.
+It starts no collectors, schedulers or notification jobs.

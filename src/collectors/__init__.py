@@ -10,7 +10,6 @@ from .whatsapp import WhatsappCollector
 from .search import SearchCollector
 from .exposure import ExposureCollector
 from .beeper import BeeperCollector
-from .instagram_dm import InstagramDmCollector
 
 COLLECTORS = {
     "github": GithubCollector,
@@ -25,7 +24,6 @@ COLLECTORS = {
     "search": SearchCollector,
     "exposure": ExposureCollector,
     "beeper": BeeperCollector,
-    "instagram_dm": InstagramDmCollector,
 }
 
 ALL_COLLECTORS = list(COLLECTORS.values())

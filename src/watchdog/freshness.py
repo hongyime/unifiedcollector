@@ -939,6 +939,7 @@ async def _dm_hook_tick(db: asyncpg.Connection) -> None:
             SELECT platform,
                    extract(epoch FROM now() - max(last_seen)) AS age
             FROM dm_hook_heartbeat
+            WHERE platform = 'tiktok'
             GROUP BY platform
             """
         )

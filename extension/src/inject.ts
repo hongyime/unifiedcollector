@@ -296,39 +296,7 @@
   const apiRe = /graphql|\/api\/v1\//;  // IG/Threads /api/graphql + X /i/api/graphql
 
   const tkListRe = /\/api\/user\/list\//;  // TikTok follower/following modal
-  const dmRe = /\/direct_v2\/(inbox|threads|thread)/;  // IG DMs (observe-only)
   const stravaStreamsRe = /\/(?:api\/v3\/)?activities\/(\d+)\/streams(?:[?#/]|$)/;
-
-  // Investigation probe: IG DMs weren't reaching the bridge via the direct_v2
-  // HTTP path, so log EVERY IG url that mentions "direct" (once per distinct
-  // path) to learn the real endpoint, and — since IG likely pushes DMs over a
-  // WebSocket (edge-chat MQTT) like TikTok's frontier WS — the WS hook below now
-  // covers instagram too. All observe-only (no extra requests).
-  const _probedUrls = new Set();
-  function probeDmUrl(url) {
-    try {
-      if (!/direct/i.test(url)) return;
-      const key = String(url).split("?")[0];
-      if (_probedUrls.has(key)) return;
-      _probedUrls.add(key);
-      window.postMessage({ __uc: true, type: "dm_probe", platform, transport: "http", url: key.slice(0, 300) }, "*");
-    } catch (e) {}
-  }
-
-  // Parse IG DM inbox/thread responses the page already fetched -> emit messages.
-  // Ban-safe: no extra requests. owner = ds_user_id so ig_ingest can set is_from_me.
-  function harvestDMs(text) {
-    if (!text || text.length > 8_000_000) return;
-    let json; try { json = JSON.parse(text); } catch (e) { return; }
-    let threads = [];
-    if (json.inbox && Array.isArray(json.inbox.threads)) threads = json.inbox.threads;
-    else if (json.thread) threads = [json.thread];
-    else if (Array.isArray(json.threads)) threads = json.threads;
-    if (!threads.length) return;
-    let ownerId = null;
-    try { ownerId = (document.cookie.match(/ds_user_id=(\d+)/) || [])[1] || null; } catch (e) {}
-    window.postMessage({ __uc: true, type: "dms", platform: "instagram", owner: { id: ownerId }, threads }, "*");
-  }
 
   const _emittedStravaStreams = new Set();
   function _streamData(container, key) {
@@ -405,55 +373,6 @@
     } catch (e) {}
   }
 
-  // Modern IG web has been migrating DM inbox/thread fetches off /direct_v2/
-  // to /api/graphql/ (and /graphql/query/). harvestDMs above only fires on
-  // direct_v2 URLs. This function heuristically extracts DM data from ANY
-  // instagram response body that looks like it contains it — checks for a
-  // couple of guaranteed DM structural markers before shipping. Emits a
-  // dm_probe on match so we log which URLs are actually carrying the data,
-  // then a dms message for the harvester downstream.
-  //
-  // Investigation phase — will graduate to a real per-URL harvester once
-  // we see which query names IG uses. Bounded by response-body size and
-  // marker checks to avoid processing every GraphQL response on the page.
-  const igGraphQLRe = /\/(?:api\/graphql|graphql\/query|ajax\/route-definition|ajax\/bulk-route-definitions)/;
-  function harvestIGGraphQL(url, text) {
-    try {
-      if (!text || text.length > 8_000_000) return;
-      // Cheap marker check — GraphQL responses that DON'T mention any DM
-      // structure are the vast majority; skip them without JSON-parsing.
-      if (!/"thread_id"|"direct_message"|"conversation_id"|"inbox"/.test(text)) return;
-      let json; try { json = JSON.parse(text); } catch (e) { return; }
-      // Log the URL as a probe so we can inventory which GraphQL query
-      // names IG uses for DMs. Cheap — no DB write yet.
-      window.postMessage({ __uc: true, type: "dm_probe", platform: "instagram",
-        transport: "graphql", url: url.slice(0, 300), frame_kind: "json",
-        frame_size: text.length }, "*");
-      // Best-effort structural extraction — the exact GraphQL response shape
-      // varies by query and version. Handle a few known containers before
-      // giving up; leave the full text as a follow-up sample if none match.
-      let threads = null;
-      const roots = [json, json && json.data, json && json.viewer,
-                     json && json.data && json.data.viewer];
-      for (const root of roots) {
-        if (!root) continue;
-        if (root.inbox && Array.isArray(root.inbox.threads))
-          threads = root.inbox.threads;
-        else if (root.direct_inbox && Array.isArray(root.direct_inbox.threads))
-          threads = root.direct_inbox.threads;
-        else if (root.thread) threads = [root.thread];
-        else if (Array.isArray(root.threads)) threads = root.threads;
-        if (threads && threads.length) break;
-      }
-      if (!threads || !threads.length) return;
-      let ownerId = null;
-      try { ownerId = (document.cookie.match(/ds_user_id=(\d+)/) || [])[1] || null; }
-      catch (e) {}
-      window.postMessage({ __uc: true, type: "dms", platform: "instagram",
-        owner: { id: ownerId }, threads }, "*");
-    } catch (e) {}
-  }
-
   const origFetch = window.fetch;
   window.fetch = function (...args) {
     const p = origFetch.apply(this, args);
@@ -461,15 +380,6 @@
       const url = String((args[0] && (args[0].url || args[0])) || "");
       if (platform === "tiktok" && tkListRe.test(url)) {
         p.then((r) => { try { r.clone().text().then((t) => harvestTikTokList(url, t)).catch(() => {}); } catch (e) {} }).catch(() => {});
-      } else if (platform === "instagram" && dmRe.test(url)) {
-        p.then((r) => { try { r.clone().text().then(harvestDMs).catch(() => {}); } catch (e) {} }).catch(() => {});
-      } else if (platform === "instagram" && /direct/i.test(url)) {
-        probeDmUrl(url);  // investigation: a direct URL that dmRe didn't match
-        p.then((r) => { try { r.clone().text().then(harvestDMs).catch(() => {}); } catch (e) {} }).catch(() => {});
-      } else if (platform === "instagram" && igGraphQLRe.test(url)) {
-        // Modern IG web DM path — investigate whether these responses
-        // contain the inbox/thread data direct_v2 used to serve.
-        p.then((r) => { try { r.clone().text().then((t) => harvestIGGraphQL(url, t)).catch(() => {}); } catch (e) {} }).catch(() => {});
       } else if (platform === "strava" && stravaStreamsRe.test(url)) {
         p.then((r) => { try { r.clone().text().then((t) => harvestStravaStreams(url, t, r.status)).catch(() => {}); } catch (e) {} }).catch(() => {});
       } else if (apiRe.test(url)) {
@@ -492,20 +402,6 @@
         this.addEventListener("load", function () {
           try { if (typeof this.responseText === "string") harvestTikTokList(url, this.responseText); } catch (e) {}
         });
-      } else if (platform === "instagram" && dmRe.test(url)) {
-        this.addEventListener("load", function () {
-          try { if (typeof this.responseText === "string") harvestDMs(this.responseText); } catch (e) {}
-        });
-      } else if (platform === "instagram" && /direct/i.test(url)) {
-        probeDmUrl(url);  // investigation: a direct URL that dmRe didn't match
-        this.addEventListener("load", function () {
-          try { if (typeof this.responseText === "string") harvestDMs(this.responseText); } catch (e) {}
-        });
-      } else if (platform === "instagram" && igGraphQLRe.test(url)) {
-        // XHR-path mirror of the fetch-path GraphQL harvester above.
-        this.addEventListener("load", function () {
-          try { if (typeof this.responseText === "string") harvestIGGraphQL(url, this.responseText); } catch (e) {}
-        });
       } else if (platform === "strava" && stravaStreamsRe.test(url)) {
         this.addEventListener("load", function () {
           try { if (typeof this.responseText === "string") harvestStravaStreams(url, this.responseText, this.status); } catch (e) {}
@@ -519,17 +415,8 @@
     return OrigSend.apply(this, arguments);
   };
 
-  // ── DM investigation (#38): observe-only WebSocket hook ──────────────────
-  // Neither TikTok nor Instagram deliver realtime DMs over the JSON HTTP paths
-  // the fetch/XHR hooks watch. TikTok uses a "frontier" WS (wss://im-ws-…/ws/…,
-  // binary protobuf); Instagram uses an edge-chat MQTT WS (wss://edge-chat.
-  // instagram.com/chat, binary). This wraps WebSocket (passive — we send
-  // nothing, so it stays ban-safe) and, per distinct socket, (a) captures any
-  // JSON frames as `<platform>_dm`, and (b) emits a one-time `dm_probe`
-  // describing binary frames so we can confirm the wire format and add a
-  // decoder later (#35). We probe ALL sockets on these platforms so we don't
-  // miss the DM socket by guessing its URL.
-  if (platform === "tiktok" || platform === "instagram") {
+  // TikTok DM observation hook. It passively decodes frames on TikTok's frontier socket.
+  if (platform === "tiktok") {
     // Keep the liveness pulse outside the descriptor/proxy setup below. If a
     // site bundle changes window.WebSocket in a way we do not expect, the
     // watchdog should still learn that the page-world hook loaded.
@@ -559,11 +446,9 @@
         } catch (e) { return null; }
       })();
       const _wsProbed = new Set();
-      // The two real DM sockets (edge-chat MQTT for IG, im-ws frontier for
-      // TikTok). We only raw-sample frames on THESE (not the chatty keepalive
-      // gateway sockets), above a size threshold (skip 1-4B pings), capped per
-      // socket, so I can confirm the payload format and build a decoder (#35).
-      const _dmSockRe = /edge-chat\.instagram\.com\/chat|im-ws[^/]*\.tiktok\.com\/ws/i;
+      // Only sample frames on TikTok's frontier socket, above a size
+      // threshold and with a per-socket cap.
+      const _dmSockRe = /im-ws[^/]*\.tiktok\.com\/ws/i;
       const _sampleCount = new Map();
       // SAMPLE_MAX was originally 6 (~"confirm the wire format is protobuf"
       // fits in 6 handshake frames). But TikTok's frontier socket opens with
@@ -576,15 +461,6 @@
       // per platform, we can afford a much looser per-session cap; the
       // 24-byte SAMPLE_MIN_BYTES floor still skips MQTT/heartbeat pings.
       const SAMPLE_MAX = 200, SAMPLE_MIN_BYTES = 24;
-      // IG-specific min bytes: IG's edge-chat MQTT sends CONNACK/PING at
-      // 2-4B and legitimate small PUBLISH control frames at 5-15B. Setting
-      // the floor to 8 catches those without pulling in every PING; sample
-      // rotation still bounds disk. Zero IG samples have crossed 24B in
-      // ~10 sockets of observed traffic so far — either IG's realtime DM
-      // content flows via GraphQL (see harvestIGGraphQL below) instead of
-      // MQTT, or the real DM PUBLISH frames are on a topic we haven't
-      // observed yet. Lower threshold lets us LEARN which is true.
-      const IG_SAMPLE_MIN_BYTES = 8;
       // P1.3: WS-hook heartbeat counters. shipSample/probe increment these;
       // _postDmHeartbeat emits them to background.js for /social/dm-heartbeat.
       function abToB64(buf) {
@@ -596,8 +472,7 @@
         try {
           const n = _sampleCount.get(key) || 0;
           if (n >= SAMPLE_MAX || !buf) return;
-          const minBytes = platform === "instagram" ? IG_SAMPLE_MIN_BYTES : SAMPLE_MIN_BYTES;
-          if (buf.byteLength < minBytes) return;
+          if (buf.byteLength < SAMPLE_MIN_BYTES) return;
           _sampleCount.set(key, n + 1);
           _hookSamples++;
           window.postMessage({ __uc: true, type: "dm_sample", platform,
@@ -803,36 +678,6 @@
         } catch (e) { return ""; }
       }
 
-      // IG DM decoder — scaffold. Real implementation needs MQTT frame
-      // parsing (protocol level: CONNECT/CONNACK/PUBLISH/etc.) followed by
-      // Thrift body decode for the PUBLISH payloads that carry inbox
-      // events. Kept as a stub returning null so the WS-hook pipeline is
-      // plumbed end-to-end for IG the moment the decoder implementation
-      // lands. Reference: github.com/mautrix/meta messagix/mqtt for the
-      // canonical modern IG MQTT dialect + Thrift schemas.
-      //
-      // Empirical observations (from 10 edge-chat sessions probed so far):
-      //   * every observed frame is ≤ 4B — CONNACK (0x20 0x02 0x00 0x00) +
-      //     PINGRESP (0xD0 0x00). No PUBLISH frames >= 24B have been seen.
-      //   * strong hypothesis: IG's web client fetches actual DM content
-      //     via /api/graphql/ or /graphql/query/ rather than pushing over
-      //     the MQTT edge-chat socket. See harvestIGGraphQL below.
-      function _igDecode(_buf) {
-        // Intentional no-op. When ready to implement, expected return shape
-        // is { threads: [{thread_id, title, participants, last_activity_ms}],
-        //     messages: [{message_id, thread_id, sender_id, sender_username,
-        //     text, item_type, timestamp_ms, is_from_me}] } — matches the
-        // _upsert_ig_decoded shape in src/bridges/ig_ingest.py.
-        return null;
-      }
-      // IG owner UID lives in the ds_user_id cookie, NOT the WS URL query
-      // string. Read via document.cookie in the page context.
-      function _extractOwnerIG() {
-        try {
-          const m = (document.cookie || "").match(/(?:^|;\s*)ds_user_id=(\d+)/);
-          return m ? m[1] : "";
-        } catch (e) { return ""; }
-      }
       function _frameKind(d) {
         try {
           if (d instanceof ArrayBuffer) return "arraybuffer";
@@ -860,15 +705,7 @@
                 threads: decoded.threads, messages: decoded.messages,
               }, "*");
             }
-          } else if (platform === "instagram" && buf.byteLength >= IG_SAMPLE_MIN_BYTES) {
-            const decoded = _igDecode(buf);
-            if (decoded) {
-              window.postMessage({
-                __uc: true, type: "dm_decoded", platform,
-                owner: _extractOwnerIG(),
-                threads: decoded.threads, messages: decoded.messages,
-              }, "*");
-            }
+
           }
         } catch (e) {}
       }

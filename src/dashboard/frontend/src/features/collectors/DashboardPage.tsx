@@ -984,7 +984,7 @@ export function DashboardPage() {
         <div className="mb-4">
           <h2 className="text-xs uppercase tracking-wider text-text-muted">Messaging Coverage</h2>
           <p className="mt-1 text-xs text-text-muted">
-            Telegram and WhatsApp native collectors are canonical. Beeper remains a mirror/backstop for those networks and is canonical for Discord, Slack, LinkedIn, Signal, Instagram DMs, and Beeper-only rooms.
+            Telegram and WhatsApp native collectors are canonical. Beeper remains a mirror/backstop for those networks and is canonical for Discord, Slack, LinkedIn, Signal, and Beeper-only rooms.
           </p>
         </div>
         <DataTable data={messagingCoverage ?? []} columns={messagingColumns} />

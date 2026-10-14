@@ -35,5 +35,5 @@ async def test_set_active_combo_never_touches_messaging_sources():
             return "UPDATE 0"
 
     await tm_probe._set_active_combo(_Conn(), ["facebook"])
-    for msg in ("telegram", "beeper", "whatsapp", "instagram_dm", "search", "website"):
+    for msg in ("telegram", "beeper", "whatsapp", "search", "website"):
         assert msg not in touched

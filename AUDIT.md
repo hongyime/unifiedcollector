@@ -51,7 +51,7 @@ None. No `_conflict_copy`, no `(1).py`, no `~$`, no `.orig`, `.bak`, `.tmp`, `.s
 Source of truth for what the code actually does. Verified against `REPO_MAP.md` and live stack.
 
 ### 2.1 Collection Path 1 — Headless collectors (`ingest_path='headless'`)
-- **Registry:** `src/collectors/__init__.py:16` — 13 concrete collectors: `github, website, instagram, telegram, tiktok, youtube, lemon8, strava, whatsapp, search, exposure, beeper, instagram_dm`. `list_sources()` filters via `COLLECTOR_DISABLED_SOURCES` env (`src/collectors/__init__.py:52`).
+- **Registry:** `src/collectors/__init__.py:16` — 12 concrete collectors: `github, website, instagram, telegram, tiktok, youtube, lemon8, strava, whatsapp, search, exposure, beeper`. `list_sources()` filters via `COLLECTOR_DISABLED_SOURCES` env (`src/collectors/__init__.py:52`).
 - **Base contract:** `src/core/base_collector.py:BaseCollector` — `INGEST_PATH="headless"` (`:80`). `insert_media_item()` stamps `(source, content_id, sha256, source_url)` and calls `src/notifications/realtime_feed.enqueue_from_insert` (`src/core/base_collector.py:843`).
 - **Vault writes:** `src/core/vault.py` — `assert_media_write_allowed`, `write_atomic_artifact` (canonical sha256 blob path), `write_media_sidecar`.
 - **Worker supervision:** `src/worker/__init__.py:WorkerService` (`:228`). Installs `_FatalSpinLogWatcher` (`:29`) that `os._exit(42)` on known-fatal log floods (Telethon MTProto desync, SQLite lock).
@@ -120,7 +120,7 @@ Unique constraint `(source, content_id)` at `src/db/schemas/collector.sql:26`; u
 
 ## 3. Reconciliation Summary
 
-**Truth gap.** Of 11 documented source platforms in `README.md`, all 11 are implemented; but code registers 13 collector classes (`exposure`, `instagram_dm` are additional) and live DB records 14 distinct `source` values (`threads`, `facebook`, `x` arrive via extension bridge, not standalone collectors). Full documented feature list (COLLECTION_SPEC.md tiers 1–6) is fully implemented except TikTok stories (explicitly documented as not-feasible in COLLECTION_SPEC.md).
+**Truth gap.** Of 11 documented source platforms in `README.md`, all 11 are implemented; but code registers 12 collector classes (`exposure` is additional) and live DB records 14 distinct `source` values (`threads`, `facebook`, `x` arrive via extension bridge, not standalone collectors). Full documented feature list (COLLECTION_SPEC.md tiers 1–6) is fully implemented except TikTok stories (explicitly documented as not-feasible in COLLECTION_SPEC.md).
 
 **State of the system.** This is a mature, deeply engineered ingestion service running as 26 Docker containers with healthchecks, migrations, watchdog restart, structured logging, JWT-protected dashboard, isolated recon pipeline, and daily verified backups. At the same time, this live probe caught a **~24-hour silent extension outage** hidden behind a green `/health` (`REL-001`, `REL-002`, `INTR-001`), a **RabbitMQ `contacts` queue backlog of 58,664 messages** stalled by asyncpg query timeouts inside `collector_whatsapp` (`PERF-001`, `LOGIC-001`), a **migration ledger drift** where the DB records an applied migration whose file is now deleted from the repo (`DATA-001`), and a **Chrome CDP port 9333 down** breaking cookie-vault snapshots and browser DM hooks (`REL-003`). Backups are healthy; auth is enforced; no hardcoded secrets, `shell=True`, `eval/exec`, or bare `except:` patterns found in `src/`. The `wa-bridge_1` container recently logged an `identity changed` event indicating session churn (`INTR-002`).
 
@@ -147,7 +147,6 @@ Every remaining item in `feature_gap_analysis.md` (items 3–10) still applies. 
 | Module / function | Path | What it does | Why it needs documenting |
 |---|---|---|---|
 | `collector_exposure` | `src/collectors/exposure/__init__.py`, service `collector_exposure` in `docker/docker-compose.yml:504` | 13th collector, dorking-based exposed-file discovery (39,286 rows in `exposure_findings`) | Absent from README's "11 source platforms" list |
-| `collector_instagram_dm` | `src/collectors/instagram_dm/{__init__,auth,credentials,device,mqtt_client,session}.py`, service `collector_instagram_dm` at `docker/docker-compose.yml:861` | Instagram DM subsystem with own auth/device fingerprint stack | README lists Instagram DM under Path 2 (extension) but the dedicated collector container is separate |
 | `optional_rollout` CLI + module | `src/core/optional_rollout.py` (17,812 B), `src/main.py:530` `_cmd_optional_rollout` | Feature-flag gate for rolling out spiderfoot / recon / lemon8 / browser-heavy paths in stages | Not mentioned anywhere in README, docs/, or KNOWN_ISSUES.md |
 | `media-artifact-audit` CLI | `src/main.py:769` `_cmd_media_artifact_audit` | Read-only bounded audit of DB media rows vs local files vs sidecar files | Operator-facing tool; no doc |
 | `restore-drill` CLI | `src/main.py:929` `_cmd_restore_drill` | Restores latest dump into scratch DB and reports recovery evidence | Critical DR tool; no doc |

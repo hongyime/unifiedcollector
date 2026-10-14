@@ -68,12 +68,11 @@ ul.plain,ol.plain{padding-left:22px;margin:6px 0 12px}ul.plain li,ol.plain li{ma
 <p class="caption">Each row is one collector's end-to-end path. All arrows converge on the same Postgres cluster (<code>unifiedcollector_postgres</code>). RabbitMQ is used only by WhatsApp; Chrome CDP is used only by the browser-scraped platforms; everything else goes direct API -> asyncpg pool.</p>
 </section>
 
-<section><h2>Index<span class="id">14 sources + supporting services</span></h2>
+<section><h2>Index<span class="id">13 sources + supporting services</span></h2>
 <div class="toc">
 <a href="#c-whatsapp">collector_whatsapp</a>
 <a href="#c-telegram">collector_telegram</a>
 <a href="#c-instagram">collector_instagram</a>
-<a href="#c-instagram-dm">collector_instagram_dm</a>
 <a href="#c-tiktok">collector_tiktok</a>
 <a href="#c-youtube">collector_youtube</a>
 <a href="#c-lemon8">collector_lemon8</a>
@@ -113,12 +112,6 @@ ul.plain,ol.plain{padding-left:22px;margin:6px 0 12px}ul.plain li,ol.plain li{ma
 <ol class="plain"><li><b>Extension side (host)</b>: MV3 Chrome extension v1.23.103 injected into <code>instagram.com</code>. Content script scrapes <code>/explore/</code>, feed, profile pages and POSTs canonical events to <code>ig_ingest :8765</code>. CDP on <code>127.0.0.1:9336</code> lets host tooling audit/repair tabs without disturbing the user's session.</li><li><b>Container side</b>: <code>python -m src.main worker --source instagram</code>. Handles backend calls that don't need the browser (public profile lookups, graph_ql fallback).</li></ol>
 <h3>Tables written</h3><ul class="plain"><li><code>instagram_profiles</code>, <code>instagram_tls_state_table</code>, <code>instagram_user_changes</code></li><li><code>media_items</code> (source=instagram, partitioned)</li><li><code>browser_ingest_events</code> — raw extension deliveries</li></ul>
 <h3>Failure modes</h3><ul class="plain"><li><span class="pill warn">http_429</span> IG rate-limit; content script backs off, tab reload path</li><li><span class="pill warn">removed_post</span> page shell only; maintenance reopens tab to <code>/explore/</code></li><li><span class="pill bad">cdp_unavailable</span> Chrome launched without <code>--remote-debugging-port=9336</code>; repair via <code>scripts/start-scraper-chrome-cdp.ps1</code></li></ul></div></section>
-
-<section><h2 id="c-instagram-dm">collector_instagram_dm <span class="id">src/collectors/instagram_dm/</span></h2>
-<div class="card"><h3>Purpose</h3><p>DM-specific IG capture. Runs in its own container so the DM code path is rate-limited independently and aggressive DM anti-bot can't take down the whole IG collector.</p>
-<h3>How it works</h3><p>Same content-script pattern, scoped to DM inbox route. Uses the <code>dm_sample</code> lane in <code>ig_ingest</code> at concurrency 1 — deliberately slow.</p>
-<h3>Tables written</h3><ul class="plain"><li><code>instagram_dm</code>, <code>instagram_user_changes</code></li><li><code>dm_hook_heartbeat</code>, <code>dm_probe_log</code></li></ul></div></section>
-
 
 <section><h2 id="c-tiktok">collector_tiktok <span class="id">src/collectors/tiktok/</span></h2>
 <div class="card"><h3>Purpose</h3><p>TikTok profile + media capture through the extension mechanism.</p>

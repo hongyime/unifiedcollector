@@ -294,39 +294,7 @@
     }
     const apiRe = /graphql|\/api\/v1\//;
     const tkListRe = /\/api\/user\/list\//;
-    const dmRe = /\/direct_v2\/(inbox|threads|thread)/;
     const stravaStreamsRe = /\/(?:api\/v3\/)?activities\/(\d+)\/streams(?:[?#/]|$)/;
-    const _probedUrls = /* @__PURE__ */ new Set();
-    function probeDmUrl(url) {
-      try {
-        if (!/direct/i.test(url)) return;
-        const key = String(url).split("?")[0];
-        if (_probedUrls.has(key)) return;
-        _probedUrls.add(key);
-        window.postMessage({ __uc: true, type: "dm_probe", platform, transport: "http", url: key.slice(0, 300) }, "*");
-      } catch (e) {
-      }
-    }
-    function harvestDMs(text) {
-      if (!text || text.length > 8e6) return;
-      let json;
-      try {
-        json = JSON.parse(text);
-      } catch (e) {
-        return;
-      }
-      let threads = [];
-      if (json.inbox && Array.isArray(json.inbox.threads)) threads = json.inbox.threads;
-      else if (json.thread) threads = [json.thread];
-      else if (Array.isArray(json.threads)) threads = json.threads;
-      if (!threads.length) return;
-      let ownerId = null;
-      try {
-        ownerId = (document.cookie.match(/ds_user_id=(\d+)/) || [])[1] || null;
-      } catch (e) {
-      }
-      window.postMessage({ __uc: true, type: "dms", platform: "instagram", owner: { id: ownerId }, threads }, "*");
-    }
     const _emittedStravaStreams = /* @__PURE__ */ new Set();
     function _streamData(container, key) {
       try {
@@ -408,59 +376,6 @@
       } catch (e) {
       }
     }
-    const igGraphQLRe = /\/(?:api\/graphql|graphql\/query|ajax\/route-definition|ajax\/bulk-route-definitions)/;
-    function harvestIGGraphQL(url, text) {
-      try {
-        if (!text || text.length > 8e6) return;
-        if (!/"thread_id"|"direct_message"|"conversation_id"|"inbox"/.test(text)) return;
-        let json;
-        try {
-          json = JSON.parse(text);
-        } catch (e) {
-          return;
-        }
-        window.postMessage({
-          __uc: true,
-          type: "dm_probe",
-          platform: "instagram",
-          transport: "graphql",
-          url: url.slice(0, 300),
-          frame_kind: "json",
-          frame_size: text.length
-        }, "*");
-        let threads = null;
-        const roots = [
-          json,
-          json && json.data,
-          json && json.viewer,
-          json && json.data && json.data.viewer
-        ];
-        for (const root of roots) {
-          if (!root) continue;
-          if (root.inbox && Array.isArray(root.inbox.threads))
-            threads = root.inbox.threads;
-          else if (root.direct_inbox && Array.isArray(root.direct_inbox.threads))
-            threads = root.direct_inbox.threads;
-          else if (root.thread) threads = [root.thread];
-          else if (Array.isArray(root.threads)) threads = root.threads;
-          if (threads && threads.length) break;
-        }
-        if (!threads || !threads.length) return;
-        let ownerId = null;
-        try {
-          ownerId = (document.cookie.match(/ds_user_id=(\d+)/) || [])[1] || null;
-        } catch (e) {
-        }
-        window.postMessage({
-          __uc: true,
-          type: "dms",
-          platform: "instagram",
-          owner: { id: ownerId },
-          threads
-        }, "*");
-      } catch (e) {
-      }
-    }
     const origFetch = window.fetch;
     window.fetch = function(...args) {
       const p = origFetch.apply(this, args);
@@ -470,34 +385,6 @@
           p.then((r) => {
             try {
               r.clone().text().then((t) => harvestTikTokList(url, t)).catch(() => {
-              });
-            } catch (e) {
-            }
-          }).catch(() => {
-          });
-        } else if (platform === "instagram" && dmRe.test(url)) {
-          p.then((r) => {
-            try {
-              r.clone().text().then(harvestDMs).catch(() => {
-              });
-            } catch (e) {
-            }
-          }).catch(() => {
-          });
-        } else if (platform === "instagram" && /direct/i.test(url)) {
-          probeDmUrl(url);
-          p.then((r) => {
-            try {
-              r.clone().text().then(harvestDMs).catch(() => {
-              });
-            } catch (e) {
-            }
-          }).catch(() => {
-          });
-        } else if (platform === "instagram" && igGraphQLRe.test(url)) {
-          p.then((r) => {
-            try {
-              r.clone().text().then((t) => harvestIGGraphQL(url, t)).catch(() => {
               });
             } catch (e) {
             }
@@ -542,28 +429,6 @@
             } catch (e) {
             }
           });
-        } else if (platform === "instagram" && dmRe.test(url)) {
-          this.addEventListener("load", function() {
-            try {
-              if (typeof this.responseText === "string") harvestDMs(this.responseText);
-            } catch (e) {
-            }
-          });
-        } else if (platform === "instagram" && /direct/i.test(url)) {
-          probeDmUrl(url);
-          this.addEventListener("load", function() {
-            try {
-              if (typeof this.responseText === "string") harvestDMs(this.responseText);
-            } catch (e) {
-            }
-          });
-        } else if (platform === "instagram" && igGraphQLRe.test(url)) {
-          this.addEventListener("load", function() {
-            try {
-              if (typeof this.responseText === "string") harvestIGGraphQL(url, this.responseText);
-            } catch (e) {
-            }
-          });
         } else if (platform === "strava" && stravaStreamsRe.test(url)) {
           this.addEventListener("load", function() {
             try {
@@ -583,7 +448,7 @@
       }
       return OrigSend.apply(this, arguments);
     };
-    if (platform === "tiktok" || platform === "instagram") {
+    if (platform === "tiktok") {
       let _postDmHeartbeat2 = function() {
         try {
           window.postMessage({
@@ -615,8 +480,7 @@
           try {
             const n = _sampleCount.get(key) || 0;
             if (n >= SAMPLE_MAX || !buf) return;
-            const minBytes = platform === "instagram" ? IG_SAMPLE_MIN_BYTES : SAMPLE_MIN_BYTES;
-            if (buf.byteLength < minBytes) return;
+            if (buf.byteLength < SAMPLE_MIN_BYTES) return;
             _sampleCount.set(key, n + 1);
             _hookSamples++;
             window.postMessage({
@@ -796,15 +660,6 @@
           } catch (e) {
             return "";
           }
-        }, _igDecode2 = function(_buf) {
-          return null;
-        }, _extractOwnerIG2 = function() {
-          try {
-            const m = (document.cookie || "").match(/(?:^|;\s*)ds_user_id=(\d+)/);
-            return m ? m[1] : "";
-          } catch (e) {
-            return "";
-          }
         }, _frameKind2 = function(d) {
           try {
             if (d instanceof ArrayBuffer) return "arraybuffer";
@@ -831,18 +686,6 @@
                   type: "dm_decoded",
                   platform,
                   owner: _extractOwner2(u),
-                  threads: decoded.threads,
-                  messages: decoded.messages
-                }, "*");
-              }
-            } else if (platform === "instagram" && buf.byteLength >= IG_SAMPLE_MIN_BYTES) {
-              const decoded = _igDecode2(buf);
-              if (decoded) {
-                window.postMessage({
-                  __uc: true,
-                  type: "dm_decoded",
-                  platform,
-                  owner: _extractOwnerIG2(),
                   threads: decoded.threads,
                   messages: decoded.messages
                 }, "*");
@@ -1047,7 +890,7 @@
           } catch (e) {
           }
         };
-        var abToB64 = abToB642, shipSample = shipSample2, _pbReadVarint = _pbReadVarint2, _pbDecode = _pbDecode2, _pbFindFirst = _pbFindFirst2, _pbFindAll = _pbFindAll2, _bufToUtf8 = _bufToUtf82, _bigToStr = _bigToStr2, _ttDecode = _ttDecode2, _extractOwner = _extractOwner2, _igDecode = _igDecode2, _extractOwnerIG = _extractOwnerIG2, _frameKind = _frameKind2, _frameSize = _frameSize2, _decodeAndPost = _decodeAndPost2, _handleWSFrame = _handleWSFrame2, _observeSocket = _observeSocket2, _copyWSConstants = _copyWSConstants2, _isWrappedWS = _isWrappedWS2, _markWrapped = _markWrapped2, _makeWrappedWS = _makeWrappedWS2, _installWSWrapper = _installWSWrapper2, _ensureWSWrapper = _ensureWSWrapper2;
+        var abToB64 = abToB642, shipSample = shipSample2, _pbReadVarint = _pbReadVarint2, _pbDecode = _pbDecode2, _pbFindFirst = _pbFindFirst2, _pbFindAll = _pbFindAll2, _bufToUtf8 = _bufToUtf82, _bigToStr = _bigToStr2, _ttDecode = _ttDecode2, _extractOwner = _extractOwner2, _frameKind = _frameKind2, _frameSize = _frameSize2, _decodeAndPost = _decodeAndPost2, _handleWSFrame = _handleWSFrame2, _observeSocket = _observeSocket2, _copyWSConstants = _copyWSConstants2, _isWrappedWS = _isWrappedWS2, _markWrapped = _markWrapped2, _makeWrappedWS = _makeWrappedWS2, _installWSWrapper = _installWSWrapper2, _ensureWSWrapper = _ensureWSWrapper2;
         const OrigWS = window.WebSocket;
         const _nativeAddEventListener = (() => {
           try {
@@ -1058,10 +901,9 @@
           }
         })();
         const _wsProbed = /* @__PURE__ */ new Set();
-        const _dmSockRe = /edge-chat\.instagram\.com\/chat|im-ws[^/]*\.tiktok\.com\/ws/i;
+        const _dmSockRe = /im-ws[^/]*\.tiktok\.com\/ws/i;
         const _sampleCount = /* @__PURE__ */ new Map();
         const SAMPLE_MAX = 200, SAMPLE_MIN_BYTES = 24;
-        const IG_SAMPLE_MIN_BYTES = 8;
         const _observedSockets = typeof WeakSet !== "undefined" ? /* @__PURE__ */ new WeakSet() : null;
         const _wrappedConstructors = typeof WeakMap !== "undefined" ? /* @__PURE__ */ new WeakMap() : null;
         const _wrappedWSFns = typeof WeakSet !== "undefined" ? /* @__PURE__ */ new WeakSet() : null;

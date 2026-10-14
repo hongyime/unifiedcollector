@@ -9,7 +9,7 @@ import { relativeTime } from "../../utils/formatters";
 import { formatBytes } from "../../utils/formatters";
 import type { WaChat, WaMessage } from "../../services/types";
 
-// WhatsApp chats page — two-pane, mirrors InstagramDmPage. Chats come from the
+// WhatsApp chats page — two-pane. Chats come from the
 // Baileys bridge → RabbitMQ → collector pipeline; media files land in
 // media_items so the message row's media_id is enough to build a thumbnail URL
 // through the existing /media/{id}/thumbnail endpoint.

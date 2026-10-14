@@ -67,7 +67,6 @@ so `collector_spiderfoot` no longer sees Instagram/Telegram credentials
 | Website spider | `src/collectors/website/` | Implemented | Own container |
 | Exposure (dorking) collector | `src/collectors/exposure/` | Implemented | 13th collector, own container |
 | Instagram collector (headless) | `src/collectors/instagram/` | Implemented | Multi-account instaloader |
-| Instagram DM subsystem | `src/collectors/instagram_dm/` | Implemented | Dedicated `collector_instagram_dm` container |
 | TikTok collector | `src/collectors/tiktok/` | Implemented | gallery-dl + yt-dlp + Playwright fallback |
 | YouTube collector | `src/collectors/youtube/` | Implemented | yt-dlp, OAuth-aware |
 | Lemon8 collector | `src/collectors/lemon8/` | Implemented | Public scrape only |
@@ -277,8 +276,8 @@ No OpenTelemetry / tracing.
 - TikTok Stories (Tier 1 ephemeral) is not implemented — TikTok has
   no supported story extractor in yt-dlp or gallery-dl and no public
   story API. Documented in `docs/contracts/COLLECTION_SPEC.md`.
-- Instagram DMs and TikTok DMs depend on the host Chrome extension's
-  DM-sample hook. If Chrome CDP is not on port 9336, DM hooks go
+- TikTok DMs depend on the host Chrome extension's DM-sample hook. If Chrome
+  CDP is not on port 9336, the DM hook goes
   stale (watchdog alerts via `PostgresIdleTxnAlertHandler` +
   `WatchdogStaleAlertHandler`).
 - `browser-autorecover` scheduled task is registered under the current

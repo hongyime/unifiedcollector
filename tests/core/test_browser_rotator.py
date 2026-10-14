@@ -60,5 +60,5 @@ async def test_rotate_never_touches_pinned_messaging():
 
     sources = ["x", "instagram", "facebook"]
     await br.rotate_browser_schedules(_Conn(), sources=sources, width=1, now=_at(0), interval_seconds=IV)
-    for msg in ("telegram", "beeper", "whatsapp", "instagram_dm"):
+    for msg in ("telegram", "beeper", "whatsapp"):
         assert msg not in touched

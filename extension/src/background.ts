@@ -2692,20 +2692,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         } catch (e) { await log("error", `users failed: ${e.message}`); sendResponse({ ok: false }); }
         break;
       }
-      case "dms": {  // Instagram DMs observed from the direct_v2 responses
-        try {
-          const r = await fetch(base + "/social/dms", {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(withExtensionVersion({ platform: msg.platform || "instagram", owner: msg.owner || null, threads: msg.threads })),
-          });
-          const j = await r.json().catch(() => ({}));
-          await log("info", `✉️ ${msg.platform || "instagram"} · +${j.recorded ?? "?"} DM messages`);
-          sendResponse({ ok: r.ok });
-        } catch (e) { await log("error", `dms failed: ${e.message}`); sendResponse({ ok: false }); }
-        break;
-      }
-      case "tiktok_dm":       // DM JSON frame from a WS (rare) — capture (#35)
-      case "instagram_dm": {
+      case "tiktok_dm": {    // DM JSON frame from a WS (rare) — capture (#35)
         try {
           const r = await fetch(base + "/social/dm-frame", {
             method: "POST", headers: { "Content-Type": "application/json" },
@@ -2740,20 +2727,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
       case "dm_heartbeat": {  // WS-hook liveness pulse for the freshness watchdog (P1.3)
         try {
-          // Enrich with owner (ds_user_id for IG; TikTok has no equivalent
-          // cookie name universally — leave blank on non-IG so the bridge
-          // upserts to (platform, '')).
-          let owner = "";
-          try {
-            if (msg.platform === "instagram") {
-              const c = await chrome.cookies.get({ url: "https://www.instagram.com/", name: "ds_user_id" });
-              owner = (c && c.value) || "";
-            }
-          } catch (e) { /* cookies perm not granted */ }
           await fetch(base + "/social/dm-heartbeat", {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify(withExtensionVersion({
-              platform: msg.platform, owner,
+              platform: msg.platform,
               probes_sent: msg.probes_sent || 0,
               samples_shipped: msg.samples_shipped || 0,
             })),

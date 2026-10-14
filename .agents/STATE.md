@@ -1,8 +1,7 @@
 # Agent State
-Current task: UnifiedCollector four-item fix list is complete; final summary is `/tmp/grind-summary-20261014.md`.
-Status: YouTube downloads verified; rate-limit fixes and 15-minute soak verified with zero new rate-limit events/429s; all 75 stale and 35 empty audit tables classified; Airbnb, GitHub README, and Bluesky producer defects fixed. Fix commits: `47c4e719`, `7836ca41`, `b99b9b85`, `599bb8d2`, `ab6c9d8c`, `adbdf74d`, `8a3f9d23`, `14686dcd`.
-Final soak (03:24:34–03:39:34 UTC): 91 YouTube media rows, `github_readmes` total 2, rate-limit event delta 0, no HTTP-429/FloodWait log markers. Fourteen bounded yt-dlp page-reload errors occurred across seven IDs; TikTok had a zero-progress watchdog relaunch and was still at zero progress by 03:42 UTC. WhatsApp bridge 1 awaits operator QR re-pair; Beeper and spider files were not touched. Pytest unavailable; bounded probes, Python compilation, and Compose validation passed.
-Next: If resuming, monitor TikTok progress and WhatsApp after QR re-pair; do not redo spider phases 2–6 or modify Beeper without a new request.
+Current task: UnifiedCollector Batch 2 — complete five requested items in order, commit each separately, and write `/tmp/batch2-summary-20261014.md`.
+Status: Item 1 implementation and verification are complete pending commit. Both DM tables had 0 rows before the migration and are now absent. Removed IG DM collection paths and service/config while preserving TikTok DM; validation includes extension/frontend builds, production/dev Compose config, Python compilation, and container runtime smoke. Host pytest is unavailable (pytest/asyncpg missing); no containers were restarted.
+Next: Commit Item 1, then investigate and fix Beeper history sync. Do not modify spider files or WhatsApp bridge 1.
 
 ## Prior handoff history
 

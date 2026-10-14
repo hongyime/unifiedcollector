@@ -55,7 +55,6 @@ Install and run (from `README.md` procedure, verified against `docker/docker-com
 ```
 cp .env.example .env
 docker compose -f docker/docker-compose.yml up -d              # core stack
-docker compose -f docker/docker-compose.yml --profile instagram-dm up -d  # opt-in DM
 ```
 Required environment: `POSTGRES_USER`, `POSTGRES_PASSWORD`, and platform credentials keyed as documented in `.env.example` (~200 variable names — see Section 10). Ports bound on the host: `POSTGRES_HOST_PORT` default `5433` → container 5432 (`docker/docker-compose.yml:16`), `8765` for `ig_ingest`, `8700` for `dashboard`, `8790` for `browser_cookie_vault`, RabbitMQ port `5672` and management `15672` internal-only (`docker/docker-compose.yml:1214-1240` region).
 
@@ -105,7 +104,7 @@ src/worker/__init__.py
   ├── src.core.proximity
   └── src.db.connection
 
-src/collectors/*/__init__.py   (13 sources incl. instagram_dm, exposure)
+src/collectors/*/__init__.py   (12 sources incl. exposure)
   ├── src.core.base_collector          ── central template method
   ├── src.core.vault                    ── file writes, sidecars
   ├── src.core.media_download           ── HTTP + subprocess download
@@ -152,7 +151,7 @@ Depth-capped directory summary (Python-first, then bridges, dashboard, config, t
 | `src/bots/` | 2 | `onboard_bot.py`, `__init__.py` |
 | `src/bridges/` | 2 (Python) + WhatsApp bridge subtree | `ig_ingest.py` (5,921 LOC aiohttp), plus `whatsapp/` Node bridge (7 TS files under `src/`, `package.json`, `Dockerfile`) |
 | `src/bridges/whatsapp/src/` | 5 top + 4 under `event_handlers/` | `index.ts`, `auth_manager.ts`, `device_intel.ts`, `producer.ts`, `store.ts`, `utils/normalize.ts`, `event_handlers/{contacts,groups,history,messages}.ts` |
-| `src/collectors/` | 3 top + 13 per-source subdirs | `__init__.py` (COLLECTORS registry, 13 entries), `base.py` (81-byte stub), `MATRIX_README.md`, subdirs: `beeper`, `exposure`, `github`, `instagram`, `instagram_dm`, `lemon8`, `search`, `strava`, `telegram`, `tiktok`, `website`, `whatsapp`, `youtube` (each `__init__.py` implements the source, some also carry a `parse.py`) |
+| `src/collectors/` | 3 top + 12 per-source subdirs | `__init__.py` (COLLECTORS registry, 12 entries), `base.py` (81-byte stub), `MATRIX_README.md`, subdirs: `beeper`, `exposure`, `github`, `instagram`, `lemon8`, `search`, `strava`, `telegram`, `tiktok`, `website`, `whatsapp`, `youtube` (each `__init__.py` implements the source, some also carry a `parse.py`) |
 | `src/core/` | 84 modules | Cross-cutting: base collector, vault, rate limiters, account pools, dedup, recon, phone-OSINT, watchdog helpers — see Section 8 |
 | `src/dashboard/` | 3 | `api.py` (10,784 LOC), `websocket.py`, `__init__.py` |
 | `src/db/` | 3 top + `schemas/` + `migrations/` | `connection.py`, `migrate.py`, `__init__.py` |
@@ -182,7 +181,7 @@ Total tracked files: 644. Full sorted inventory retrieved via `git ls-files | so
 
 ### `src/collectors/` (per-source implementations)
 - Responsibility: source-specific scraping, session mgmt, backfill loops. Each `<source>/__init__.py` defines a subclass registered in `src/collectors/__init__.py:16`.
-- Key files (by size, all under `src/collectors/*/__init__.py`): `telegram` 267,148 bytes, `instagram` 213,183 bytes, `strava` 215,077 bytes, `youtube` 178,142 bytes, `lemon8` 125,221 bytes, `tiktok` 115,581 bytes, `github` 112,661 bytes, `whatsapp` 86,508 bytes, `search` 84,078 bytes, `website` 83,371 bytes, `beeper` 77,688 bytes, `exposure` 19,754 bytes, `instagram_dm` 9,887 bytes (with additional module split: `auth.py`, `credentials.py`, `device.py`, `mqtt_client.py`, `session.py`).
+- Key files (by size, all under `src/collectors/*/__init__.py`): `telegram` 267,148 bytes, `instagram` 213,183 bytes, `strava` 215,077 bytes, `youtube` 178,142 bytes, `lemon8` 125,221 bytes, `tiktok` 115,581 bytes, `github` 112,661 bytes, `whatsapp` 86,508 bytes, `search` 84,078 bytes, `website` 83,371 bytes, `beeper` 77,688 bytes, `exposure` 19,754 bytes.
 - Depends on: `src/core/base_collector.py`, `src/core/media_download.py`, `src/core/vault.py`, third-party libs (yt-dlp, gallery-dl, instaloader, telethon, matrix-nio) per `requirements.txt`.
 - Depended on by: `src/worker/__init__.py:WorkerService` via `get_collector()`; also imported by tests under `tests/collectors/`.
 - Notable behavior: `COLLECTOR_DISABLED_SOURCES` env in `src/collectors/__init__.py:40` list-filters active sources; the main `collector` container disables all sources via `docker/docker-compose.yml:46` and each source runs in its own isolated container.
@@ -213,7 +212,7 @@ Total tracked files: 644. Full sorted inventory retrieved via `git ls-files | so
 
 ### `src/bridges/ig_ingest.py`
 - Responsibility: aiohttp bridge receiving browser-extension batches; 35 route registrations at `:5880-5915`.
-- Key routes: `/social/ingest`, `/social/ingest-upload`, `/social/ingest-upload-binary`, `/social/discover`, `/social/target-status`, `/social/posts`, `/social/comments`, `/social/users`, `/social/profile`, `/social/seed`, `/social/dms`, `/social/cookies`, `/social/browser-media-candidates`, `/social/ig_cooldown` (GET), `/social/browser-heartbeat`, `/social/tiktok-revisit-target`, `/social/tiktok-revisit-result`, `/social/browser-revisit-target`, `/social/browser-revisit-result`, `/social/strava-route-queue`, `/social/strava-route-visit`, `/social/strava-streams`, `/social/x-profile-target`, `/social/sw-crash`, `/ig/targets`, `/ig/ingest`, `/ig/discover`, `/health`.
+- Key routes: `/social/ingest`, `/social/ingest-upload`, `/social/ingest-upload-binary`, `/social/discover`, `/social/target-status`, `/social/posts`, `/social/comments`, `/social/users`, `/social/profile`, `/social/seed`, `/social/cookies`, `/social/browser-media-candidates`, `/social/ig_cooldown` (GET), `/social/browser-heartbeat`, `/social/tiktok-revisit-target`, `/social/tiktok-revisit-result`, `/social/browser-revisit-target`, `/social/browser-revisit-result`, `/social/strava-route-queue`, `/social/strava-route-visit`, `/social/strava-streams`, `/social/x-profile-target`, `/social/sw-crash`, `/ig/targets`, `/ig/ingest`, `/ig/discover`, `/health`.
 - Depends on: aiohttp, `src.db.connection`, `src.core.vault`, `src.notifications.realtime_feed`.
 - Depended on by: Chrome extension (`extension/background.js`, `extension/content.js`).
 - Notable behavior: port default `8765` (`:83`); calls `enqueue_from_insert` at `:2362`.
@@ -316,7 +315,6 @@ Websocket: 1 route in `src/dashboard/api.py` (`@app.websocket`), plus supporting
 | POST | `/social/users` | `users_handler` | 5890 |
 | POST | `/social/profile` | `profile_handler` | 5891 |
 | POST | `/social/seed` | `seed_handler` | 5892 |
-| POST | `/social/dms` | `dms_handler` | 5893 |
 | POST | `/social/cookies` | `cookies_handler` | 5894 |
 | POST | `/social/dm-frame` | `dm_frame_handler` | 5895 |
 | POST | `/social/dm-sample` | `dm_sample_handler` | 5896 |
@@ -600,8 +598,8 @@ Tags/releases present: none.
 
 | Doc claim | Source | Code evidence | Status |
 |---|---|---|---|
-| "26 Docker Compose services" | `README.md` overview | `docker/docker-compose.yml` declares 29 services: `postgres, collector_spiderfoot, collector_youtube, collector_tiktok, collector_github, collector_lowrisk, watchdog, collector_website, collector_light, collector_snapchat, collector_paypal, collector_airbnb, collector_bluesky, collector_pinterest, collector_telegram, collector_beeper, collector_whatsapp, collector_instagram, collector_instagram_dm, ig_ingest, scheduler, onboard_bot, realtime_feed, dashboard, rabbitmq, redis, wa-bridge-1, wa-bridge-2, browser_cookie_vault`. The idle `collector` service is gone. `instagram-dm` is opt-in, so a default `up` starts 28. | corrected 2026-10-01 |
-| "11 source platforms" | `README.md` line 3 | `src/collectors/__init__.py:1-13` registers 13 collector classes: `github, website, instagram, telegram, tiktok, youtube, lemon8, strava, whatsapp, search, exposure, beeper, instagram_dm`. `README.md` names 11 (excludes `exposure` and `instagram_dm`). | contradicted — code has 13 collectors; README names 11 |
+| "26 Docker Compose services" | `README.md` overview | `docker/docker-compose.yml` declares 28 services: `postgres, collector_spiderfoot, collector_youtube, collector_tiktok, collector_github, collector_lowrisk, watchdog, collector_website, collector_light, collector_snapchat, collector_paypal, collector_airbnb, collector_bluesky, collector_pinterest, collector_telegram, collector_beeper, collector_whatsapp, collector_instagram, ig_ingest, scheduler, onboard_bot, realtime_feed, dashboard, rabbitmq, redis, wa-bridge-1, wa-bridge-2, browser_cookie_vault`. | corrected 2026-10-01 |
+| "11 source platforms" | `README.md` line 3 | `src/collectors/__init__.py:1-13` registers 12 collector classes: `github, website, instagram, telegram, tiktok, youtube, lemon8, strava, whatsapp, search, exposure, beeper`. `README.md` names 11 (excludes `exposure`). | contradicted — code has 12 collectors; README names 11 |
 | "ig_ingest :8765 (aiohttp)" | `README.md` architecture diagram | `src/bridges/ig_ingest.py:83` `PORT = int(os.getenv("IG_INGEST_PORT", "8765"))`; `src/bridges/ig_ingest.py:5921` `if __name__ == "__main__"` | confirmed |
 | "dashboard :8700 (React + FastAPI ops)" | `README.md` | `docker/Dockerfile.dashboard:8` `uvicorn ... --port 8700`; `docker/docker-compose.yml:1092` ports | confirmed |
 | "Watchdog restarts stale containers via Docker socket" | `README.md` Support services | `src/watchdog/freshness.py:348` `http://docker/containers/{container}/restart` | confirmed |
@@ -619,7 +617,6 @@ Tags/releases present: none.
 
 Capabilities present in code but not covered by top-level `README.md`:
 - `src/collectors/exposure/__init__.py` (19,754 bytes) — 13th collector, not named in README source list.
-- `src/collectors/instagram_dm/` — dedicated DM subsystem with its own `auth.py`, `credentials.py`, `device.py`, `mqtt_client.py`, `session.py`, `ACTIVATION.md`.
 - `src/core/wa_device_sweep.py` — separate WhatsApp device intel sweep from `wa_phone_intel.py`.
 - `src/core/tor_proxy.py` (13,245 bytes), `SEARCH_TOR_PROXY` env — README references `search` collector's Tor mode only tangentially.
 - `src/core/optional_rollout.py` (17,812 bytes) + `optional-rollout` CLI subcommand — README does not describe.
@@ -630,7 +627,7 @@ Capabilities present in code but not covered by top-level `README.md`:
 - `src/tools/browser_cookie_vault.py` port 8790 — README briefly mentions; internal APIs not documented.
 
 ## 17. Gaps and unknowns
-- The exact list of "11 source platforms" cited in `README.md` differs from the 13 classes registered in `src/collectors/__init__.py:1-13`. Whether `exposure` and `instagram_dm` are considered production sources or scaffolds is not clarified in code (compose service `collector_instagram_dm` exists at `docker/docker-compose.yml:861`; `collector_exposure` at `:504`).
+- The exact list of "11 source platforms" cited in `README.md` differs from the 13 classes registered in `src/collectors/__init__.py:1-13`. The extra `exposure` source is implemented as a production collector (`collector_exposure` in `docker/docker-compose.yml`).
 - Neither the base schema (`src/db/schemas/collector.sql:23-26`) nor `README.md` states which of `(source, content_id)` and `sha256` unique constraint takes precedence when both fire; `README.md` phrases both as ANDed but the migration adding `sha256` uniqueness lives at `src/db/migrations/add_media_sha256_unique.sql` and is applied later than the base schema.
 - The version drift between `requirements.txt` floors and `requirements.lock` pins (documented row-by-row in Section 11) is not reconciled in-tree; whether the floors were bumped without regenerating the lock, or the lock intentionally lags production, is not stated.
 - `.env` is present on disk with 13,617 bytes but is not tracked; whether the tracked `.env.example` is authoritative for the full set of consumed env names is contradicted by Section 10's variable count (749 `os.getenv/environ.get` in source vs ~200 names in `.env.example`).

@@ -2,7 +2,7 @@
 (() => {
   // src/shared/platforms.ts
   var UC_PLATFORMS = [
-    { id: "instagram", label: "Instagram", url: "https://www.instagram.com/", host: "www.instagram.com", cookieUrl: "https://www.instagram.com", cookie: "sessionid", scraper: true, optionalExtraUrls: ["https://www.instagram.com/direct/inbox/"] },
+    { id: "instagram", label: "Instagram", url: "https://www.instagram.com/", host: "www.instagram.com", cookieUrl: "https://www.instagram.com", cookie: "sessionid", scraper: true },
     // Threads moved threads.net → threads.com in Apr 2025 (.net just redirects).
     { id: "threads", label: "Threads", url: "https://www.threads.com/", host: "www.threads.com", cookieUrl: "https://www.threads.com", cookie: "sessionid", scraper: true },
     // Optional expanded coverage: /foryou and /explore add broader discovery.
@@ -2599,25 +2599,7 @@
             }
             break;
           }
-          case "dms": {
-            try {
-              const r = await fetch(base + "/social/dms", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(withExtensionVersion({ platform: msg.platform || "instagram", owner: msg.owner || null, threads: msg.threads }))
-              });
-              const j = await r.json().catch(() => ({}));
-              await log("info", `\u2709\uFE0F ${msg.platform || "instagram"} \xB7 +${j.recorded ?? "?"} DM messages`);
-              sendResponse({ ok: r.ok });
-            } catch (e) {
-              await log("error", `dms failed: ${e.message}`);
-              sendResponse({ ok: false });
-            }
-            break;
-          }
-          case "tiktok_dm":
-          // DM JSON frame from a WS (rare) — capture (#35)
-          case "instagram_dm": {
+          case "tiktok_dm": {
             try {
               const r = await fetch(base + "/social/dm-frame", {
                 method: "POST",
@@ -2664,20 +2646,11 @@
           }
           case "dm_heartbeat": {
             try {
-              let owner = "";
-              try {
-                if (msg.platform === "instagram") {
-                  const c = await chrome.cookies.get({ url: "https://www.instagram.com/", name: "ds_user_id" });
-                  owner = c && c.value || "";
-                }
-              } catch (e) {
-              }
               await fetch(base + "/social/dm-heartbeat", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(withExtensionVersion({
                   platform: msg.platform,
-                  owner,
                   probes_sent: msg.probes_sent || 0,
                   samples_shipped: msg.samples_shipped || 0
                 }))

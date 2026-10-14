@@ -374,6 +374,7 @@ async def build_status(pool, freshness: list[tuple[str, str, int]]) -> dict:
                                    )::int AS samples_current_hour,
                                    max(seen_at) AS last_frame_seen_at
                             FROM dm_probe_log
+                            WHERE platform = 'tiktok'
                             GROUP BY platform
                             """,
                             timeout=10,
@@ -398,6 +399,7 @@ async def build_status(pool, freshness: list[tuple[str, str, int]]) -> dict:
                                (array_agg(extension_version ORDER BY last_seen DESC))[1] AS extension_version,
                                count(*) FILTER (WHERE COALESCE(owner_account, '') <> '')::int AS owner_count
                         FROM dm_hook_heartbeat
+                        WHERE platform = 'tiktok'
                         GROUP BY platform
                         ORDER BY last_seen_at DESC
                         """,
@@ -1198,6 +1200,7 @@ async def delta_extension_hooks(conn) -> list[dict]:
                    extract(epoch FROM now() - max(last_seen))::int AS age_seconds,
                    (array_agg(extension_version ORDER BY last_seen DESC))[1] AS extension_version
             FROM dm_hook_heartbeat
+            WHERE platform = 'tiktok'
             GROUP BY platform
             """,
             timeout=10,

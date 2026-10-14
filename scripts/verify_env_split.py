@@ -114,7 +114,6 @@ SERVICE_SOURCES: dict[str, list[str]] = {
     "collector_beeper": COMMON_WORKER_PATHS + ["src/collectors/beeper"],
     "collector_whatsapp": COMMON_WORKER_PATHS + ["src/collectors/whatsapp"],
     "collector_instagram": COMMON_WORKER_PATHS + ["src/collectors/instagram"],
-    "collector_instagram_dm": COMMON_WORKER_PATHS + ["src/collectors/instagram_dm"],
 
     # Bridges / bots
     "ig_ingest": [
@@ -206,12 +205,6 @@ GLOBAL_ALLOWLIST = {
 # Per-service allowlist: keys that a specific service references but doesn't
 # need in its env_file (because they come from compose environment: block).
 SERVICE_ALLOWLIST: dict[str, set[str]] = {
-    # `environment:` block on collector_instagram_dm sets these directly:
-    "collector_instagram_dm": {
-        "INSTAGRAM_DM_COLLECTOR_ENABLED",
-        "INSTAGRAM_DM_CREDENTIALS_DIR",
-        "INSTAGRAM_DM_PROXY_URL",
-    },
 }
 
 

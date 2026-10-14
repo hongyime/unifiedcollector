@@ -26,8 +26,11 @@ def _pool():
     return pool
 
 
-def test_instagram_dm_is_a_known_file_config_source():
-    assert "instagram_dm" in KNOWN_SOURCES
+def test_instagram_dm_is_not_a_registered_source():
+    from src.collectors import COLLECTORS
+
+    assert "instagram_dm" not in KNOWN_SOURCES
+    assert "instagram_dm" not in COLLECTORS
 
 
 @pytest.mark.asyncio

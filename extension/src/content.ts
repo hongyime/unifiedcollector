@@ -312,7 +312,6 @@ function directFallbackRequest(msg, error) {
     users: ["/social/users", { platform, context: msg.context || "seen", owner: msg.owner || null, users: msg.users }],
     profile: ["/social/profile", { platform, profile: msg.profile, owner: msg.owner || null }],
     seed: ["/social/seed", { platform, users: msg.users }],
-    dms: ["/social/dms", { platform, owner: msg.owner || null, threads: msg.threads }],
     strava_streams: ["/social/strava-streams", {
       platform: "strava",
       activity_id: msg.activity_id,
@@ -4117,9 +4116,7 @@ window.addEventListener("message", (ev) => {
     }).catch(() => {});
   } else if (m.type === "users" && Array.isArray(m.users) && m.users.length) {
     send({ type: "users", platform: m.platform, context: m.context || "seen", owner: m.owner || null, users: m.users }).catch(() => {});
-  } else if (m.type === "dms" && Array.isArray(m.threads) && m.threads.length) {
-    send({ type: "dms", platform: m.platform, owner: m.owner || null, threads: m.threads }).catch(() => {});
-  } else if ((m.type === "tiktok_dm" || m.type === "instagram_dm") && m.frame) {
+  } else if (m.type === "tiktok_dm" && m.frame) {
     // DM JSON frame from a WS (rare — most are protobuf/MQTT). Forward for capture.
     send({ type: m.type, platform: m.platform, frame: m.frame }).catch(() => {});
   } else if (m.type === "dm_probe") {

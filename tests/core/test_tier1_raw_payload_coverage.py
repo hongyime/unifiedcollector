@@ -81,8 +81,6 @@ def test_browser_tier1_raw_capture_surfaces_have_rebuild_targets():
         '"instagram_profiles"',
         '"instagram_posts"',
         '"instagram_comments"',
-        '"instagram_dm_thread"',
-        '"instagram_dm"',
         '"dm_probe_log"',
         '"strava_activities"',
         '"strava_gps_streams"',

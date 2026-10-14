@@ -957,6 +957,7 @@ async def _browser_extension_payload(conn) -> dict:
                    sum(probes_sent)::int AS probes_sent,
                    sum(samples_shipped)::int AS samples_shipped
             FROM dm_hook_heartbeat
+            WHERE platform = 'tiktok'
             GROUP BY platform
             ORDER BY last_seen_at DESC
             """,

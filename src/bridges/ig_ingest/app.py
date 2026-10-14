@@ -64,14 +64,13 @@ def build_app():
     """Assemble the aiohttp ``Application`` with routes + middlewares."""
     # Handlers still living in ``__init__.py`` (target_status_handler,
     # posts_handler, comments_handler, users_handler, profile_handler,
-    # seed_handler, dms_handler, health, _on_startup, _on_cleanup) are
+    # seed_handler, health, _on_startup, _on_cleanup) are
     # imported lazily to avoid the circular that would form if this file
     # were imported at ``__init__.py`` load time.
     from . import (
         _on_cleanup,
         _on_startup,
         comments_handler,
-        dms_handler,
         health,
         posts_handler,
         profile_handler,
@@ -99,7 +98,6 @@ def build_app():
     app.router.add_post("/social/users", users_handler)
     app.router.add_post("/social/profile", profile_handler)
     app.router.add_post("/social/seed", seed_handler)
-    app.router.add_post("/social/dms", dms_handler)
     app.router.add_post("/social/cookies", cookies_handler)
     app.router.add_post("/social/dm-frame", dm_frame_handler)
     app.router.add_post("/social/dm-sample", dm_sample_handler)

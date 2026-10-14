@@ -158,7 +158,7 @@ def test_expanded_social_tabs_are_opt_in():
         instagram_line = next(line for line in text.splitlines() if 'id: "instagram"' in line)
         tiktok_line = next(line for line in text.splitlines() if 'id: "tiktok"' in line)
         assert 'url: "https://www.instagram.com/"' in instagram_line
-        assert 'optionalExtraUrls: ["https://www.instagram.com/direct/inbox/"]' in instagram_line
+        assert "optionalExtraUrls" not in instagram_line
         assert 'url: "https://www.tiktok.com/following"' in tiktok_line
         assert 'optionalExtraUrls: ["https://www.tiktok.com/foryou", "https://www.tiktok.com/explore"]' in tiktok_line
 

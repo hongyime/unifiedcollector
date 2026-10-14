@@ -42,10 +42,7 @@ export interface Platform {
    * "not logged in" badge.
    */
   readonly noLogin?: boolean;
-  /**
-   * Extra URLs that "expanded tabs" mode opens for broader coverage
-   * (e.g. Instagram DM inbox, TikTok /foryou + /explore).
-   */
+  /** Extra URLs that expanded tabs mode opens for broader coverage. */
   readonly optionalExtraUrls?: readonly string[];
 }
 
@@ -57,7 +54,7 @@ export interface Platform {
  * of a red "not logged in" badge.
  */
 export const UC_PLATFORMS: readonly Platform[] = [
-  { id: "instagram", label: "Instagram",   url: "https://www.instagram.com/",       host: "www.instagram.com",  cookieUrl: "https://www.instagram.com",      cookie: "sessionid",  scraper: true, optionalExtraUrls: ["https://www.instagram.com/direct/inbox/"] },
+  { id: "instagram", label: "Instagram",   url: "https://www.instagram.com/",       host: "www.instagram.com",  cookieUrl: "https://www.instagram.com",      cookie: "sessionid",  scraper: true },
   // Threads moved threads.net → threads.com in Apr 2025 (.net just redirects).
   { id: "threads",   label: "Threads",     url: "https://www.threads.com/",         host: "www.threads.com",    cookieUrl: "https://www.threads.com",        cookie: "sessionid",  scraper: true },
   // Optional expanded coverage: /foryou and /explore add broader discovery.

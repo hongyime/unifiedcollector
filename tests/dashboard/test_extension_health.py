@@ -567,7 +567,7 @@ async def test_browser_extension_payload_flags_stale_and_old_versions(monkeypatc
             if "FROM dm_hook_heartbeat" in query:
                 return [
                     {
-                        "platform": "instagram",
+                        "platform": "tiktok",
                         "last_seen_at": datetime(2026, 7, 27, tzinfo=timezone.utc),
                         "age_seconds": 3700,
                         "extension_version": "1.21.28",

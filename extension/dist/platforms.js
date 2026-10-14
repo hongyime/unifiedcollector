@@ -2,7 +2,7 @@
 (() => {
   // src/shared/platforms.ts
   var UC_PLATFORMS = [
-    { id: "instagram", label: "Instagram", url: "https://www.instagram.com/", host: "www.instagram.com", cookieUrl: "https://www.instagram.com", cookie: "sessionid", scraper: true, optionalExtraUrls: ["https://www.instagram.com/direct/inbox/"] },
+    { id: "instagram", label: "Instagram", url: "https://www.instagram.com/", host: "www.instagram.com", cookieUrl: "https://www.instagram.com", cookie: "sessionid", scraper: true },
     // Threads moved threads.net → threads.com in Apr 2025 (.net just redirects).
     { id: "threads", label: "Threads", url: "https://www.threads.com/", host: "www.threads.com", cookieUrl: "https://www.threads.com", cookie: "sessionid", scraper: true },
     // Optional expanded coverage: /foryou and /explore add broader discovery.

@@ -13,7 +13,7 @@ probes, raw samples, and decoded payloads here. Endpoints:
 - POST /social/dm-decoded    → ``dm_decoded_handler``
 
 Heavy helpers (``_dm_probe_log_write``, ``_upsert_tt_decoded``,
-``_upsert_ig_decoded``, ``_archive_browser_capture``) still live in
+``_archive_browser_capture``) still live in
 ``__init__.py`` and are imported lazily.
 """
 import asyncio
@@ -37,8 +37,8 @@ async def dm_hook_heartbeat_handler(request):
 
     body = await _safe_json(request)
     platform = (body.get("platform") or "").strip()
-    if not platform:
-        return _cors(web.json_response({"ok": False, "error": "no_platform"}, status=400))
+    if platform != "tiktok":
+        return _cors(web.json_response({"ok": False, "error": "unsupported_platform"}, status=400))
     owner = (body.get("owner") or body.get("owner_account") or "").strip()
     try:
         probes = int(body.get("probes_sent") or 0)
@@ -103,13 +103,15 @@ async def dm_probe_handler(request):
     from . import _archive_browser_capture, _dm_probe_log_write, _safe_json, _schedule_app_task
 
     body = await _safe_json(request)
+    platform = body.get("platform") or "unknown"
+    if platform != "tiktok":
+        return _cors(web.json_response({"ok": False, "error": "unsupported_platform"}, status=400))
     logger.info(
         "DM probe: platform=%s transport=%s kind=%s size=%s url=%s",
-        body.get("platform"), body.get("transport"), body.get("frame_kind"),
+        platform, body.get("transport"), body.get("frame_kind"),
         body.get("frame_size"), body.get("url"),
     )
     pool = request.app.get("pool")
-    platform = body.get("platform") or "unknown"
     _schedule_app_task(
         request.app,
         _dm_probe_log_write(pool, platform, "probe", body),
@@ -135,6 +137,8 @@ async def dm_sample_handler(request):
 
     body = await _safe_json(request)
     platform = (body.get("platform") or "unknown").replace("/", "_")[:20]
+    if platform != "tiktok":
+        return _cors(web.json_response({"ok": False, "error": "unsupported_platform"}, status=400))
     b64 = body.get("b64") or ""
     try:
         raw = base64.b64decode(b64)
@@ -214,13 +218,14 @@ async def dm_frame_handler(request):
     from . import _archive_browser_capture, _safe_json
 
     body = await _safe_json(request)
+    platform = body.get("platform") or "unknown"
+    if platform != "tiktok":
+        return _cors(web.json_response({"ok": False, "error": "unsupported_platform"}, status=400))
     try:
         logger.info("DM JSON frame (%s): %s", body.get("platform"), json.dumps(body.get("frame"))[:1000])
     except Exception:
         logger.info("DM frame observed (unserializable)")
-    await _archive_browser_capture(
-        request.app.get("pool"), body.get("platform") or "unknown", "dm_frame", body,
-    )
+    await _archive_browser_capture(request.app.get("pool"), platform, "dm_frame", body)
     return _cors(web.json_response({"ok": True}))
 
 
@@ -229,13 +234,12 @@ async def dm_decoded_handler(request):
     from . import (
         _archive_browser_capture,
         _safe_json,
-        _upsert_ig_decoded,
         _upsert_tt_decoded,
     )
 
     body = await _safe_json(request)
     platform = (body.get("platform") or "").strip().lower()
-    if platform not in ("tiktok", "instagram"):
+    if platform != "tiktok":
         return _cors(web.json_response(
             {"ok": False, "error": "unsupported_platform"}, status=400,
         ))
@@ -251,10 +255,7 @@ async def dm_decoded_handler(request):
     if not pool:
         return _cors(web.json_response({"ok": True, "recorded": 0}))
     await _archive_browser_capture(pool, platform, "dm_decoded", body)
-    if platform == "tiktok":
-        thread_n, msg_n = await _upsert_tt_decoded(pool, owner, threads, messages)
-    else:
-        thread_n, msg_n = await _upsert_ig_decoded(pool, owner, threads, messages)
+    thread_n, msg_n = await _upsert_tt_decoded(pool, owner, threads, messages)
     if thread_n or msg_n:
         logger.info("DM decoded[%s]: %d threads, %d messages", platform, thread_n, msg_n)
     return _cors(web.json_response({"ok": True, "threads": thread_n, "messages": msg_n}))

@@ -668,18 +668,18 @@ def test_source_matrix_blocker_uses_extension_reload_url_when_available():
     assert "unpacked extension path" in blocker["next_action"]
 
 
-def test_source_matrix_blocker_explains_instagram_dm_hook_stale():
+def test_source_matrix_blocker_explains_tiktok_dm_hook_stale():
     _extension_id, reload_url = _extension_reload_target_from_url(
         "chrome-extension://pkmdmcklnjdeocoeigmlakhomhhcpafb/background.js"
     )
 
     blocker = _source_matrix_blocker(
-        _source(source="instagram"),
+        _source(source="tiktok"),
         rate_row=None,
         cursor_row=None,
         extension_issues=[
             {
-                "platform": "instagram",
+                "platform": "tiktok",
                 "kind": "hook_stale",
                 "detail": "Chrome extension DM hook heartbeat is older than 1 hour.",
                 "age_seconds": 7200,
@@ -689,7 +689,7 @@ def test_source_matrix_blocker_explains_instagram_dm_hook_stale():
     )
 
     assert blocker["kind"] == "hook_stale"
-    assert "Direct inbox" in blocker["next_action"]
+    assert "TikTok Messages" in blocker["next_action"]
     assert "normal browser heartbeats" in blocker["next_action"]
     assert reload_url in blocker["next_action"]
 

@@ -38,8 +38,6 @@ import type {
   FollowEdgeStat,
   PlatformSummary,
   MessagingCoverageRow,
-  IgDmThread,
-  IgDmMessage,
   TtDmThread,
   TtDmMessage,
   TtProfile,
@@ -58,7 +56,6 @@ import type {
   Lemon8ProfileDetail,
   BeeperChat,
   BeeperChatDetail,
-  DmTelemetry,
   WaSessionsResponse,
   WaChat,
   WaChatDetail,
@@ -214,17 +211,7 @@ export const api = {
       `/whatsapp/chat/${encodeURIComponent(jid)}?limit=${limit}`,
     ),
 
-  igDmThreads: (owner?: string, limit = 100) => {
-    const params = new URLSearchParams({ limit: String(limit) });
-    if (owner) params.set("owner", owner);
-    return get<IgDmThread[]>(`/instagram/dms/threads?${params}`);
-  },
-  igDmThread: (threadId: string) =>
-    get<{ thread: IgDmThread | null; messages: IgDmMessage[] }>(
-      `/instagram/dms/thread/${encodeURIComponent(threadId)}`,
-    ),
-
-  // TikTok DMs — same schema shape as IG but backed by tiktok_dm{,_thread}
+  // TikTok DMs — backed by tiktok_dm{,_thread}
   // populated by the extension's client-side protobuf decoder.
   ttDmThreads: (owner?: string, limit = 100) => {
     const params = new URLSearchParams({ limit: String(limit) });
@@ -291,11 +278,6 @@ export const api = {
     get<BeeperChatDetail>(
       `/beeper/chat/${encodeURIComponent(chatId)}?limit=${limit}`,
     ),
-
-  // P1.2: passive telemetry surface. Populated by dm_probe_handler +
-  // dm_sample_handler in src/bridges/ig_ingest.py. Used by the counter panel
-  // at the top of InstagramDmPage.
-  dmTelemetry: () => get<DmTelemetry>("/dm/telemetry"),
 
   waLinks: (opts?: { linkType?: string; status?: string; limit?: number }) => {
     const params = new URLSearchParams();

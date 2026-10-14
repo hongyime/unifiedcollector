@@ -1,10 +1,8 @@
-"""DM (direct messages) routes for Instagram and TikTok, plus DM probe telemetry.
+"""TikTok direct-message routes and DM probe telemetry.
 
 Extracted from ``src/dashboard/api/__init__.py`` during PERF-002 4A step 16
 (cluster 5). Covers:
 
-* ``/instagram/dms/threads``
-* ``/instagram/dms/thread/{thread_id}``
 * ``/tiktok/dms/threads``
 * ``/tiktok/dms/thread/{thread_id}``
 * ``/dm/telemetry``
@@ -38,74 +36,11 @@ async def _get_pool():
 router = APIRouter()
 
 
-@router.get("/instagram/dms/threads")
-async def list_ig_dm_threads(owner: str | None = None, limit: int = 100,
-                             _user: dict = Depends(require_role("viewer"))):
-    """DM threads with a message count and last-activity, newest first.
-
-    instagram_dm_thread may be empty until the extension observes IG DMs in a
-    logged-in tab; return [] cleanly if the table doesn't exist yet.
-    """
-    limit = max(1, min(limit, 500))
-    pool = await _get_pool()
-    async with pool.acquire() as conn:
-        if await conn.fetchval("SELECT to_regclass('instagram_dm_thread')") is None:
-            return []
-        params: list = []
-        where = ""
-        if owner:
-            where = "WHERE t.owner_account = $1"
-            params.append(owner)
-        rows = await conn.fetch(
-            f"""
-            SELECT t.thread_id, t.title, t.participants, t.owner_account,
-                   t.last_activity,
-                   COALESCE(m.cnt, 0)   AS message_count,
-                   m.last_ts            AS last_message_ts
-            FROM instagram_dm_thread t
-            LEFT JOIN (
-                SELECT thread_id, count(*) AS cnt, max("timestamp") AS last_ts
-                FROM instagram_dm GROUP BY thread_id
-            ) m ON m.thread_id = t.thread_id
-            {where}
-            ORDER BY COALESCE(t.last_activity, m.last_ts) DESC NULLS LAST
-            LIMIT ${len(params) + 1}
-            """,
-            *params, limit,
-        )
-    return [dict(r) for r in rows]
-
-
-@router.get("/instagram/dms/thread/{thread_id}")
-async def ig_dm_thread_messages(thread_id: str, limit: int = 200,
-                                _user: dict = Depends(require_role("viewer"))):
-    """Messages for one IG DM thread, chronological (oldest first) for display."""
-    limit = max(1, min(limit, 2000))
-    pool = await _get_pool()
-    async with pool.acquire() as conn:
-        if await conn.fetchval("SELECT to_regclass('instagram_dm')") is None:
-            return {"thread": None, "messages": []}
-        thread = await conn.fetchrow(
-            "SELECT * FROM instagram_dm_thread WHERE thread_id = $1", thread_id,
-        )
-        rows = await conn.fetch(
-            'SELECT message_id, sender_id, sender_username, text, item_type, '
-            '"timestamp", is_from_me, owner_account '
-            'FROM instagram_dm WHERE thread_id = $1 '
-            'ORDER BY "timestamp" ASC NULLS LAST LIMIT $2',
-            thread_id, limit,
-        )
-    return {
-        "thread": dict(thread) if thread else None,
-        "messages": [dict(r) for r in rows],
-    }
-
-
 @router.get("/tiktok/dms/threads")
 async def list_tt_dm_threads(owner: str | None = None, limit: int = 100,
                              _user: dict = Depends(require_role("viewer"))):
     """TikTok DM threads with per-thread message count + last-activity, newest
-    first. Mirrors /instagram/dms/threads. tiktok_dm{,_thread} are populated
+    first. tiktok_dm{,_thread} are populated
     by the extension's client-side decoder POSTing to /social/dm-decoded (see
     src/db/migrations/add_tiktok_dm.sql for the field-number derivation).
 
@@ -184,12 +119,10 @@ async def dm_telemetry(_user: dict = Depends(require_role("viewer"))):
 
     Returns per-platform counts of probes and samples the extension's
     observe-only WS hook has emitted, so we can tell at a glance whether real
-    DM frames have arrived (particularly Instagram, which has been stuck at
-    keepalive-class 1–4 byte frames while TikTok has been streaming 1KB
-    protobuf samples on every DM). P1.3 also folds in dm_hook_heartbeat so
+    DM frames have arrived (for TikTok's frontier WebSocket decoder). P1.3 also folds in dm_hook_heartbeat so
     the panel surfaces "last time the extension WS hook checked in" —
-    critical for knowing when an IG/TikTok bundle change has silently broken
-    the wrapper.
+    critical for knowing when a TikTok bundle change has silently broken the
+    wrapper.
 
     Empty result if the tables don't exist yet (boot before migration).
     """
@@ -209,6 +142,7 @@ async def dm_telemetry(_user: dict = Depends(require_role("viewer"))):
                 MAX(frame_size)                                                     AS max_frame_size,
                 MIN(frame_size) FILTER (WHERE frame_size > 0)                       AS min_frame_size
             FROM dm_probe_log
+            WHERE platform = 'tiktok'
             GROUP BY platform, event_type
             ORDER BY platform, event_type
             """
@@ -224,6 +158,7 @@ async def dm_telemetry(_user: dict = Depends(require_role("viewer"))):
                        (ARRAY_AGG(extension_version ORDER BY last_seen DESC))[1]     AS extension_version,
                        COUNT(*) FILTER (WHERE owner_account <> '')                   AS owner_count
                 FROM dm_hook_heartbeat
+                WHERE platform = 'tiktok'
                 GROUP BY platform
                 """
             )

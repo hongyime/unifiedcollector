@@ -605,32 +605,10 @@ export interface UserHistoryEntry {
   collected_at: string;
 }
 
-export interface IgDmThread {
-  thread_id: string;
-  title: string | null;
-  participants: string[] | null;
-  owner_account: string | null;
-  last_activity: string | null;
-  message_count?: number;
-  last_message_ts?: string | null;
-}
-
-export interface IgDmMessage {
-  message_id: string;
-  sender_id: string | null;
-  sender_username: string | null;
-  text: string | null;
-  item_type: string | null;
-  timestamp: string | null;
-  is_from_me: boolean;
-  owner_account: string | null;
-}
-
 // TikTok DMs — captured through the extension's WS-hook client-side decoder
 // (Option B of #39). Table columns match tiktok_dm{,_thread}; API endpoints
 // under /tiktok/dms/. Thread IDs are the conversation_id string
-// '0:1:UID_A:UID_B' — kept as `thread_id` in the API shape for symmetry
-// with the IG DM types.
+// '0:1:UID_A:UID_B' — kept as `thread_id` in the API shape.
 export interface TtDmThread {
   thread_id: string;
   conversation_type: number | null;
@@ -940,20 +918,6 @@ export interface BeeperChatDetail {
   messages: BeeperMessage[];
 }
 
-// Passive DM WS-hook telemetry (P1.2). One entry per platform the extension's
-// observe-only WS wrapper has ever seen; `probe`/`sample` mirror event_type
-// in dm_probe_log. Null last_seen means "never" — most useful signal for
-// Instagram, which stays at 1 placeholder sample until real DM traffic
-// (edge-chat.instagram.com/chat frames ≥ 24B) actually shows up.
-export interface DmTelemetryBucket {
-  all_time: number;
-  last_24h: number;
-  last_1h: number;
-  last_seen: string | null;
-  max_frame_size: number | null;
-  min_frame_size: number | null;
-}
-
 // WhatsApp bridge session identity (bridge /session endpoint + dashboard
 // /whatsapp/sessions aggregator). Returned per bridge slot after the user
 // scans a QR — phone_number + push_name identifies which account got
@@ -993,26 +957,6 @@ export interface WaBridgeAuthState {
 export interface WaSessionsResponse {
   sessions: WaBridgeSession[];
 }
-export interface DmTelemetryPlatform {
-  platform: string;
-  probe: DmTelemetryBucket;
-  sample: DmTelemetryBucket;
-  // P1.3: browser-side WS-hook liveness. Null when no heartbeat has ever
-  // arrived — the watchdog treats that as "not installed" (won't alert).
-  hook: DmHookHeartbeat | null;
-}
-export interface DmHookHeartbeat {
-  last_seen: string | null;
-  probes_sent: number;
-  samples_shipped: number;
-  extension_version: string | null;
-  owner_count: number;
-}
-export interface DmTelemetry {
-  platforms: DmTelemetryPlatform[];
-  generated_at: string;
-}
-
 // WhatsApp chats + messages — /whatsapp/chats and /whatsapp/chat/{jid}. The
 // platform_chat_id (JID) doubles as the API path parameter; message rows carry
 // pushname/phone_number joined from whatsapp_users and a media_id joined from

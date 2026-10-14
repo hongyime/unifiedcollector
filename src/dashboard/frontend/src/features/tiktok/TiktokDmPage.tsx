@@ -11,9 +11,8 @@ import { relativeTime } from "../../utils/formatters";
 // through POST /social/dm-decoded. Empty state is expected on a fresh boot
 // or if the user hasn't DMed with the v1.21.8+ extension installed.
 //
-// Unlike Instagram DMs (which come with sender_username via direct_v2
-// responses), TikTok's frontier protocol only exposes sender_uid — a raw
-// uint64 that maps to an account but doesn't carry a display name. The UI
+// TikTok's frontier protocol exposes sender_uid — a raw uint64 that maps to
+// an account but doesn't carry a display name. The UI
 // shows the UID + secUid; unifiedanalyzer's identity resolver can later
 // backfill display names from social_users when the same UID appears in a
 // browsed profile.
