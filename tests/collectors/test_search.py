@@ -833,6 +833,17 @@ def test_dynamic_term_sources_cover_additional_social_profiles_and_posts():
     } <= source_names
 
 
+def test_dynamic_dorks_include_approved_person_and_document_queries():
+    queries = search_mod._expand_dynamic_dorks("alice example")
+
+    assert '"alice example" filetype:pdf' in queries
+    assert '"alice example" (site:github.com OR site:linkedin.com OR site:twitter.com)' in queries
+    assert 'filetype:pdf "alice example"' in queries
+    assert '"alice example" filetype:(pdf OR docx OR xlsx OR pptx)' in queries
+    assert '"alice example" filetype:pdf resume' in queries
+    assert 'site:target.com filetype:pdf "alice example"' in queries
+
+
 @pytest.mark.asyncio
 async def test_collect_runs_dynamic_dork_queries_before_static_targets(monkeypatch):
     _set_clean_env(monkeypatch)
@@ -927,6 +938,25 @@ async def test_dynamic_term_refresh_runs_each_collection_cycle_by_default(monkey
     assert not pool._conn.fetchval.await_args_list
     assert pool._conn.fetch.await_count == len(search_mod._DYNAMIC_TERM_SOURCE_QUERIES)
     assert any("FROM airbnb_listings" in call.args[0] for call in pool._conn.fetch.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_dynamic_query_result_update_tracks_zero_results(monkeypatch):
+    _set_clean_env(monkeypatch)
+    coll = SearchCollector()
+    pool = _make_pool()
+    coll.set_pool(pool)
+    item = {"term": "alice", "next_template_cursor": 4}
+
+    await coll._mark_dynamic_search_query(item, result_count=0, completed=True)
+
+    sql, *args = pool._conn.execute.await_args.args
+    assert "zero_result_since = CASE" in sql
+    assert "total_result_count = total_result_count" in sql
+    assert args[0] == "alice"
+    assert args[1] is True
+    assert args[3] == 4
+    assert args[4] == 0
 
 
 @pytest.mark.asyncio
