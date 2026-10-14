@@ -330,15 +330,22 @@
       const card = node.closest('[data-testid*="story" i], [data-testid*="discover" i], article, [role="listitem"]') || node.parentElement || node;
       const media = card.querySelector("video") || null;
       const image = card.querySelector("img[src]") || null;
-      const anchor = node instanceof HTMLAnchorElement ? node : card.querySelector('a[href*="/story/"], a[href*="/p/"]');
-      const storyUrl = absoluteHttps(anchor?.href, pageUrl) || pageUrl;
-      const mediaUrl = absoluteHttps(media?.currentSrc || media?.src || image?.currentSrc || image?.src, pageUrl);
-      const title = cleanText(node.getAttribute("aria-label") || visibleText(card, 500), 500);
-      const linkedUsername = Array.from(node.querySelectorAll('a[href*="/@"], a[href*="/add/"]')).map((link) => snapchatUsername(link.href)).find((value) => value) || null;
-      const labelUsername = (node.getAttribute("aria-label") || "").match(/Profile Picture\s+([A-Za-z0-9._-]+)/i)?.[1] || null;
+      const storyAnchor = node instanceof HTMLAnchorElement && /\/(?:story|p)\//i.test(node.pathname) ? node : card.querySelector('a[href*="/story/"], a[href*="/p/"]');
+      const profileAnchor = card.querySelector('a[href*="/@"], a[href*="/add/"]');
+      const storyUrl = absoluteHttps(storyAnchor?.href, pageUrl) || absoluteHttps(profileAnchor?.href, pageUrl) || pageUrl;
+      const mediaUrl = absoluteHttps(media?.currentSrc, pageUrl) || absoluteHttps(media?.src, pageUrl) || absoluteHttps(media?.querySelector("source[src]")?.src, pageUrl) || absoluteHttps(image?.currentSrc || image?.src, pageUrl);
+      const cardText = visibleText(card, 500);
+      const title = cleanText(node.getAttribute("aria-label") || cardText, 500);
+      const linkedUsername = Array.from(card.querySelectorAll('a[href*="/@"], a[href*="/add/"]')).map((link) => snapchatUsername(link.href)).find((value) => value) || null;
+      const label = node.getAttribute("aria-label") || card.getAttribute("aria-label") || title || "";
+      const labelUsername = label.match(/Profile Picture\s+([A-Za-z0-9._-]+)/i)?.[1] || null;
+      const textUsername = (cardText || "").match(/^([A-Za-z0-9._-]{1,100})\s+\d+\s*(?:m|h|d|w)\s+ago\b/i)?.[1] || null;
       const rawId = node.getAttribute("data-story-id") || node.getAttribute("data-item-id") || storyUrl.match(/\/(?:story|p)\/([^/?#]+)/i)?.[1] || "";
-      const storyUsername = username || linkedUsername || labelUsername;
-      const id = cleanText(rawId, 200) || stableId("story", `${storyUsername || "public"}|${storyUrl}|${mediaUrl || ""}|${title || ""}`);
+      const storyUsername = username || linkedUsername || labelUsername || textUsername;
+      const canonicalStoryUrl = storyUrl === pageUrl && storyUsername ? `https://www.snapchat.com/@${encodeURIComponent(storyUsername)}` : storyUrl;
+      const mediaPath = mediaUrl ? new URL(mediaUrl).pathname : "";
+      const stableTitle = cleanText((title || "").replace(/\s+\d+\s*(?:m|h|d|w)\s+ago\s*$/i, ""), 500);
+      const id = cleanText(rawId, 200) || stableId("story", mediaPath ? `${storyUsername || "public"}|${mediaPath}` : `${storyUsername || "public"}|${canonicalStoryUrl}|${stableTitle || ""}`);
       if (seen.has(id) || !mediaUrl && !title) continue;
       seen.add(id);
       const time = node.querySelector("time[datetime]")?.dateTime || null;
@@ -347,9 +354,9 @@
         id,
         username: storyUsername,
         title,
-        url: storyUrl,
+        url: canonicalStoryUrl,
         media_url: mediaUrl,
-        thumbnail_url: absoluteHttps(image?.currentSrc || image?.src || media?.poster, pageUrl),
+        thumbnail_url: absoluteHttps(image?.currentSrc || image?.src, pageUrl) || absoluteHttps(media?.poster, pageUrl) || absoluteHttps(media?.querySelector("source[src]")?.src, pageUrl),
         posted_at: time,
         expires_at: null,
         metadata: { page_path: parsed.pathname, visible_public_story: true }
