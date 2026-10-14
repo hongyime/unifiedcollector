@@ -761,7 +761,7 @@ services:
       BEEPER_ACCOUNTS_TIMEOUT: "20"
       BEEPER_CHATS_TIMEOUT: "90"
       BEEPER_MESSAGES_TIMEOUT: "600"
-      BEEPER_CHAT_SYNC_TIMEOUT_SECONDS: "180"
+      BEEPER_CHAT_SYNC_TIMEOUT_SECONDS: "300"
       BEEPER_OPTIONAL_PHASE_TIMEOUT_COOLDOWN_SECONDS: "900"
       # Keep live message sync ahead of historical network cleanup. The repair
       # runs after message sync and is intentionally bounded so a DB-heavy pass

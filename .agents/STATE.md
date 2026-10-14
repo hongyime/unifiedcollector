@@ -1,13 +1,11 @@
 # Agent State
-Current task: Execute Phases 2–6 of `docs/spider-foryou-plan.md` in order, with bounded checks and per-platform rollout gates.
-Status: Phases 2–6 are complete and pushed. Phase commits: `e2238c33`, `0e6c47fa`, `33c18f5b`, `8be2796a`, `8233b274`. Shared state update is being committed separately. Phase 3/4 migration ledger checksums match the repository files and are applied.
+Current task: Increase Beeper chat sync timeout to 300 seconds and restart only `collector_beeper`.
+Status: Timeout configured at 300 seconds; the requested `collector_beeper` restart succeeded and the change is committed on `main`.
 Progress:
-- Phase 5 caps browser scroll passes at 18, TikTok profile fallback at 100 items, Lemon8 FYP at 5 pages / 120 media / 5 optional detail requests, and Strava passes at 10/20 pages with one retry after 429 backoff. Instagram personalized home/Reels and YouTube personalized home remain unsupported.
-- Phase 6 adds shared queue status/age, safe browser/graph/headless DLQ error categories with per-source availability, stale-surface freshness, and operator pause/cadence controls bounded to 1–720 hours. Shared-queue claims remain feature-gated; legacy queues remain active.
-- Fixed review findings: error-query failures are visible as partial/unavailable; headless errors are categorized in SQL without returning raw messages; freshness counts use a recent window while latest timestamps are looked up separately. Failed historical lookups now return an explicit incomplete status.
-- Dashboard build and Vitest passed (2 tests); Python compilation and focused fake route assertions passed. Pytest is unavailable in host and dashboard environments.
-- Live read-only route smoke passed: shared queue age available, graph/DLQ error sources available, browser error source partial, and no Beeper controls. The live DB exceeded the bounded all-time freshness lookup, so the endpoint returned `freshness_available=false` with a safe timeout category. No schedules were changed and no platform endpoints were contacted.
-Next: no implementation steps remain. The bounded live smoke showed database timeouts for historical freshness and browser error queries; these are surfaced as incomplete status. See `.agents/handoffs/20261013-spider-phases-2-6.json`.
+- Changed `BEEPER_CHAT_SYNC_TIMEOUT_SECONDS` from 180 to 300 in `docker/docker-compose.yml`.
+- Ran `docker compose -f docker/docker-compose.yml restart collector_beeper`; `unifiedcollector_collector_beeper` restarted successfully.
+- Compose restart does not recreate the container or apply changed environment values; the 300-second value takes effect when the container is recreated.
+
 Previous task: YouTube bot-check resolved. Cross-project survey (musicstream, healthkaki-pov, unifiedcollector) identified root cause as cookie jar writeback permissions: yt-dlp calls save_cookies() at exit, raising PermissionError on host-owned read-only cookie mount in the container (uid 1001), misclassified as a restricted/bot failure, compounded by negative-cache memoization in _usable_cookie_file(). Added ephemeral writable cookie snapshotting (_create_writable_cookie_snapshot) into operation tempdirs across video, thumbnail, transcript, comment, and playlist calls. Verified with public probe video jNQXAC9IVRw (RC 0, metadata and 11 formats extracted, zero bot check). No media was bulk-downloaded; never include cookie values.
 
 ## Prior handoff history
