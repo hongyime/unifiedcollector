@@ -33,3 +33,9 @@ def test_instagram_shares_the_social_scrape_mutex():
     groups = WorkerService.SOURCE_MUTEX_GROUPS
 
     assert groups["instagram"] == groups["tiktok"] == groups["lemon8"]
+
+
+def test_search_and_exposure_share_the_search_engine_mutex():
+    groups = WorkerService.SOURCE_MUTEX_GROUPS
+
+    assert groups["search"] == groups["exposure"] == "search_engine"

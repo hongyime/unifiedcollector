@@ -1,9 +1,9 @@
 # Agent State
 Current task: Complete the four-item UnifiedCollector fix list in order; item 1 is verified and items 2–4 remain.
-Status: YouTube media download is verified from live collector logs. Continue with rate-limit audit; do not touch Beeper or spider files.
+Status: Item 1 is complete. Item 2 search pacing is patched and pre-deployment verified; deployment and the 15-minute quiet window remain. Do not touch Beeper or spider files.
 Progress:
 - Item 1 complete: deployed fix `47c4e719` is on `origin/main`. In the last 30 minutes, collector logs showed 119 successful yt-dlp runs and 119 ingests with stored media; zero rate-limit markers appeared in that window. No container restart or probe request was needed.
-- Item 2 pending: audit `rate_limit_events`, all collector logs and pacing; then verify a 15-minute quiet window.
+- Item 2 in progress: pre-fix 15-minute logs showed 28 search-provider 429s (14 each from Google and Brave) caused by DDGS `auto` fan-out; the DB event table had no entries in that window. Pinned text/image search to the probed Yahoo/Bing backends, added 30s plus 0–10s host pacing, shared `search`/`exposure` advisory mutex, durable cooldown lookup, exponential backoff, Retry-After handling, and no same-request retry. Focused tests passed (44); bounded Yahoo text and Bing image probes returned one result each. Runtime deploy and 15-minute quiet verification remain.
 - Item 3 pending: classify all 75 stale and 35 empty tables from `/tmp/table-audit-20261014.md`, fixing actual producer bugs one at a time. `docs/spider-foryou-plan.md` says spider phases 2–6 are done; do not redo them.
 - Item 4 pending: 15-minute soak and `/tmp/grind-summary-20261014.md`.
 

@@ -1,4 +1,5 @@
 # UnifiedCollector Agent Journal
+- 2026-10-14: Traced active search 429s to DDGS `auto` provider fan-out bypassing domain pacing; pinned one backend per call, added host pacing and a shared search/exposure mutex, durable exponential cooldowns, Retry-After handling, and removed immediate 429 retries. Focused tests passed (44); bounded Yahoo/Bing probes passed; deployment soak remains.
 - 2026-10-14: Verified the deployed YouTube cookie-snapshot fix `47c4e719` through live collector logs: 119 yt-dlp runs stored media in the last 30 minutes; no rate-limit markers appeared in that window.
 - 2026-10-02: Postgres split started (Option 1, two containers; the OOM history makes shared-instance blast radius unacceptable). Collector side: GAN migration archived (entity_faces is analyzer-owned), proximity.py requires explicit ANALYZER_DATABASE_URL, healthcheck POSTGRES_DB parameterized, face_recognition.sql archived. Live-DB waves deferred until the stack is up; use the pgvector image for psql/pg_dump.
 - 2026-10-01: The env-split checker is green. The four keys it flagged are documented at the code defaults.

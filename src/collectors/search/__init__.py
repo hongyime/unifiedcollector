@@ -290,6 +290,7 @@ class SearchCollector(BaseCollector):
         self._content_hashes: set[str] = set()
         self._duplicates_skipped = 0
         self._search_scope_cooldowns: dict[str, float] = {}
+        self._search_rate_limit_streaks: dict[str, int] = {}
 
         # Register Serper quota with the unified tracker if available.
         self._register_serper_quota()
@@ -502,12 +503,30 @@ class SearchCollector(BaseCollector):
         if not cooldown_active:
             event_metadata["cooldown_active"] = False
             cooldown_seconds = None
-        elif status_code == 429 and cooldown_seconds is None:
-            cooldown_seconds = self._default_429_cooldown_seconds()
+        elif status_code == 429:
+            key = self._search_cooldown_key(engine, scope, account)
+            streak = self._search_rate_limit_streaks.get(key, 0) + 1
+            self._search_rate_limit_streaks[key] = streak
+            base = self._default_429_cooldown_seconds() or 0
+            try:
+                max_cooldown = max(
+                    base,
+                    int(float(os.getenv("SEARCH_RATE_LIMIT_MAX_COOLDOWN_SECONDS", "21600"))),
+                )
+            except (TypeError, ValueError):
+                max_cooldown = max(base, 21600)
+            exponential = min(max_cooldown, base * (2 ** min(streak - 1, 16)))
+            retry_after = self._retry_after_seconds(response) if response is not None else None
+            cooldown_seconds = max(
+                cooldown_seconds or 0,
+                retry_after or 0,
+                exponential,
+            ) or None
         if cooldown_active and status_code == 429:
             self._set_search_scope_cooldown(engine, scope, cooldown_seconds, account)
         await record_rate_limit_event(
             self.pool,
+            # Search and exposure share one provider cooldown namespace.
             source="search",
             account=account,
             scope=scope,
@@ -527,38 +546,48 @@ class SearchCollector(BaseCollector):
         reason: str,
         metadata: dict[str, Any] | None = None,
     ):
-        retry_delay = await sleep_before_pre_cooldown_retry(
-            "search",
-            scope,
-            account=account,
-            status_code=429,
-            reason=reason,
-        )
-        if retry_delay is None:
-            return None
+        # A 429 is already a clear stop signal. Retrying the same endpoint adds
+        # load while the provider is throttling us. The caller records the
+        # response, honors Retry-After, and applies an exponential cooldown.
+        logger.info("search/%s received 429 for %s; skipping retry", engine, scope)
+        return None
+
+    async def _search_scope_cooldown_active(self, engine: str, scope: str) -> bool:
+        """Check both the local timer and durable provider cooldown before a call."""
+        if self._search_scope_cooling_down(engine, scope):
+            return True
+        if self.pool is None:
+            return False
         try:
-            retry_resp = await fetch()
-        except Exception as exc:
-            logger.debug("search/%s pre-cooldown retry failed for %s: %s", engine, scope, exc)
-            return None
-        retry_status = getattr(retry_resp, "status_code", None)
-        if retry_status != 429:
-            event_metadata = dict(metadata or {})
-            event_metadata.update({
-                "pre_cooldown_retry": True,
-                "retry_status_code": retry_status,
-                "retry_delay_seconds": retry_delay,
-            })
-            await self._record_search_rate_limit(
-                engine=engine,
-                scope=scope,
-                account=account,
-                status_code=429,
-                cooldown_active=False,
-                reason=f"{reason}; retry returned HTTP {retry_status}",
-                metadata=event_metadata,
-            )
-        return retry_resp
+            async with self.pool.acquire() as conn:
+                remaining = await conn.fetchval(
+                    """
+                    SELECT GREATEST(
+                        0,
+                        EXTRACT(EPOCH FROM (
+                            created_at + cooldown_seconds * interval '1 second' - NOW()
+                        ))
+                    )::int
+                    FROM rate_limit_events
+                    WHERE source = 'search' AND scope = $1 AND status_code = 429
+                      AND cooldown_seconds > 0
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    scope,
+                    timeout=5,
+                )
+        except Exception:
+            return False
+        if remaining and int(remaining) > 0:
+            self._set_search_scope_cooldown(engine, scope, int(remaining))
+            return True
+        return False
+
+    def _clear_search_scope_cooldown(self, engine: str, scope: str) -> None:
+        key = self._search_cooldown_key(engine, scope)
+        self._search_scope_cooldowns.pop(key, None)
+        self._search_rate_limit_streaks.pop(key, None)
 
     # ------------------------------------------------------------------ #
     # Quota wiring
@@ -905,6 +934,11 @@ class SearchCollector(BaseCollector):
         DDGS = self._DDGS
         if DDGS is None:
             return []
+        yahoo_cooling = await self._search_scope_cooldown_active("yahoo", "search.yahoo.com")
+        bing_cooling = await self._search_scope_cooldown_active("bing", "bing.com")
+        if yahoo_cooling and bing_cooling:
+            logger.info("[DDG] Yahoo and Bing providers cooling down; skipping requests")
+            return []
 
         loop = asyncio.get_event_loop()
         text_rate_limit: dict[str, str] | None = None
@@ -929,8 +963,16 @@ class SearchCollector(BaseCollector):
                 try:
                     with DDGS(timeout=ddg_timeout) as ddgs:
                         if kind == "text":
-                            return list(ddgs.text(query, max_results=self._max_results))
-                        return list(ddgs.images(query, max_results=self._max_results))
+                            return list(ddgs.text(
+                                query,
+                                max_results=self._max_results,
+                                backend="yahoo",
+                            ))
+                        return list(ddgs.images(
+                            query,
+                            max_results=self._max_results,
+                            backend="bing",
+                        ))
                 except Exception as e:  # noqa: BLE001 - classified below
                     last_exc = e
                     if self._looks_like_rate_limit_error(e):
@@ -989,27 +1031,35 @@ class SearchCollector(BaseCollector):
                 logger.debug("[DDG] image search failed: %s", e)
             return out
 
-        # Politeness gate — let the rate limiter throttle us.
-        await self.wait_rate_limit("duckduckgo.com")
+        async def _paced_ddg_call(fn, host: str):
+            # Each DDGS call is pinned to one backend and paced through the
+            # same per-host slots used by direct HTTP search requests.
+            async with self._domain_pacing.slot(f"https://{host}/"):
+                await self.wait_rate_limit(host)
+                return await loop.run_in_executor(None, fn)
 
-        text_hits = await loop.run_in_executor(None, _do_text)
-        image_hits = await loop.run_in_executor(None, _do_images)
+        text_hits = [] if yahoo_cooling else await _paced_ddg_call(_do_text, "search.yahoo.com")
+        image_hits = [] if bing_cooling else await _paced_ddg_call(_do_images, "bing.com")
         if text_rate_limit is not None:
             await self._record_search_rate_limit(
-                engine="ddg",
-                scope="duckduckgo.com",
-                status_code=429 if "429" in text_rate_limit["message"] else None,
+                engine="yahoo",
+                scope="search.yahoo.com",
+                status_code=429,
                 reason="ddg text search rate-limit response",
                 metadata={"query": query, "kind": "text", **text_rate_limit},
             )
         if image_rate_limit is not None:
             await self._record_search_rate_limit(
-                engine="ddg-img",
-                scope="duckduckgo.com",
-                status_code=429 if "429" in image_rate_limit["message"] else None,
+                engine="bing",
+                scope="bing.com",
+                status_code=429,
                 reason="ddg image search rate-limit response",
                 metadata={"query": query, "kind": "image", **image_rate_limit},
             )
+        if not yahoo_cooling and text_rate_limit is None:
+            self._clear_search_scope_cooldown("yahoo", "search.yahoo.com")
+        if not bing_cooling and image_rate_limit is None:
+            self._clear_search_scope_cooldown("bing", "bing.com")
         all_hits = text_hits + image_hits
         logger.info("[DDG] %r → %d text, %d images", query, len(text_hits), len(image_hits))
 
@@ -1037,12 +1087,13 @@ class SearchCollector(BaseCollector):
                     break
                 url = f"{DEFAULT_BING_DOMAIN}/search?q={encoded_query}&first={page}"
                 scope = "bing.com"
-                if self._search_scope_cooling_down("bing", scope):
+                if await self._search_scope_cooldown_active("bing", scope):
                     break
-                await self.wait_rate_limit(scope)
                 try:
                     async def _get_bing():
-                        return await client.get(url, headers=self._headers(scope))
+                        async with self._domain_pacing.slot(url):
+                            await self.wait_rate_limit(scope)
+                            return await client.get(url, headers=self._headers(scope))
 
                     resp = await _get_bing()
                     if resp.status_code == 429:
@@ -1127,12 +1178,13 @@ class SearchCollector(BaseCollector):
                 }
                 scope = "google.serper.dev"
                 account = self._serper_api_key[:8] or None
-                if self._search_scope_cooling_down("serper", scope, account):
+                if await self._search_scope_cooldown_active("serper", scope):
                     break
-                await self.wait_rate_limit(scope)
                 try:
                     async def _post_serper():
-                        return await client.post(url, headers=headers, json=payload)
+                        async with self._domain_pacing.slot(url):
+                            await self.wait_rate_limit(scope)
+                            return await client.post(url, headers=headers, json=payload)
 
                     resp = await _post_serper()
                     if resp.status_code == 401:

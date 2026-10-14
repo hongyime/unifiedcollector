@@ -238,6 +238,8 @@ class WorkerService:
     REALTIME_SOURCES = frozenset({"whatsapp", "beeper", "telegram"})
     # These scrapers share public egress and must not overlap platform requests.
     SOURCE_MUTEX_GROUPS = {
+        "search": "search_engine",
+        "exposure": "search_engine",
         "lemon8": "shared_social",
         "tiktok": "shared_social",
         "instagram": "shared_social",
