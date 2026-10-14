@@ -1,5 +1,6 @@
 import asyncio
 import collections
+from collections.abc import Awaitable
 import html
 import json
 import logging
@@ -9,6 +10,7 @@ import signal
 import sys
 import threading
 import time
+from typing import Any
 
 from src.collectors import get_collector
 from src.core.collection_priority import proximity_priority_score_sql
@@ -24,6 +26,21 @@ def _format_exception(exc: BaseException) -> str:
     detail = str(exc).strip()
     name = exc.__class__.__name__
     return f"{name}: {detail}" if detail else name
+
+
+async def _await_cleanup(awaitable: Awaitable[Any]) -> Any:
+    """Finish releasing a pooled lock connection even if its caller is cancelled."""
+    task = asyncio.ensure_future(awaitable)
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+    result = task.result()
+    if cancelled:
+        raise asyncio.CancelledError
+    return result
 
 
 class _FatalSpinLogWatcher(logging.Handler):
@@ -823,7 +840,7 @@ class WorkerService:
         raw = os.getenv("COLLECTOR_REFRESH_REALTIME_TARGET_PRIORITIES", "false")
         return raw.strip().lower() in {"1", "true", "yes", "on"}
 
-    async def _try_acquire_source_mutex(self, source: str):
+    async def _try_acquire_source_mutex(self, source: str) -> tuple[Any, str] | bool | None:
         group = self.SOURCE_MUTEX_GROUPS.get(source)
         if not group:
             return None
@@ -831,22 +848,36 @@ class WorkerService:
         key = f"collector_mutex:{group}"
         try:
             locked = await conn.fetchval("SELECT pg_try_advisory_lock(hashtext($1))", key)
+        except asyncio.CancelledError:
+            try:
+                await _await_cleanup(self._unlock_source_mutex_connection(conn, key))
+            finally:
+                await _await_cleanup(self.pool.release(conn))
+            raise
         except Exception:
-            await self.pool.release(conn)
+            await _await_cleanup(self.pool.release(conn))
             raise
         if not locked:
-            await self.pool.release(conn)
+            await _await_cleanup(self.pool.release(conn))
             return False
         return conn, key
 
-    async def _release_source_mutex(self, handle) -> None:
+    @staticmethod
+    async def _unlock_source_mutex_connection(conn: Any, key: str) -> None:
+        # Session advisory locks are re-entrant. Unlock every acquisition made
+        # on this leased connection so an earlier interrupted release cannot
+        # leave the shared provider slot held after the connection returns.
+        while await conn.fetchval("SELECT pg_advisory_unlock(hashtext($1))", key):
+            pass
+
+    async def _release_source_mutex(self, handle: tuple[Any, str] | bool | None) -> None:
         if handle is None or handle is False:
             return
         conn, key = handle
         try:
-            await conn.execute("SELECT pg_advisory_unlock(hashtext($1))", key)
+            await _await_cleanup(self._unlock_source_mutex_connection(conn, key))
         finally:
-            await self.pool.release(conn)
+            await _await_cleanup(self.pool.release(conn))
 
     async def _run_source(self, source: str, startup_delay: float = 0.0):
         if startup_delay > 0:

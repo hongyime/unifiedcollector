@@ -197,77 +197,97 @@ _DYNAMIC_TERM_STOPWORDS = frozenset({
     "what", "when", "where", "which", "who", "will", "with", "www", "year", "your",
 })
 
+# Exposure terms are rotated through these approved person/document searches in
+# addition to the existing cloud-bucket and PDF templates. A full-name term is
+# emitted from profile display-name fields so the resume query keeps its meaning.
+_DYNAMIC_PERSON_DOCUMENT_DORKS = (
+    '"{q}" filetype:pdf',
+    '"{q}" (site:github.com OR site:linkedin.com OR site:twitter.com)',
+    'filetype:pdf "{q}"',
+    '"{q}" filetype:(pdf OR docx OR xlsx OR pptx)',
+    '"{q}" filetype:pdf resume',
+    'site:target.com filetype:pdf "{q}"',
+)
+
+
+def _expand_dynamic_dorks(term: str) -> list[str]:
+    """Return the rotating cloud and person/document searches for one term."""
+    return [
+        *expand_dorks([term]),
+        *(template.format(q=term) for template in _DYNAMIC_PERSON_DOCUMENT_DORKS),
+    ]
+
 _DYNAMIC_TERM_SOURCE_QUERIES = (
     ("instagram_profiles", """
         SELECT 'instagram' AS platform, id::text AS source_reference,
-               username, bio AS text_blob, ARRAY[]::text[] AS hashtags
+               username, full_name, bio AS text_blob, ARRAY[]::text[] AS hashtags
           FROM instagram_profiles
          WHERE updated_at >= now() - interval '90 days'
-           AND (username IS NOT NULL OR bio IS NOT NULL)
+           AND (username IS NOT NULL OR full_name IS NOT NULL OR bio IS NOT NULL)
          ORDER BY updated_at DESC LIMIT $1
     """),
     ("tiktok_profiles", """
         SELECT 'tiktok' AS platform, id::text AS source_reference,
-               username, bio AS text_blob, ARRAY[]::text[] AS hashtags
+               username, nickname AS full_name, bio AS text_blob, ARRAY[]::text[] AS hashtags
           FROM tiktok_profiles
          WHERE updated_at >= now() - interval '90 days'
-           AND (username IS NOT NULL OR bio IS NOT NULL)
+           AND (username IS NOT NULL OR nickname IS NOT NULL OR bio IS NOT NULL)
          ORDER BY updated_at DESC LIMIT $1
     """),
     ("lemon8_profiles", """
         SELECT 'lemon8' AS platform, id::text AS source_reference,
-               username, bio AS text_blob, ARRAY[]::text[] AS hashtags
+               username, nickname AS full_name, bio AS text_blob, ARRAY[]::text[] AS hashtags
           FROM lemon8_profiles
          WHERE updated_at >= now() - interval '90 days'
-           AND (username IS NOT NULL OR bio IS NOT NULL)
+           AND (username IS NOT NULL OR nickname IS NOT NULL OR bio IS NOT NULL)
          ORDER BY updated_at DESC LIMIT $1
     """),
     ("pinterest_profiles", """
         SELECT 'pinterest' AS platform, username AS source_reference,
-               username, bio AS text_blob, ARRAY[]::text[] AS hashtags
+               username, display_name AS full_name, bio AS text_blob, ARRAY[]::text[] AS hashtags
           FROM pinterest_profiles
          WHERE probed_at >= now() - interval '90 days'
-           AND (username IS NOT NULL OR bio IS NOT NULL)
+           AND (username IS NOT NULL OR display_name IS NOT NULL OR bio IS NOT NULL)
          ORDER BY probed_at DESC LIMIT $1
     """),
     ("snapchat_profiles", """
         SELECT 'snapchat' AS platform, username AS source_reference,
-               username, display_name AS text_blob, ARRAY[]::text[] AS hashtags
+               username, display_name AS full_name, display_name AS text_blob, ARRAY[]::text[] AS hashtags
           FROM snapchat_profiles
          WHERE probed_at >= now() - interval '90 days'
-           AND username IS NOT NULL
+           AND (username IS NOT NULL OR display_name IS NOT NULL)
          ORDER BY probed_at DESC LIMIT $1
     """),
     ("facebook_profiles", """
         SELECT 'facebook' AS platform, id::text AS source_reference,
-               username, bio AS text_blob, ARRAY[]::text[] AS hashtags
+               username, display_name AS full_name, bio AS text_blob, ARRAY[]::text[] AS hashtags
           FROM facebook_profiles
          WHERE updated_at >= now() - interval '90 days'
-           AND (username IS NOT NULL OR bio IS NOT NULL)
+           AND (username IS NOT NULL OR display_name IS NOT NULL OR bio IS NOT NULL)
          ORDER BY updated_at DESC LIMIT $1
     """),
     ("x_profiles", """
         SELECT 'x' AS platform, id::text AS source_reference,
-               username, bio AS text_blob, ARRAY[]::text[] AS hashtags
+               username, display_name AS full_name, bio AS text_blob, ARRAY[]::text[] AS hashtags
           FROM x_profiles
          WHERE updated_at >= now() - interval '90 days'
-           AND (username IS NOT NULL OR bio IS NOT NULL)
+           AND (username IS NOT NULL OR display_name IS NOT NULL OR bio IS NOT NULL)
          ORDER BY updated_at DESC LIMIT $1
     """),
     ("bluesky_profiles", """
         SELECT 'bluesky' AS platform, did AS source_reference,
-               username, bio AS text_blob, ARRAY[]::text[] AS hashtags
+               username, display_name AS full_name, bio AS text_blob, ARRAY[]::text[] AS hashtags
           FROM bluesky_profiles
          WHERE probed_at >= now() - interval '90 days'
-           AND (username IS NOT NULL OR bio IS NOT NULL)
+           AND (username IS NOT NULL OR display_name IS NOT NULL OR bio IS NOT NULL)
          ORDER BY probed_at DESC LIMIT $1
     """),
     ("youtube_channels", """
         SELECT 'youtube' AS platform, id::text AS source_reference,
-               custom_url AS username, description AS text_blob, keywords AS hashtags
+               custom_url AS username, title AS full_name, description AS text_blob, keywords AS hashtags
           FROM youtube_channels
          WHERE updated_at >= now() - interval '90 days'
-           AND (custom_url IS NOT NULL OR description IS NOT NULL OR keywords IS NOT NULL)
+           AND (custom_url IS NOT NULL OR title IS NOT NULL OR description IS NOT NULL OR keywords IS NOT NULL)
          ORDER BY updated_at DESC LIMIT $1
     """),
     ("instagram_posts", """
@@ -329,6 +349,16 @@ _DYNAMIC_TERM_SOURCE_QUERIES = (
            AND (title IS NOT NULL OR description IS NOT NULL OR username IS NOT NULL)
          ORDER BY collected_at DESC LIMIT $1
     """),
+    ("pinterest_boards", """
+        SELECT 'pinterest' AS platform, board_id AS source_reference,
+               username, NULL::text AS full_name,
+               concat_ws(' ', name, description) AS text_blob,
+               ARRAY[]::text[] AS hashtags
+          FROM pinterest_boards
+         WHERE collected_at >= now() - interval '90 days'
+           AND (username IS NOT NULL OR name IS NOT NULL OR description IS NOT NULL)
+         ORDER BY collected_at DESC LIMIT $1
+    """),
     ("youtube_videos", """
         SELECT 'youtube' AS platform, v.id::text AS source_reference,
                c.custom_url AS username, concat_ws(' ', v.title, v.description) AS text_blob,
@@ -348,6 +378,118 @@ _DYNAMIC_TERM_SOURCE_QUERIES = (
          WHERE p.collected_at >= now() - interval '90 days'
            AND (p.text IS NOT NULL OR c.custom_url IS NOT NULL)
          ORDER BY p.collected_at DESC LIMIT $1
+    """),
+    ("github_users", """
+        SELECT 'github' AS platform, id::text AS source_reference,
+               login AS username, name AS full_name,
+               concat_ws(' ', bio, company, blog, location) AS text_blob,
+               ARRAY[]::text[] AS hashtags
+          FROM github_users
+         WHERE collected_at >= now() - interval '90 days'
+           AND (login IS NOT NULL OR name IS NOT NULL OR bio IS NOT NULL)
+         ORDER BY collected_at DESC LIMIT $1
+    """),
+    ("github_repos", """
+        SELECT 'github' AS platform, platform_repo_id::text AS source_reference,
+               split_part(full_name, '/', 1) AS username, NULL::text AS full_name,
+               concat_ws(' ', name, description, language) AS text_blob, topics AS hashtags
+          FROM github_repos
+         WHERE collected_at >= now() - interval '90 days'
+           AND (name IS NOT NULL OR description IS NOT NULL OR topics IS NOT NULL)
+         ORDER BY collected_at DESC LIMIT $1
+    """),
+    ("strava_athletes", """
+        SELECT 'strava' AS platform, id::text AS source_reference,
+               username, concat_ws(' ', firstname, lastname) AS full_name,
+               concat_ws(' ', profile, city, state, country) AS text_blob,
+               ARRAY[]::text[] AS hashtags
+          FROM strava_athletes
+         WHERE updated_at >= now() - interval '90 days'
+           AND (username IS NOT NULL OR firstname IS NOT NULL OR lastname IS NOT NULL OR profile IS NOT NULL)
+         ORDER BY updated_at DESC LIMIT $1
+    """),
+    ("strava_activities", """
+        SELECT 'strava' AS platform, platform_activity_id::text AS source_reference,
+               NULL::text AS username, NULL::text AS full_name,
+               concat_ws(' ', name, type, sport_type, description) AS text_blob,
+               ARRAY[]::text[] AS hashtags
+          FROM strava_activities
+         WHERE collected_at >= now() - interval '90 days'
+           AND (name IS NOT NULL OR description IS NOT NULL OR sport_type IS NOT NULL)
+         ORDER BY collected_at DESC LIMIT $1
+    """),
+    ("airbnb_hosts", """
+        SELECT 'airbnb' AS platform, host_id AS source_reference,
+               NULL::text AS username, display_name AS full_name,
+               bio AS text_blob, ARRAY[]::text[] AS hashtags
+          FROM airbnb_hosts
+         WHERE collected_at >= now() - interval '90 days'
+           AND (display_name IS NOT NULL OR bio IS NOT NULL)
+         ORDER BY collected_at DESC LIMIT $1
+    """),
+    ("airbnb_listings", """
+        SELECT 'airbnb' AS platform, listing_id AS source_reference,
+               NULL::text AS username, NULL::text AS full_name,
+               concat_ws(' ', title, description, location, property_type) AS text_blob,
+               ARRAY[]::text[] AS hashtags
+          FROM airbnb_listings
+         WHERE collected_at >= now() - interval '90 days'
+           AND (title IS NOT NULL OR description IS NOT NULL)
+         ORDER BY collected_at DESC LIMIT $1
+    """),
+    ("airbnb_reviews", """
+        SELECT 'airbnb' AS platform, review_id AS source_reference,
+               NULL::text AS username, NULL::text AS full_name,
+               comments AS text_blob, ARRAY[]::text[] AS hashtags
+          FROM airbnb_reviews
+         WHERE collected_at >= now() - interval '90 days' AND comments IS NOT NULL
+         ORDER BY collected_at DESC LIMIT $1
+    """),
+    ("snapchat_stories", """
+        SELECT 'snapchat' AS platform, story_id AS source_reference,
+               username, NULL::text AS full_name, title AS text_blob,
+               ARRAY[]::text[] AS hashtags
+          FROM snapchat_stories
+         WHERE collected_at >= now() - interval '90 days'
+           AND (username IS NOT NULL OR title IS NOT NULL)
+         ORDER BY collected_at DESC LIMIT $1
+    """),
+    ("snapchat_spotlights", """
+        SELECT 'snapchat' AS platform, spotlight_id AS source_reference,
+               username, NULL::text AS full_name, title AS text_blob,
+               ARRAY[]::text[] AS hashtags
+          FROM snapchat_spotlights
+         WHERE collected_at >= now() - interval '90 days'
+           AND (username IS NOT NULL OR title IS NOT NULL)
+         ORDER BY collected_at DESC LIMIT $1
+    """),
+    ("snapchat_highlights", """
+        SELECT 'snapchat' AS platform, highlight_id AS source_reference,
+               username, NULL::text AS full_name, title AS text_blob,
+               ARRAY[]::text[] AS hashtags
+          FROM snapchat_highlights
+         WHERE collected_at >= now() - interval '90 days'
+           AND (username IS NOT NULL OR title IS NOT NULL)
+         ORDER BY collected_at DESC LIMIT $1
+    """),
+    ("telegram_chats", """
+        SELECT 'telegram' AS platform, id::text AS source_reference,
+               username, NULL::text AS full_name,
+               concat_ws(' ', title, description) AS text_blob,
+               ARRAY[]::text[] AS hashtags
+          FROM telegram_chats
+         WHERE updated_at >= now() - interval '90 days'
+           AND (username IS NOT NULL OR title IS NOT NULL OR description IS NOT NULL)
+         ORDER BY updated_at DESC LIMIT $1
+    """),
+    ("paypal_profiles", """
+        SELECT 'paypal' AS platform, username AS source_reference,
+               username, display_name AS full_name, NULL::text AS text_blob,
+               ARRAY[]::text[] AS hashtags
+          FROM paypal_profiles
+         WHERE probed_at >= now() - interval '90 days'
+           AND (username IS NOT NULL OR display_name IS NOT NULL)
+         ORDER BY probed_at DESC LIMIT $1
     """),
 )
 
@@ -458,10 +600,10 @@ class SearchCollector(BaseCollector):
         self._dynamic_terms_enabled = os.getenv("SEARCH_DYNAMIC_TERMS_ENABLED", "1") == "1"
         self._dynamic_term_cap = min(10, max(0, int(os.getenv("SEARCH_DYNAMIC_TERM_CAP", "10"))))
         self._dynamic_source_limit = min(500, max(1, int(os.getenv("SEARCH_DYNAMIC_SOURCE_ROWS", "100"))))
-        self._dynamic_term_ttl_days = min(90, max(1, int(os.getenv("SEARCH_DYNAMIC_TERM_TTL_DAYS", "30"))))
-        self._dynamic_refresh_hours = min(168, max(1, int(os.getenv("SEARCH_DYNAMIC_REFRESH_HOURS", "12"))))
+        self._dynamic_term_ttl_days = min(90, max(1, int(os.getenv("SEARCH_DYNAMIC_TERM_TTL_DAYS", "7"))))
+        self._dynamic_refresh_hours = min(168, max(0, int(os.getenv("SEARCH_DYNAMIC_REFRESH_HOURS", "0"))))
         self._dynamic_query_interval_days = min(
-            30, max(1, int(os.getenv("SEARCH_DYNAMIC_QUERY_INTERVAL_DAYS", "7")))
+            30, max(0, int(os.getenv("SEARCH_DYNAMIC_QUERY_INTERVAL_DAYS", "0")))
         )
         # 0 = no video size cap (user decision); videos are streamed to disk.
         self._max_video_bytes = int(os.getenv("SEARCH_MAX_VIDEO_BYTES", "0"))
@@ -855,7 +997,7 @@ class SearchCollector(BaseCollector):
 
     @staticmethod
     def _extract_dynamic_term_candidates(rows: Iterable[dict], limit: int = 10) -> list[dict[str, str | None]]:
-        """Extract a small, balanced set of username, hashtag, and text terms."""
+        """Extract balanced handles, names, hashtags, and caption/bio keywords."""
         counts: dict[tuple[str, str], int] = {}
         sources: dict[tuple[str, str], tuple[str, str | None]] = {}
         word_pattern = re.compile(r"[^\W_][\w.-]{2,31}", re.UNICODE)
@@ -869,6 +1011,11 @@ class SearchCollector(BaseCollector):
             if kind == "username" and not re.fullmatch(r"[\w.-]{2,80}", normalized, re.UNICODE):
                 return
             if kind == "hashtag" and not re.fullmatch(r"[\w-]{2,80}", normalized, re.UNICODE):
+                return
+            if kind == "full_name" and (
+                len(normalized.split()) < 2
+                or not re.fullmatch(r"[\w][\w .’'-]{0,78}[\w]", normalized, re.UNICODE)
+            ):
                 return
             key = (kind, normalized)
             counts[key] = counts.get(key, 0) + 1
@@ -887,6 +1034,10 @@ class SearchCollector(BaseCollector):
                     username = username.rstrip("/").rsplit("/", 1)[-1]
                 add(username, "username", row)
 
+            full_name = str(row.get("full_name") or "").strip()
+            if full_name:
+                add(full_name, "full_name", row)
+
             hashtags = row.get("hashtags") or []
             if isinstance(hashtags, str):
                 hashtags = [hashtags]
@@ -899,9 +1050,9 @@ class SearchCollector(BaseCollector):
             for keyword in set(word_pattern.findall(text_blob)):
                 add(keyword, "keyword", row)
 
-        priorities = {"username": 0, "hashtag": 1, "keyword": 2}
+        priorities = {"username": 0, "full_name": 1, "hashtag": 2, "keyword": 3}
         selected: list[tuple[str, str]] = []
-        for kind, quota in (("username", 4), ("hashtag", 3), ("keyword", 3)):
+        for kind, quota in (("username", 3), ("full_name", 2), ("hashtag", 2), ("keyword", 3)):
             ranked = sorted(
                 ((key, count) for key, count in counts.items() if key[0] == kind),
                 key=lambda item: (-item[1], item[0][1]),
@@ -931,18 +1082,19 @@ class SearchCollector(BaseCollector):
         ]
 
     async def _refresh_dynamic_search_terms(self, conn) -> None:
-        refresh_due = await conn.fetchval(
-            """
-            SELECT NOT EXISTS (
-                SELECT 1 FROM service_cursors
-                 WHERE service = 'search_dynamic_terms_v1'
-                   AND last_processed_at > now() - ($1 * interval '1 hour')
+        if self._dynamic_refresh_hours > 0:
+            refresh_due = await conn.fetchval(
+                """
+                SELECT NOT EXISTS (
+                    SELECT 1 FROM service_cursors
+                     WHERE service = 'search_dynamic_terms_v1'
+                       AND last_processed_at > now() - ($1 * interval '1 hour')
+                )
+                """,
+                self._dynamic_refresh_hours,
             )
-            """,
-            self._dynamic_refresh_hours,
-        )
-        if not refresh_due:
-            return
+            if not refresh_due:
+                return
 
         source_rows = []
         for source_name, query in _DYNAMIC_TERM_SOURCE_QUERIES:
@@ -965,7 +1117,11 @@ class SearchCollector(BaseCollector):
                     source_platform = EXCLUDED.source_platform,
                     source_reference = EXCLUDED.source_reference,
                     last_seen_at = now(),
-                    expires_at = EXCLUDED.expires_at,
+                    expires_at = CASE
+                        WHEN search_dynamic_terms.zero_result_since IS NULL
+                        THEN EXCLUDED.expires_at
+                        ELSE search_dynamic_terms.expires_at
+                    END,
                     updated_at = now()
                 """,
                 [
@@ -974,14 +1130,21 @@ class SearchCollector(BaseCollector):
                     for item in candidates
                 ],
             )
-        await conn.execute("DELETE FROM search_dynamic_terms WHERE expires_at <= now()")
+        await conn.execute(
+            """
+            DELETE FROM search_dynamic_terms
+             WHERE expires_at <= now()
+                OR zero_result_since <= now() - ($1 * interval '1 day')
+            """,
+            self._dynamic_term_ttl_days,
+        )
         await conn.execute(
             """
             DELETE FROM search_dynamic_terms
              WHERE term NOT IN (
                 SELECT term FROM search_dynamic_terms
                  WHERE expires_at > now()
-                 ORDER BY last_seen_at DESC, search_count ASC, term
+                 ORDER BY total_result_count DESC, last_seen_at DESC, search_count DESC, term
                  LIMIT $1
              )
             """,
@@ -1017,7 +1180,7 @@ class SearchCollector(BaseCollector):
             items = []
             for row in rows:
                 term = str(row["term"])
-                templates = expand_dorks([term])
+                templates = _expand_dynamic_dorks(term)
                 if not templates:
                     continue
                 cursor = int(row["template_cursor"] or 0) % len(templates)
@@ -1031,7 +1194,13 @@ class SearchCollector(BaseCollector):
             logger.debug("dynamic search query preparation skipped: %s", type(exc).__name__)
             return []
 
-    async def _mark_dynamic_search_query(self, item: dict[str, Any], *, succeeded: bool) -> None:
+    async def _mark_dynamic_search_query(
+        self,
+        item: dict[str, Any],
+        *,
+        result_count: int = 0,
+        completed: bool = True,
+    ) -> None:
         if self.pool is None:
             return
         try:
@@ -1046,13 +1215,27 @@ class SearchCollector(BaseCollector):
                            END,
                            search_count = search_count + CASE WHEN $2 THEN 1 ELSE 0 END,
                            template_cursor = CASE WHEN $2 THEN $4 ELSE template_cursor END,
+                           last_result_count = CASE WHEN $2 THEN $5 ELSE last_result_count END,
+                           total_result_count = total_result_count + CASE WHEN $2 THEN $5 ELSE 0 END,
+                           zero_result_since = CASE
+                               WHEN NOT $2 THEN zero_result_since
+                               WHEN $5 > 0 THEN NULL
+                               ELSE COALESCE(zero_result_since, now())
+                           END,
+                           expires_at = CASE
+                               WHEN NOT $2 THEN expires_at
+                               WHEN $5 > 0 THEN now() + ($6 * interval '1 day')
+                               ELSE COALESCE(expires_at, now() + ($6 * interval '1 day'))
+                           END,
                            updated_at = now()
                      WHERE term = $1
                     """,
                     item["term"],
-                    succeeded,
+                    completed,
                     self._dynamic_query_interval_days,
                     item["next_template_cursor"],
+                    max(0, int(result_count)),
+                    self._dynamic_term_ttl_days,
                 )
         except Exception as exc:
             logger.debug("dynamic search result schedule update skipped: %s", type(exc).__name__)
@@ -1080,27 +1263,6 @@ class SearchCollector(BaseCollector):
                 logged_wait = True
             await asyncio.sleep(random.uniform(0.5, 1.5))
         yield False
-
-    async def run(self, targets: list[str]) -> None:
-        """Refresh dynamic terms before competing for the search-engine mutex.
-
-        Exposure and search share a mutex because they use the same providers.
-        Term refresh only reads Postgres, so it should still run when exposure
-        is processing a long batch and the search collector's collect slice is
-        skipped by that mutex.
-        """
-        if (
-            self.SOURCE_NAME == "search"
-            and self._dynamic_terms_enabled
-            and self._dynamic_term_cap > 0
-            and self.pool is not None
-        ):
-            try:
-                async with self.pool.acquire() as conn:
-                    await self._refresh_dynamic_search_terms(conn)
-            except Exception as exc:
-                logger.debug("dynamic search term preflight skipped: %s", type(exc).__name__)
-        await super().run(targets)
 
     async def collect(self, targets: list[str]):
         # Pace between queries to reduce search-engine 429s (the ddgs brave
@@ -1135,16 +1297,19 @@ class SearchCollector(BaseCollector):
                 if self._last_search_query_lock_skipped:
                     break
                 if query in dynamic_by_query:
-                    succeeded = bool(results) or not self._last_search_query_rate_limited
                     await self._mark_dynamic_search_query(
-                        dynamic_by_query[query], succeeded=succeeded,
+                        dynamic_by_query[query],
+                        result_count=len(results),
+                        completed=not self._last_search_query_rate_limited,
                     )
                 await self.checkpoint.save_progress(query)
                 await self.heartbeat_source_health()
             except Exception as e:
                 logger.exception("Failed search/%s: %s", query, e)
                 if query in dynamic_by_query:
-                    await self._mark_dynamic_search_query(dynamic_by_query[query], succeeded=False)
+                    await self._mark_dynamic_search_query(
+                        dynamic_by_query[query], completed=False,
+                    )
                 await self.send_to_dlq(query, query, str(e))
             if query_delay > 0 and not self._stop.is_set():
                 await asyncio.sleep(query_delay)
@@ -2176,6 +2341,7 @@ class SearchCollector(BaseCollector):
             w, h = img.size
             if w < self._min_dim or h < self._min_dim:
                 return False
+            image_metadata = self._extract_image_metadata(img)
             if img.mode in ("RGBA", "P"):
                 img = img.convert("RGB")
         except Exception:
@@ -2208,6 +2374,7 @@ class SearchCollector(BaseCollector):
             "source_url": source_url,
             "width": w,
             "height": h,
+            "image_metadata": image_metadata,
             "rebuild_target_tables": ["media_items", "search_results", "search_queries"],
         }
         artifact = write_atomic_artifact(
@@ -2257,8 +2424,57 @@ class SearchCollector(BaseCollector):
         except Exception as e:
             logger.debug("insert_media_item failed: %s", e)
 
+        await self._index_search_document(
+            content_id=content_id,
+            data=stored_data,
+            extension=".jpg",
+            source_url=source_url,
+            title=entity_name,
+            content_text="",
+            extraction_method="pillow_image_metadata",
+            page_count=None,
+            metadata={
+                "search_query": entity_id[:500],
+                "source_host": urlparse(source_url).netloc[:255],
+                "byte_size": len(stored_data),
+                "indexed_chars": 0,
+                "image": image_metadata,
+            },
+        )
+
         self._known_ids.add(content_id)
         return True
+
+    @staticmethod
+    def _extract_image_metadata(image) -> dict[str, Any]:
+        """Return dimensions and a small EXIF allowlist, excluding GPS/MakerNote."""
+        metadata: dict[str, Any] = {
+            "format": str(getattr(image, "format", "") or "")[:40] or None,
+            "mode": str(getattr(image, "mode", "") or "")[:40] or None,
+            "width": int(image.size[0]),
+            "height": int(image.size[1]),
+        }
+        try:
+            from PIL.ExifTags import TAGS
+
+            exif = image.getexif()
+            allowed = {"DateTime", "DateTimeOriginal", "Make", "Model", "Software", "Orientation", "Artist", "Copyright", "ImageDescription"}
+            selected = {}
+            for tag_id, value in exif.items():
+                name = TAGS.get(tag_id)
+                if name not in allowed:
+                    continue
+                if isinstance(value, bytes):
+                    value = value.decode("utf-8", errors="replace")
+                if isinstance(value, (int, float, bool)):
+                    selected[name] = value
+                else:
+                    selected[name] = str(value).replace("\x00", " ").strip()[:256]
+            if selected:
+                metadata["exif"] = selected
+        except Exception:
+            pass
+        return metadata
 
     @staticmethod
     def _extract_document_text(
@@ -2408,6 +2624,36 @@ class SearchCollector(BaseCollector):
                 "byte_size": len(data),
                 "indexed_chars": len(content_text),
             }
+            await self._index_search_document(
+                content_id=content_id,
+                data=data,
+                extension=extension,
+                source_url=source_url,
+                title=title,
+                content_text=content_text,
+                extraction_method=extraction_method,
+                page_count=page_count,
+                metadata=metadata,
+            )
+        except Exception as exc:
+            logger.debug("document text index update skipped content_id=%s error=%s", content_id, type(exc).__name__)
+
+    async def _index_search_document(
+        self,
+        *,
+        content_id: str,
+        data: bytes,
+        extension: str,
+        source_url: str,
+        title: str | None,
+        content_text: str,
+        extraction_method: str,
+        page_count: int | None,
+        metadata: dict[str, Any],
+    ) -> None:
+        if not self._document_index_enabled or self.pool is None:
+            return
+        try:
             async with self.pool.acquire() as conn:
                 media_item_id = await conn.fetchval(
                     "SELECT id FROM media_items WHERE source = 'search' AND content_id = $1 LIMIT 1",
@@ -2417,7 +2663,7 @@ class SearchCollector(BaseCollector):
                     return
                 await conn.execute(
                     """
-                    INSERT INTO search_document_index (
+                    INSERT INTO search_documents (
                         media_item_id, source_url, title, file_extension, sha256,
                         content_text, extraction_method, page_count, metadata
                     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb)
@@ -2443,7 +2689,11 @@ class SearchCollector(BaseCollector):
                     json.dumps(metadata),
                 )
         except Exception as exc:
-            logger.debug("document text index update skipped content_id=%s error=%s", content_id, type(exc).__name__)
+            logger.debug(
+                "search document index update skipped content_id=%s error=%s",
+                content_id,
+                type(exc).__name__,
+            )
 
     async def _save_pdf(
         self,

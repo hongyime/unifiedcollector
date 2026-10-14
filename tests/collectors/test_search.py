@@ -783,6 +783,7 @@ def test_dynamic_term_extraction_is_balanced_and_capped():
             "platform": "instagram",
             "source_reference": "profile-1",
             "username": "Alice.Photo",
+            "full_name": "Alice Example",
             "text_blob": "Weekend photography and wildlife photography in Singapore",
             "hashtags": ["#wildlifephoto", "#singaporetrip"],
         },
@@ -797,10 +798,11 @@ def test_dynamic_term_extraction_is_balanced_and_capped():
 
     terms = SearchCollector._extract_dynamic_term_candidates(rows, limit=10)
     by_kind = {kind: [row["term"] for row in terms if row["term_kind"] == kind]
-               for kind in ("username", "hashtag", "keyword")}
+               for kind in ("username", "full_name", "hashtag", "keyword")}
 
     assert len(terms) <= 10
     assert "alice.photo" in by_kind["username"]
+    assert "alice example" in by_kind["full_name"]
     assert "wildlifephoto" in by_kind["hashtag"]
     assert "photography" in by_kind["keyword"]
     assert "orchids" in by_kind["keyword"]
@@ -815,6 +817,19 @@ def test_dynamic_term_sources_cover_additional_social_profiles_and_posts():
         "bluesky_profiles",
         "x_posts",
         "youtube_community_posts",
+        "pinterest_boards",
+        "github_users",
+        "github_repos",
+        "strava_athletes",
+        "strava_activities",
+        "airbnb_hosts",
+        "airbnb_listings",
+        "airbnb_reviews",
+        "snapchat_stories",
+        "snapchat_spotlights",
+        "snapchat_highlights",
+        "telegram_chats",
+        "paypal_profiles",
     } <= source_names
 
 
@@ -837,7 +852,9 @@ async def test_collect_runs_dynamic_dork_queries_before_static_targets(monkeypat
         'site:s3.amazonaws.com alice', "static query",
     ]
     coll._mark_dynamic_search_query.assert_awaited_once_with(
-        coll._prepare_dynamic_search_queries.return_value[0], succeeded=True,
+        coll._prepare_dynamic_search_queries.return_value[0],
+        result_count=0,
+        completed=True,
     )
 
 
@@ -861,7 +878,9 @@ async def test_collect_retries_dynamic_query_after_rate_limit(monkeypatch):
 
     await coll.collect([])
 
-    coll._mark_dynamic_search_query.assert_awaited_once_with(item, succeeded=False)
+    coll._mark_dynamic_search_query.assert_awaited_once_with(
+        item, result_count=0, completed=False,
+    )
 
 
 @pytest.mark.asyncio
@@ -890,30 +909,24 @@ async def test_dynamic_search_query_uses_rotating_approved_dork(monkeypatch):
     items = await coll._prepare_dynamic_search_queries()
 
     assert len(items) == 1
-    assert items[0]["query"] == expand_dorks(["alice"])[2]
+    assert items[0]["query"] == search_mod._expand_dynamic_dorks("alice")[2]
     assert items[0]["next_template_cursor"] == 3
 
 
 @pytest.mark.asyncio
-async def test_dynamic_term_refresh_runs_before_base_collect_mutex(monkeypatch):
+async def test_dynamic_term_refresh_runs_each_collection_cycle_by_default(monkeypatch):
     _set_clean_env(monkeypatch)
-    monkeypatch.setenv("SEARCH_DYNAMIC_TERMS_ENABLED", "1")
     coll = SearchCollector()
-    coll.set_pool(_make_pool())
-    calls = []
+    pool = _make_pool()
+    pool._conn.fetch = AsyncMock(return_value=[])
+    pool._conn.fetchval = AsyncMock(return_value=None)
+    coll.set_pool(pool)
 
-    async def refresh(_conn):
-        calls.append("refresh")
+    await coll._refresh_dynamic_search_terms(pool._conn)
 
-    async def base_run(_collector, _targets):
-        calls.append("base_run")
-
-    coll._refresh_dynamic_search_terms = refresh
-    monkeypatch.setattr(SearchCollector.__bases__[0], "run", base_run)
-
-    await coll.run(["static query"])
-
-    assert calls == ["refresh", "base_run"]
+    assert not pool._conn.fetchval.await_args_list
+    assert pool._conn.fetch.await_count == len(search_mod._DYNAMIC_TERM_SOURCE_QUERIES)
+    assert any("FROM airbnb_listings" in call.args[0] for call in pool._conn.fetch.await_args_list)
 
 
 @pytest.mark.asyncio
@@ -1062,11 +1075,37 @@ async def test_document_index_writes_extracted_text_and_metadata(monkeypatch):
     )
 
     sql, *args = pool._conn.execute.await_args.args
-    assert "INSERT INTO search_document_index" in sql
+    assert "INSERT INTO search_documents" in sql
     assert args[4] == hashlib.sha256(b"Document body for text index").hexdigest()
     assert args[5] == "Document body for text index"
     assert args[6] == "text"
     assert '"search_query": "annual report"' in args[8]
+
+
+@pytest.mark.asyncio
+async def test_image_metadata_is_written_to_search_documents(monkeypatch):
+    _set_clean_env(monkeypatch)
+    coll = SearchCollector()
+    pool = _make_pool()
+    pool._conn.fetchval = AsyncMock(return_value="media-id")
+    coll.set_pool(pool)
+
+    await coll._index_search_document(
+        content_id="image-1",
+        data=b"jpeg bytes",
+        extension=".jpg",
+        source_url="https://example.com/photo.jpg",
+        title="photo",
+        content_text="",
+        extraction_method="pillow_image_metadata",
+        page_count=None,
+        metadata={"image": {"width": 640, "height": 480}},
+    )
+
+    sql, *args = pool._conn.execute.await_args.args
+    assert "INSERT INTO search_documents" in sql
+    assert args[6] == "pillow_image_metadata"
+    assert '"width": 640' in args[8]
 
 
 class _SearchVideoResponse:
