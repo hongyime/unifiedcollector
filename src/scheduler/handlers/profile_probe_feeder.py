@@ -113,7 +113,7 @@ eligible AS (
     SELECT source, username, enqueued_by, seen_at, evidence_rank
     FROM raw_candidates
     WHERE (
-          (source = 'bluesky' AND username ~ '^(did:plc:[a-z0-9]{10,}|[a-z0-9][a-z0-9.-]{0,251}[a-z0-9])$')
+          (source = 'bluesky' AND username ~ '^(did:plc:[a-z0-9]{10,}|[a-z0-9][a-z0-9.-]{0,125}\.[a-z0-9][a-z0-9.-]{0,125})$')
           OR (source <> 'bluesky' AND username ~ '^[a-z0-9][a-z0-9._-]{1,79}$')
       )
       AND NOT (source = 'pinterest' AND username IN

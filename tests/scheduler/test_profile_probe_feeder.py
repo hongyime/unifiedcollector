@@ -27,4 +27,11 @@ def test_bluesky_feeder_accepts_only_direct_full_handles_or_dids():
     )
     assert "bsky\\.app/profile/" in bluesky_rule
     assert "did:plc:" in bluesky_rule
-    assert "source = 'bluesky' AND username ~ '^(did:plc:" in _FEED_SQL
+    validation = re.search(
+        r"source = 'bluesky' AND username ~ '([^']+)'", _FEED_SQL,
+    )
+    assert validation is not None
+    pattern = validation.group(1)
+    assert re.fullmatch(pattern, "alice") is None
+    assert re.fullmatch(pattern, "alice.bsky.social")
+    assert re.fullmatch(pattern, "did:plc:abcdefghijklmnopqrstuvwx")
