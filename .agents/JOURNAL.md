@@ -308,3 +308,5 @@ Machine-specific values in this document use privacy placeholders.
 2026-10-14: Airbnb fix `ab6c9d8c` was deployed by recreating only `collector_airbnb` and `scheduler`. Retained/retired 780 invalid pending cross-platform Airbnb queue rows as errors; no pending Airbnb rows remain. Scheduler is healthy. Airbnb profiles stay empty until a direct numeric-ID profile link with accessible fields appears; direct discovered Airbnb profile links currently number zero.
 
 2026-10-14: Fixed the GitHub README producer in `adbdf74d`; Get README payloads lack `repository_id`, so the resolved internal repository UUID is now persisted directly. Bounded collector-path probe passed and `collector_github` restarted healthy.
+
+2026-10-14: Fixed the Bluesky profile feeder in `8a3f9d23`: bare cross-platform handles were sent to the public API and returned HTTP 400; only direct full handles/DIDs are now queued. A rollback-only SQL probe passed, 780 pending invalid rows were retained as errors, and the scheduler reported zero Bluesky cross-platform targets after deployment.
