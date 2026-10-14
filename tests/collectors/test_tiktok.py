@@ -552,8 +552,19 @@ async def test_scrape_profile_metadata_records_challenge_wall(monkeypatch):
     async def _record(*args, **kwargs):
         events.append(kwargs)
 
+    cooldown_calls = []
+
+    async def _record_cooldown(pool, **kwargs):
+        cooldown_calls.append((pool, kwargs))
+        state = MagicMock()
+        state.seconds_remaining = 3600
+        state.streak = 2
+        state.service = "tiktok_rate_limit:profile_metadata:account"
+        return state
+
     monkeypatch.setattr(tiktok_mod.httpx, "AsyncClient", _client_cm)
     monkeypatch.setattr(tiktok_mod, "record_rate_limit_event", _record)
+    monkeypatch.setattr(tiktok_mod, "record_dynamic_cooldown", _record_cooldown)
 
     out = await c._scrape_profile_metadata("bryan")
 
@@ -563,6 +574,90 @@ async def test_scrape_profile_metadata_records_challenge_wall(monkeypatch):
     assert c._local_tool_cooling_down() is False
     assert events[0]["source"] == "tiktok"
     assert events[0]["scope"] == "profile_metadata"
+    assert events[0]["cooldown_seconds"] == 3600
+    assert events[0]["metadata"]["dynamic_cooldown_streak"] == 2
+    assert cooldown_calls[0][1]["source"] == "tiktok"
+    assert cooldown_calls[0][1]["scope"] == "profile_metadata"
+    assert cooldown_calls[0][1]["multiplier"] == 2.0
+    assert cooldown_calls[0][1]["memory_seconds"] == c._profile_metadata_cooldown_memory_seconds
+
+
+@pytest.mark.asyncio
+async def test_scrape_profile_metadata_respects_active_cooldown(monkeypatch):
+    with patch.object(TiktokCollector, "_check_tool", staticmethod(lambda *_: False)):
+        c = TiktokCollector()
+    c.pool = None
+    c._profile_metadata_cooldown_until = tiktok_mod.time.time() + 600
+    c._profile_metadata_cooldown_reason = "profile_wall:challenge"
+    monkeypatch.setattr(c, "wait_rate_limit", AsyncMock())
+    client = MagicMock()
+    client.get = AsyncMock()
+
+    @asynccontextmanager
+    async def _client_cm(*a, **kw):
+        yield client
+
+    monkeypatch.setattr(tiktok_mod.httpx, "AsyncClient", _client_cm)
+
+    out = await c._scrape_profile_metadata("bryan")
+
+    assert out == {"status": "delayed", "error": "profile_metadata_cooldown_active"}
+    client.get.assert_not_awaited()
+    c.wait_rate_limit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sync_restores_persisted_profile_metadata_cooldown(monkeypatch):
+    with patch.object(TiktokCollector, "_check_tool", staticmethod(lambda *_: False)):
+        c = TiktokCollector()
+    c.pool = _make_pool()
+    state = MagicMock(active=True, seconds_remaining=7200)
+    monkeypatch.setattr(tiktok_mod, "get_dynamic_cooldown", AsyncMock(return_value=state))
+
+    await c._sync_persisted_local_tool_cooldown()
+
+    assert c._profile_metadata_cooling_down() is True
+    assert c._profile_metadata_cooldown_reason == "persisted profile metadata exponential cooldown"
+
+
+@pytest.mark.asyncio
+async def test_scrape_profile_metadata_retry_after_extends_dynamic_cooldown(monkeypatch):
+    with patch.object(TiktokCollector, "_check_tool", staticmethod(lambda *_: False)):
+        c = TiktokCollector()
+    c.pool = _make_pool()
+    monkeypatch.setattr(c, "wait_rate_limit", AsyncMock())
+    resp = MagicMock(status_code=429, text="Too many requests", headers={"Retry-After": "7200"})
+    fake_client = MagicMock()
+    fake_client.get = AsyncMock(return_value=resp)
+
+    @asynccontextmanager
+    async def _client_cm(*a, **kw):
+        yield fake_client
+
+    events = []
+    cooldown_calls = []
+
+    async def _record(*args, **kwargs):
+        events.append(kwargs)
+
+    async def _record_cooldown(pool, **kwargs):
+        cooldown_calls.append((pool, kwargs))
+        state = MagicMock()
+        state.seconds_remaining = kwargs["base_seconds"]
+        state.streak = 1
+        state.service = "tiktok_rate_limit:profile_metadata:account"
+        return state
+
+    monkeypatch.setattr(tiktok_mod.httpx, "AsyncClient", _client_cm)
+    monkeypatch.setattr(tiktok_mod, "record_rate_limit_event", _record)
+    monkeypatch.setattr(tiktok_mod, "record_dynamic_cooldown", _record_cooldown)
+
+    out = await c._scrape_profile_metadata("bryan")
+
+    assert out == {"status": "delayed", "http_status": 429}
+    assert cooldown_calls[0][1]["base_seconds"] == 7200
+    assert events[0]["status_code"] == 429
+    assert events[0]["cooldown_seconds"] == 7200
 
 
 def test_extract_profile_from_universal_state():

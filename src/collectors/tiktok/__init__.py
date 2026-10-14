@@ -59,6 +59,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from enum import Enum
 from pathlib import Path
 from typing import AsyncIterator, Optional
@@ -69,6 +70,7 @@ from src.core.base_collector import BaseCollector
 from src.core.collection_surface import bounded_capture_limit
 from src.collectors.tiktok.decoder import tiktok_id_to_utc
 from src.collectors.tiktok.parse import safe_int as _parse_safe_int, to_dt as _parse_to_dt
+from src.core.dynamic_cooldown import get_dynamic_cooldown, record_dynamic_cooldown
 from src.core.file_naming import sanitize_name
 from src.core.proximity import refresh_account_proximity_cache
 from src.core.rate_limit_events import record_rate_limit_event
@@ -467,6 +469,33 @@ class TiktokCollector(BaseCollector):
         self._local_tool_cooldown_restored = False
         self._profile_metadata_cooldown_until = 0.0
         self._profile_metadata_cooldown_reason = ""
+        try:
+            self._profile_metadata_cooldown_base_seconds = max(
+                1,
+                int(os.getenv(
+                    "TIKTOK_PROFILE_METADATA_COOLDOWN_BASE_SECONDS",
+                    str(self._local_tool_cooldown_seconds),
+                )),
+            )
+        except (TypeError, ValueError):
+            self._profile_metadata_cooldown_base_seconds = max(1, self._local_tool_cooldown_seconds)
+        try:
+            self._profile_metadata_cooldown_max_seconds = max(
+                self._profile_metadata_cooldown_base_seconds,
+                int(os.getenv("TIKTOK_PROFILE_METADATA_COOLDOWN_MAX_SECONDS", "86400")),
+            )
+        except (TypeError, ValueError):
+            self._profile_metadata_cooldown_max_seconds = max(
+                self._profile_metadata_cooldown_base_seconds,
+                86400,
+            )
+        try:
+            self._profile_metadata_cooldown_memory_seconds = max(
+                0,
+                int(os.getenv("TIKTOK_PROFILE_METADATA_COOLDOWN_MEMORY_SECONDS", "604800")),
+            )
+        except (TypeError, ValueError):
+            self._profile_metadata_cooldown_memory_seconds = 604800
         self._profile_backoff_enabled = os.getenv("TIKTOK_PROFILE_BACKOFF_ENABLED", "true").lower() == "true"
         self._profile_backoff_dir = Path(
             os.getenv(
@@ -821,10 +850,71 @@ class TiktokCollector(BaseCollector):
         )
         self._profile_metadata_cooldown_reason = reason
 
+    @staticmethod
+    def _retry_after_seconds(raw: str | None) -> int | None:
+        if not raw:
+            return None
+        try:
+            return max(0, int(float(raw)))
+        except (TypeError, ValueError):
+            pass
+        try:
+            retry_at = parsedate_to_datetime(raw)
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            return max(0, int((retry_at - datetime.now(timezone.utc)).total_seconds()))
+        except Exception:
+            return None
+
+    async def _record_profile_metadata_cooldown(
+        self,
+        reason: str,
+        *,
+        retry_after_seconds: int | None = None,
+    ) -> tuple[int, int, str]:
+        base_seconds = self._profile_metadata_cooldown_base_seconds
+        if retry_after_seconds is not None:
+            base_seconds = max(base_seconds, retry_after_seconds)
+        max_seconds = max(self._profile_metadata_cooldown_max_seconds, base_seconds)
+        state = await record_dynamic_cooldown(
+            self.pool,
+            source="tiktok",
+            scope="profile_metadata",
+            account=self._account_name(),
+            base_seconds=base_seconds,
+            max_seconds=max_seconds,
+            multiplier=2.0,
+            jitter_ratio=0.15,
+            memory_seconds=self._profile_metadata_cooldown_memory_seconds,
+        )
+        cooldown_seconds = max(state.seconds_remaining, retry_after_seconds or 0)
+        self._start_profile_metadata_cooldown(reason, cooldown_seconds)
+        logger.warning(
+            "tiktok: profile metadata blocked; cooling down for %ds (streak=%d, reason=%s)",
+            cooldown_seconds,
+            state.streak,
+            reason,
+        )
+        return cooldown_seconds, state.streak, state.service
+
     async def _sync_persisted_local_tool_cooldown(self) -> None:
         if self._local_tool_cooldown_restored or self.pool is None:
             return
         self._local_tool_cooldown_restored = True
+        try:
+            dynamic_state = await get_dynamic_cooldown(
+                self.pool,
+                source="tiktok",
+                scope="profile_metadata",
+                account=self._account_name(),
+            )
+            if dynamic_state and dynamic_state.active:
+                self._start_profile_metadata_cooldown(
+                    "persisted profile metadata exponential cooldown",
+                    dynamic_state.seconds_remaining,
+                )
+        except Exception:
+            logger.debug("tiktok: dynamic profile metadata cooldown restore failed", exc_info=True)
         try:
             async with self.pool.acquire() as conn:
                 rows = await conn.fetch(
@@ -1407,6 +1497,10 @@ class TiktokCollector(BaseCollector):
         except ValueError as exc:
             return {"status": "unavailable", "error": str(exc)}
 
+        await self._sync_persisted_local_tool_cooldown()
+        if self._profile_metadata_cooling_down():
+            return {"status": "delayed", "error": "profile_metadata_cooldown_active"}
+
         await self.wait_rate_limit("tiktok.com")
         cookies = {"sessionid": self._session_id} if self._session_id else {}
         headers = {
@@ -1425,9 +1519,10 @@ class TiktokCollector(BaseCollector):
                     "error": validation.error_message,
                 }
             if validation.is_rate_limited:
-                self._start_profile_metadata_cooldown(
+                retry_after = self._retry_after_seconds(resp.headers.get("Retry-After"))
+                cooldown_seconds, streak, service = await self._record_profile_metadata_cooldown(
                     "TikTok profile metadata HTTP rate-limit",
-                    self._local_tool_cooldown_seconds,
+                    retry_after_seconds=retry_after,
                 )
                 await record_rate_limit_event(
                     self.pool,
@@ -1435,9 +1530,14 @@ class TiktokCollector(BaseCollector):
                     account=self._account_name(),
                     scope="profile_metadata",
                     status_code=resp.status_code,
-                    cooldown_seconds=self._local_tool_cooldown_seconds,
+                    cooldown_seconds=cooldown_seconds,
                     reason="TikTok profile metadata HTTP rate-limit",
-                    metadata={"username": username},
+                    metadata={
+                        "username": username,
+                        "retry_after_seconds": retry_after,
+                        "dynamic_cooldown_streak": streak,
+                        "dynamic_cooldown_service": service,
+                    },
                 )
                 return {"status": "delayed", "http_status": resp.status_code}
             resp.raise_for_status()
@@ -1457,16 +1557,21 @@ class TiktokCollector(BaseCollector):
             wall_reason = classify_profile_wall(resp.text)
             if wall_reason:
                 reason = f"TikTok profile metadata challenge wall: {wall_reason}"
-                self._start_profile_metadata_cooldown(reason, self._local_tool_cooldown_seconds)
+                cooldown_seconds, streak, service = await self._record_profile_metadata_cooldown(reason)
                 await record_rate_limit_event(
                     self.pool,
                     source="tiktok",
                     account=self._account_name(),
                     scope="profile_metadata",
                     status_code=resp.status_code,
-                    cooldown_seconds=self._local_tool_cooldown_seconds,
+                    cooldown_seconds=cooldown_seconds,
                     reason=reason,
-                    metadata={"username": username, "wall_reason": wall_reason},
+                    metadata={
+                        "username": username,
+                        "wall_reason": wall_reason,
+                        "dynamic_cooldown_streak": streak,
+                        "dynamic_cooldown_service": service,
+                    },
                 )
                 return {
                     "status": "delayed",
