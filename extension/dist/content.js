@@ -213,6 +213,9 @@
   }
   function pinterestItems(doc, pageUrl) {
     const username = pinterestUsername(pageUrl);
+    const boardParts = new URL(pageUrl).pathname.split("/").filter(Boolean);
+    const boardPage = boardParts.length === 2 && !(/* @__PURE__ */ new Set(["pin", "search", "ideas", "_", "_created", "_saved", "login", "signup"])).has(boardParts[0].toLowerCase()) && !(/* @__PURE__ */ new Set(["_created", "_saved"])).has(boardParts[1].toLowerCase());
+    const boardId = boardPage ? boardParts.slice(0, 2).join(":") : null;
     const pins = [];
     const seenPins = /* @__PURE__ */ new Set();
     for (const anchor of Array.from(doc.querySelectorAll('a[href*="/pin/"]'))) {
@@ -246,6 +249,38 @@
         metadata: { page_path: new URL(pageUrl).pathname }
       });
       if (pins.length >= 40) break;
+    }
+    if (boardPage && pins.length < 40) {
+      const cards = Array.from(doc.querySelectorAll(
+        '[data-test-id*="pinWrapper" i], [data-test-id="pin"], [data-test-id*="pinRep" i], main article'
+      ));
+      for (const card of cards) {
+        const anchor = card.querySelector('a[href*="/pin/"]');
+        const pinUrl = absoluteHttps(anchor?.href, pageUrl);
+        const hrefId = pinUrl ? new URL(pinUrl).pathname.match(/\/pin\/([A-Za-z0-9_-]+)/i)?.[1] : null;
+        const image = card.querySelector("img[src]");
+        const imageUrl = absoluteHttps(image?.currentSrc || image?.src, pageUrl);
+        const title = cleanText(card.querySelector("h1,h2,h3,[title]")?.textContent || image?.alt, 500);
+        if (!imageUrl && !title) continue;
+        const id = card.getAttribute("data-pin-id") || card.getAttribute("data-id") || hrefId || stableId("pin", `${pageUrl}|${imageUrl || ""}|${title || ""}`);
+        if (seenPins.has(id)) continue;
+        seenPins.add(id);
+        const text = visibleText(card, 800);
+        pins.push({
+          type: "pin",
+          id,
+          username,
+          board_id: boardId,
+          board_url: pageUrl,
+          title: title && title.toLowerCase() !== "pin" ? title : null,
+          description: text && text.toLowerCase() !== "pin" ? text : null,
+          image_url: imageUrl,
+          destination_url: null,
+          url: pinUrl || pageUrl,
+          metadata: { page_path: new URL(pageUrl).pathname, permalink_available: !!pinUrl }
+        });
+        if (pins.length >= 40) break;
+      }
     }
     const boards = [];
     const seenBoards = /* @__PURE__ */ new Set();
