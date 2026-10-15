@@ -1,5 +1,5 @@
 # Agent State
-Current task: Complete the UnifiedCollector Full Plan (2026-10-14). The checklist below is the single progress tracker and acceptance source. Last reconciled: 2026-10-15 06:39 UTC; Telegram and native queue evidence is 06:37, Search/Exposure lock evidence is 06:39, and runtime restart/log evidence is through 06:35. Browser/CDP inventory is 06:25.
+Current task: Complete the UnifiedCollector Full Plan (2026-10-14). The checklist below is the single progress tracker and acceptance source. Last reconciled: 2026-10-15 06:45 UTC; runtime inventory is 06:45 (30 UnifiedCollector containers running, 0 marked unhealthy); Telegram/native queue evidence is 06:37, Search/Exposure lock evidence is 06:39, recent restart/log evidence is through 06:35, and browser/CDP inventory is 06:25.
 
 ## Agreed scope and rules
 
@@ -31,6 +31,11 @@ Current task: Complete the UnifiedCollector Full Plan (2026-10-14). The checklis
 4. Keep Exposure running and leave its Search mutex untouched. Search is restarted, has 10 due terms, and is waiting on Exposure; verify its own query/result/document rows after natural lock release.
 5. Leave Lemon8 running until its cursor reaches `idle`; then recreate only `collector_lemon8` to apply detail cap 4. Verify 50+ posts/12h, titles/descriptions, extension candidates, and a live dedupe outcome.
 6. Remaining runtime work is the extension/browser gate and other collectors that need safe reloads. Never interrupt Exposure's lock; preserve the one-tab-per-social rule. Verify live badge skips when the extension-enabled browser becomes available. After all phase gates pass, run the 15-minute soak, refresh the per-container 12-hour report, and write `/tmp/unifiedcollector-plan-complete-20261014.md`.
+
+## Runtime inventory — 2026-10-15 06:45 UTC
+
+- `docker ps` showed 30 running `unifiedcollector_*` containers; none was marked unhealthy. This is a container inventory only; it does not replace the per-source output, extension, Telegram-account-coverage, Search-lock, or final soak gates above.
+- User asked for the checklist and current picture to be shown in chat as it is updated. Present the open gates directly in each status update rather than relying on the repository tracker alone.
 
 ## Latest Telegram evidence snapshot — 2026-10-15 06:37 UTC (DB sample; sanitized connection-log audit through 06:36)
 
