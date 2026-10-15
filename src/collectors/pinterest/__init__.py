@@ -53,6 +53,10 @@ _MONTHLY_VIEWS_RE = re.compile(
 _PIN_PATH_RE = re.compile(r"^/pin/(\d+)(?:/|$)", re.IGNORECASE)
 _COUNT_TOKEN = r"(\d[\d,]*(?:\.\d+)?\s*[KMB]?)"
 _BOARD_EXCLUDED = {"_created", "_saved", "pin", "search", "explore"}
+_PROFILE_TAB_PATHS = {
+    "_created", "_saved", "_followers", "_following", "_boards", "_pins",
+    "created", "saved", "followers", "following", "boards", "pins",
+}
 _PRIVATE_MARKER_RE = re.compile(
     r"secret\s+board|private\s+board|(?:[\"']?is_secret[\"']?|[\"']?isSecret[\"']?)\s*[:=]\s*true",
     re.IGNORECASE,
@@ -235,6 +239,27 @@ def _contains_private_marker(data: dict[str, Any]) -> bool:
 
 
 def _same_pinterest_page_kind(url: str, target_kind: tuple[str, str | None, str | None]) -> bool:
+    if target_kind[0] == "profile":
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower().removeprefix("www.")
+        parts = [part for part in parsed.path.split("/") if part]
+        if (
+            parsed.scheme != "https"
+            or host != "pinterest.com"
+            or not parts
+            or parts[0].lower() != str(target_kind[1] or "").lower()
+            or len(parts) > 2
+        ):
+            return False
+        if len(parts) == 1 or parts[1].lower() in _PROFILE_TAB_PATHS:
+            return True
+        actual_kind = _pinterest_page_kind(url)
+        return (
+            actual_kind is not None
+            and actual_kind[0] == "board"
+            and (actual_kind[1] or "").lower() == str(target_kind[1] or "").lower()
+            and (actual_kind[2] or "").lower() == parts[1].lower()
+        )
     actual_kind = _pinterest_page_kind(url)
     return (
         actual_kind is not None
@@ -426,7 +451,12 @@ class PinterestCollector(ProfileOnlyCollector):
             },
         )
 
-    async def _scrape_public_page(self, target_url: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    async def _scrape_public_page(
+        self,
+        target_url: str,
+        *,
+        target_source: str | None = None,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         target_kind = _pinterest_page_kind(target_url)
         if target_kind is None:
             raise ValueError("unsupported_public_page")
@@ -447,6 +477,35 @@ class PinterestCollector(ProfileOnlyCollector):
                     "--no-zygote",
                 ],
             )
+            # Followed handles are the user's explicit Pinterest targets. Use
+            # their signed-in session first so login/canonical routing cannot
+            # block the preferred queue before the authenticated page is tried.
+            if target_source == "followed_handle_candidate" and storage_state:
+                try:
+                    authenticated_context = await browser.new_context(
+                        locale="en-US", storage_state=storage_state,
+                        service_workers="block",
+                    )
+                except Exception:
+                    logger.warning("Pinterest authenticated context unavailable; falling back to public page")
+                else:
+                    contexts.append(authenticated_context)
+                    authenticated_url, authenticated_html = await _fetch_pinterest_html(
+                        target_url, target_kind, storage_state,
+                    )
+                    authenticated_data = await self._read_public_page(
+                        authenticated_context, authenticated_url, target_kind,
+                        authenticated_html, allow_authenticated_private=True,
+                    )
+                    if authenticated_data.get("profile_is_verified") is True:
+                        raise RuntimeError("verified_account_excluded")
+                    if target_kind[0] == "profile" and not authenticated_data.get("profile_identity_verified"):
+                        raise RuntimeError("public_profile_identity_unconfirmed")
+                    boards, pins = self._parse_native_page(target_url, authenticated_data)
+                    if not self._has_public_content(target_kind, boards, pins):
+                        raise RuntimeError("empty_public_page")
+                    return boards, pins
+
             anonymous_context = await browser.new_context(
                 locale="en-US", service_workers="block",
             )
@@ -508,6 +567,8 @@ class PinterestCollector(ProfileOnlyCollector):
         target_url: str,
         target_kind: tuple[str, str | None, str | None],
         page_html: str,
+        *,
+        allow_authenticated_private: bool = False,
     ) -> dict[str, Any]:
         page = await context.new_page()
         first_navigation = True
@@ -633,6 +694,11 @@ class PinterestCollector(ProfileOnlyCollector):
               const identityRegion = boardHeader;
               const identityText = fullText(identityRegion?.innerText);
               const expectedHandle = String(expectedUsername || '').toLowerCase();
+              const currentPath = location.pathname.split('/').filter(Boolean);
+              const identityByUrl = location.protocol === 'https:'
+                && location.hostname.replace(/^www\\./, '') === 'pinterest.com'
+                && currentPath.length >= 1 && currentPath.length <= 2
+                && currentPath[0].toLowerCase() === expectedHandle;
               const identityLinks = Array.from(identityRegion?.querySelectorAll('a[href]') || [])
                 .map((link) => link.href);
               const identityByLink = identityLinks.some((href) => {
@@ -644,7 +710,8 @@ class PinterestCollector(ProfileOnlyCollector):
                   && parts[0].toLowerCase() === expectedHandle;
               });
               const identityTokens = identityText.toLowerCase().match(/@[a-z0-9._-]+/g) || [];
-              const profileIdentityVerified = identityByLink || identityTokens.includes('@' + expectedHandle);
+              const profileIdentityVerified = identityByUrl || identityByLink
+                || identityTokens.includes('@' + expectedHandle);
               const profileIsVerified = hasExplicitVerifiedBadge(identityRegion);
               return {
                 url: location.href,
@@ -665,7 +732,7 @@ class PinterestCollector(ProfileOnlyCollector):
         )
         if not _same_pinterest_page_kind(str(data.get("url") or ""), target_kind):
             raise RuntimeError("public_target_redirected")
-        if _contains_private_marker(data):
+        if not allow_authenticated_private and _contains_private_marker(data):
             raise RuntimeError("private_content_rejected")
         return data
 
@@ -707,6 +774,16 @@ class PinterestCollector(ProfileOnlyCollector):
             return [], []
         kind, username, board_slug = page_kind
         owner_username = str(username or "").lower()
+        profile_page_url = str(data.get("url") or "")
+        profile_page_url_verified = (
+            kind == "profile"
+            and _same_pinterest_page_kind(
+                profile_page_url, ("profile", username, None),
+            )
+        )
+        profile_identity_verified = data.get("profile_identity_verified") is True or (
+            profile_page_url_verified
+        )
         title = str(data.get("title") or "").strip()[:500] or None
         body_text = str(data.get("body_text") or "")[:12_000]
         board_header_text = str(data.get("board_header_text") or "")[:2_000]
@@ -770,12 +847,19 @@ class PinterestCollector(ProfileOnlyCollector):
             ):
                 continue
             page_identity_verified = (
-                kind != "profile" or data.get("profile_identity_verified") is True
+                kind != "profile" or profile_identity_verified
             )
+            membership_links = [
+                link for link in anchor.get("membership_links", [])
+                if isinstance(link, str)
+            ]
+            if kind == "profile" and profile_identity_verified and profile_page_url_verified:
+                # The visible profile page itself is evidence that its pin cards
+                # belong to this followed handle even when cards link only to pins.
+                membership_links.append(profile_page_url)
             ownership_verified = page_identity_verified and any(
                 _pin_membership_matches(link, kind, owner_username, board_slug)
-                for link in anchor.get("membership_links", [])
-                if isinstance(link, str)
+                for link in membership_links
             )
             pin_url = f"https://www.pinterest.com/pin/{pin_id}/"
             card_text = " ".join((
@@ -838,7 +922,10 @@ class PinterestCollector(ProfileOnlyCollector):
             return summary
         summary["processed"] = 1
         try:
-            boards, pins = await self._scrape_public_page(str(target["target_url"]))
+            boards, pins = await self._scrape_public_page(
+                str(target["target_url"]),
+                target_source=str(target.get("source") or ""),
+            )
             if not boards and not pins:
                 raise RuntimeError("empty_public_page")
             async with self.pool.acquire() as conn:

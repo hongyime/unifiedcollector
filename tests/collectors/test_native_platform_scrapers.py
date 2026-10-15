@@ -13,6 +13,7 @@ from src.collectors.pinterest import (
     _load_pinterest_storage_state,
     _pinterest_page_kind,
     _retry_after_seconds as _pinterest_retry_after_seconds,
+    _same_pinterest_page_kind,
     _verified_board_link_conflict,
 )
 from src.collectors import pinterest as pinterest_mod
@@ -280,6 +281,25 @@ def test_pinterest_profile_pin_ownership_needs_verified_identity_and_matching_li
     assert {pin["id"] for pin in verified_pins if pin["owner_verified"]} == {"12345"}
 
 
+def test_pinterest_profile_page_identity_attributes_its_visible_pin_cards():
+    target = "https://www.pinterest.com/alice/"
+    _boards, pins = PinterestCollector._parse_native_page(
+        target,
+        {
+            "url": target,
+            "pin_cards": [{
+                "href": "https://www.pinterest.com/pin/12345/",
+                "pin_id": "12345",
+                "membership_links": [],
+            }],
+        },
+    )
+
+    assert len(pins) == 1
+    assert pins[0]["owner_verified"] is True
+    assert pins[0]["username"] == "alice"
+
+
 def test_pinterest_upsert_preserves_verified_board_link_without_new_board_context():
     expression = " ".join(_verified_board_link_conflict("board_id").split())
 
@@ -299,6 +319,95 @@ def test_pinterest_target_validation_rejects_nonpublic_routes():
     assert _pinterest_page_kind("https://www.pinterest.com/alice/_saved/") is None
     assert _pinterest_page_kind("http://www.pinterest.com/alice/") is None
     assert _pinterest_page_kind("https://evil.example/alice/") is None
+
+
+def test_pinterest_profile_redirect_stays_with_same_owner():
+    target = ("profile", "alice", None)
+
+    assert _same_pinterest_page_kind(
+        "https://www.pinterest.com/alice/_created/", target,
+    )
+    assert _same_pinterest_page_kind(
+        "https://www.pinterest.com/alice/travel/", target,
+    )
+    assert _same_pinterest_page_kind(
+        "https://www.pinterest.com/ALICE/Travel/", target,
+    )
+    assert not _same_pinterest_page_kind(
+        "https://www.pinterest.com/other/_created/", target,
+    )
+
+
+@pytest.mark.asyncio
+async def test_pinterest_followed_handle_reads_cookie_context_before_anonymous_context(monkeypatch):
+    import sys
+    from types import ModuleType
+
+    storage_state = {"cookies": [{"name": "session", "value": "test-cookie"}]}
+    fetch_states = []
+    context_states = []
+
+    class Context:
+        async def close(self):
+            return None
+
+    class Browser:
+        async def new_context(self, **kwargs):
+            context_states.append(kwargs.get("storage_state"))
+            return Context()
+
+        async def close(self):
+            return None
+
+    class Chromium:
+        async def launch(self, **_kwargs):
+            return Browser()
+
+    class Playwright:
+        chromium = Chromium()
+
+        async def stop(self):
+            return None
+
+    class PlaywrightManager:
+        async def start(self):
+            return Playwright()
+
+    playwright_module = ModuleType("playwright")
+    async_api_module = ModuleType("playwright.async_api")
+    async_api_module.async_playwright = lambda: PlaywrightManager()
+    monkeypatch.setitem(sys.modules, "playwright", playwright_module)
+    monkeypatch.setitem(sys.modules, "playwright.async_api", async_api_module)
+    monkeypatch.setattr(pinterest_mod, "_load_pinterest_storage_state", lambda: storage_state)
+
+    async def fetch(_url, _target_kind, current_storage_state):
+        fetch_states.append(current_storage_state)
+        return "https://www.pinterest.com/alice/", "<html></html>"
+
+    monkeypatch.setattr(pinterest_mod, "_fetch_pinterest_html", fetch)
+    collector = object.__new__(PinterestCollector)
+
+    async def read(_context, url, _target_kind, _html, **_kwargs):
+        return {
+            "url": url,
+            "profile_identity_verified": True,
+            "profile_is_verified": False,
+            "pin_cards": [{
+                "href": "https://www.pinterest.com/pin/12345/",
+                "pin_id": "12345",
+                "membership_links": [],
+            }],
+        }
+
+    monkeypatch.setattr(collector, "_read_public_page", read)
+    _boards, pins = await collector._scrape_public_page(
+        "https://www.pinterest.com/alice/",
+        target_source="followed_handle_candidate",
+    )
+
+    assert fetch_states == [storage_state]
+    assert context_states == [storage_state]
+    assert pins[0]["owner_verified"] is True
 
 
 def test_pinterest_retry_after_supports_delta_and_http_date():
