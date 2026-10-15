@@ -1,6 +1,6 @@
 # Agent State
 
-Current task: Complete the UnifiedCollector Full Plan (2026-10-14). This is the active checklist. Reconciled 2026-10-15 13:01 UTC; latest database and runtime evidence is through 13:01 UTC. The one-tab-per-social change is pushed as `f7cf0df5`; Compose version consumers are updated. The managed extension reload and Pinterest cookies in the collector browser profile remain unverified.
+Current task: Complete the UnifiedCollector Full Plan (2026-10-14). This is the active checklist. Reconciled 2026-10-15 13:12 UTC; database aggregates below are through 13:01 UTC and the Lemon8 runtime diagnosis is through 13:09 UTC. The one-tab-per-social change is pushed as `f7cf0df5`; Compose version consumers are updated. The user's reported reload/login is not visible in collector CDP 9336 yet: no extension worker, no fresh heartbeat, and no Pinterest cookies in the collector profile.
 
 ## User decisions and operating rules
 
@@ -13,9 +13,15 @@ Current task: Complete the UnifiedCollector Full Plan (2026-10-14). This is the 
 
 ## At a glance
 
-Phase 1 and Phase 2a are complete. Remaining gates: extension v1.23.116 must report a fresh heartbeat and one managed tab per social; Lemon8 must reach 50+ posts/12h and deliver extension candidates with dedupe verified; Pinterest must collect native boards/pins/profile fields; Snapchat must prove followed-target profiles/stories/highlights/Spotlights; Airbnb must collect followed-linked listings and host bios; Telegram must produce all four feature tables across eligible groups and all four accounts; Search must search its 10 dynamic terms and index documents; then the final 15-minute soak/report. Follow-first and conditional broadening are compatible: process followed identities first and broaden only after those queues drain with capacity. For Airbnb, follow-first means listing links surfaced by followed identities, not an Airbnb follow graph. Only Pinterest needs browser cookies for the planned implementation; Snapchat uses public endpoints and Airbnb uses its direct GraphQL path. Cookie snapshots through 12:59 contain one cookie each and no Pinterest/Snapchat/Airbnb-domain cookies. CDP 9336 currently has one Lemon8 page and no extension worker.
+**Done:** Phase 1 split/rename; Phase 2a Beeper verification. The one-tab-per-social implementation and explicit verified-account filters are pushed, with live extension acceptance still open.
 
-Immediate checkpoint: `browser_ingest` is healthy and expects extension v1.23.116, but there have been 0 ingest events in 30 minutes and no extension worker in CDP; the latest known heartbeat is still v1.23.108. Fresh cookie-vault snapshots at 12:54 and 12:59 contain no Pinterest-domain cookies, so the Pinterest session has not reached this collector profile. The user's reload/login actions remain unverified here. The priority rule is consistent: followed identities first, then broaden when those queues drain and capacity remains. Exclude only accounts with explicit verified-badge evidence; unknown stays eligible. Telegram scope remains all eligible groups across all four connected accounts and any configured later.
+**Still open:** Phase 2b Lemon8 API + extension; native Pinterest/Snapchat/Airbnb output (tracked here as Phase 2c per Bryan's decision); Telegram's all-account/all-group live gates; Search's dynamic terms and document indexing; the final 15-minute soak and report.
+
+**Rules that govern the remaining work:** Pinterest/Snapchat start with followed identities; Airbnb starts from listing links surfaced by followed identities. Broaden only after the preferred queue drains and spare capacity exists. Exclude an account only on explicit verified-badge evidence; unknown remains eligible. Telegram covers all eligible groups using all four current accounts and any configured later. Keep at most one extension-managed tab per social. Only Pinterest needs browser cookies in the planned implementation; Snapchat uses public endpoints and Airbnb direct GraphQL.
+
+**Next in order:** (1) resolve the Lemon8 long-cycle/no-new-posts stall without bypassing backoff; (2) verify extension v1.23.116 and Pinterest auth in the actual collector profile; (3) get followed-first native output from Pinterest/Snapchat and followed-linked Airbnb listings plus host bios; (4) after Telegram FloodWaits and the Search mutex clear naturally, verify those live outputs; (5) run the final soak and report.
+
+Immediate checkpoint: at 13:09, Lemon8's cycle was still marked running from 12:20; it scraped its feed at 12:23 and logged one profile-fetch 429 at 12:30, with no later cycle logs. The 13:01 sample showed 37 posts/12h and no new posts since 12:30. Optional profile-avatar backfill may be prolonging the cycle, but this is a hypothesis, not a confirmed cause; do not restart or force requests without a safe idle boundary. `browser_ingest` is healthy and expects v1.23.116, but the latest heartbeat remains v1.23.108, there were 0 ingest events in 30 minutes, and CDP 9336 has no extension worker. The user's reported reload/login has not appeared in this collector profile; cookie snapshots through 12:59 contain no Pinterest cookies. This explains the mismatch between the visible reload and collector telemetry. Snapchat/Airbnb sign-in is not required for the chosen scrapers.
 
 ## Master checklist — evidence through 2026-10-15 13:01 UTC
 
@@ -33,7 +39,7 @@ Immediate checkpoint: `browser_ingest` is healthy and expects extension v1.23.11
 
 ## Next actions, in dependency order
 
-1. In the collector CDP 9336 profile, reload extension v1.23.116 and sign in to Pinterest; verify a fresh heartbeat, candidate data, Pinterest cookies, and one tab per social. Snapchat and Airbnb do not need browser login for the approved public-endpoint/GraphQL paths. Do not send cookie values.
+1. Reconcile the user's reported extension reload with collector CDP 9336: identify/use the same collector browser profile, then verify v1.23.116 heartbeat, candidate data, Pinterest cookies, and at most one managed tab per social. Do not request or print cookie values; Snapchat and Airbnb sign-in is unnecessary.
 2. Keep Snapchat follow-first collection under observation after commit `9d73fc79`; confirm whether `/add/` stores followed-target highlights. Keep the 10 pending followed targets ahead of lower-priority discovery.
 3. Let Lemon8 run on its normal schedule; confirm it clears 50 posts/12h and receives v1.23.116 extension candidates with dedupe.
 4. Continue Pinterest native collection only with followed targets; after collector-profile cookies appear in a vault snapshot, restart only `collector_pinterest` and verify native pins/fields.
