@@ -1,5 +1,5 @@
 # Agent State
-Current task: Complete the UnifiedCollector Full Plan (2026-10-14). The checklist below is the single progress tracker and acceptance source. Last reconciled: 2026-10-15 07:31 UTC; Lemon8 cursor/health/queue/cooldowns checked 07:30; platform outputs, Search tables/terms/mutex, container inventory, and CDP checked 07:27–07:28; Telegram DB/log evidence 07:22; extension v1.23.113 built/pushed 07:15; latest Airbnb retry evidence remains 07:03.
+Current task: Complete the UnifiedCollector Full Plan (2026-10-14). The checklist below is the single progress tracker and acceptance source. Last reconciled: 2026-10-15 07:33 UTC; Phase 1 services and retired-name references rechecked 07:33; Lemon8 cursor/health/queue/cooldowns checked 07:30; platform outputs, Search tables/terms/mutex, container inventory, and CDP checked 07:27–07:28; Telegram DB/log evidence 07:22; extension v1.23.113 built/pushed 07:15; latest Airbnb retry evidence remains 07:03.
 
 ## Agreed scope and rules
 
@@ -12,7 +12,7 @@ Current task: Complete the UnifiedCollector Full Plan (2026-10-14). The checklis
 
 ## Master checklist
 
-- [x] **Phase 1 — split and rename:** Exposure/Lemon8 and Search/Strava are separated; `instagram_ingest` is `browser_ingest`; changes are pushed. Three old service containers remain stopped orphans; no old service is running.
+- [x] **Phase 1 — split and rename:** Exposure/Lemon8 and Search/Strava are separated; `instagram_ingest` is `browser_ingest`; changes are pushed. Rechecked 07:33: all five replacement containers (`collector_exposure`, `collector_lemon8`, `collector_search`, `collector_strava`, `browser_ingest`) are running and present in Compose; no retired service-name references remain in `src`, `docker`, or `tools`. Three old service containers remain stopped orphans; no old service is running.
 - [~] **Phase 2a — Beeper:** At 07:27, live output was 175 messages/15m and 785/1h; latest row 07:23:53 and source health advanced 07:25:31 with zero crashes. The final 15-minute soak is still required.
 - [~] **Phase 2b — Lemon8 API + extension:** At 07:27, 24 posts/12h and 0/24 titles/descriptions; latest row 07:22. Runtime has `pylemon8` unavailable and currently uses HTML fallback. The public feed data route and JSON text preservation are committed but not applied; at 07:30 cursor remained `running` at 06:59:51 and source health advanced 07:30:23 with zero crashes. No active Lemon8 cooldowns; spider queue has 9 old `processing`, 1 pending target (created 07:02), and 8 completed in 12h. Runtime `LEMON8_FYP_DETAIL_PER_CYCLE=2`; Compose specifies 4. Wait for a safe `idle` boundary before reloading and applying the correct setting. Extension candidates/heartbeat and dedupe remain unverified.
 - [~] **Phase 2c — Pinterest:** At 07:27, 143 pins/12h, one with a description and none with destination URLs; latest row 00:52. Queue snapshot from 06:58: 10 followed-handle targets pending, 163 failed; 715 generic profiles pending; no active claim and one expired board claim. Last cookie-vault audit at 06:58 found no Pinterest cookies; current CDP has zero social tabs and no extension target. Keep follow-first.
