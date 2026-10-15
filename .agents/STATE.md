@@ -1,5 +1,5 @@
 # Agent State
-Current task: Complete the UnifiedCollector Full Plan (2026-10-14). The checklist below is the single progress tracker and acceptance source. Last reconciled: 2026-10-15 07:22 UTC; platform outputs, Lemon8 cursor, container inventory, Search mutex, and CDP inventory checked 07:16–07:20; Telegram DB/log evidence 07:22; extension v1.23.113 built/pushed 07:15; latest Airbnb retry evidence remains 07:03.
+Current task: Complete the UnifiedCollector Full Plan (2026-10-14). The checklist below is the single progress tracker and acceptance source. Last reconciled: 2026-10-15 07:23 UTC; latest Lemon8 cursor/health/queue and runtime cap checked 07:23; platform outputs, container inventory, Search mutex, and CDP inventory checked 07:16–07:20; Telegram DB/log evidence 07:22; extension v1.23.113 built/pushed 07:15; latest Airbnb retry evidence remains 07:03.
 
 ## Agreed scope and rules
 
@@ -14,7 +14,7 @@ Current task: Complete the UnifiedCollector Full Plan (2026-10-14). The checklis
 
 - [x] **Phase 1 — split and rename:** Exposure/Lemon8 and Search/Strava are separated; `instagram_ingest` is `browser_ingest`; changes are pushed. Three old service containers remain stopped orphans; no old service is running.
 - [~] **Phase 2a — Beeper:** At 07:16, live output was 195 messages/15m and 809/1h; source health advanced at 07:16:43 with zero crashes. The final 15-minute soak is still required.
-- [~] **Phase 2b — Lemon8 API + extension:** At 07:16, 23 posts/12h and 0/23 titles/descriptions; latest row 04:09. Runtime has `pylemon8` unavailable and currently uses HTML fallback. The public feed data route and JSON text preservation are committed but not applied; cursor advanced to 06:59:51 and remains `running`, while source health advanced at 07:16:53 with zero crashes. Wait for a safe `idle` boundary before reloading. Extension candidates/heartbeat and dedupe remain unverified.
+- [~] **Phase 2b — Lemon8 API + extension:** At 07:16, 23 posts/12h and 0/23 titles/descriptions; latest row 04:09. Runtime has `pylemon8` unavailable and currently uses HTML fallback. The public feed data route and JSON text preservation are committed but not applied; at 07:23 cursor remains `running` at 06:59:51, source health advanced 07:22:53 with zero crashes, and queue status is 9 old `processing` rows plus 1 recent pending target. Runtime `LEMON8_FYP_DETAIL_PER_CYCLE=2`; Compose specifies 4. Wait for a safe `idle` boundary before reloading and applying the correct setting. Extension candidates/heartbeat and dedupe remain unverified.
 - [~] **Phase 2c — Pinterest:** At 07:16, 143 pins/12h, one with a description and none with destination URLs; latest row 00:52. Queue snapshot from 06:58: 10 followed-handle targets pending, 163 failed; 715 generic profiles pending; no active claim and one expired board claim. No Pinterest cookies in the vault. CDP has zero social tabs/extension targets; keep follow-first.
 - [~] **Phase 2c — Snapchat:** At 07:16, 1 story, 15 Spotlights, 20 Highlights/12h; latest Spotlight 07:03, story/highlights 02:39; titles remain absent. Queue snapshot from 06:58: 10 followed targets pending, 160 failed, 10 broad profiles pending; keep follow-first.
 - [~] **Phase 2c — Airbnb:** At 07:16, 4 listings (3 with descriptions) and 22 reviews/12h, latest 06:54; 6 hosts still have 0 bios. The 07:03:46 retry failed before the deferred-JSON parser was deployed; the parser is loaded after the 07:06 restart, and next retry remains 13:50:53. No Airbnb cookie session in the vault; no profile proof yet.
@@ -28,7 +28,7 @@ Current task: Complete the UnifiedCollector Full Plan (2026-10-14). The checklis
 1. Keep the Airbnb queue's 13:50:53 retry; do not force it forward. Verify whether the deferred-JSON profile parser turns the next public host page into data.
 2. Keep Pinterest/Snapchat followed targets ahead of generic discovery. No Pinterest cookie session exists in the cookie vault; do not widen their queues while preferred targets remain.
 3. Keep Exposure running and leave its Search mutex untouched. Verify Search's own query/result/document rows only after natural release.
-4. Leave Lemon8 running until its cursor reaches `idle`; then recreate only `collector_lemon8` to load the API feed/text changes and apply detail cap 4. Verify 50+ posts/12h, titles/descriptions, extension candidates, and live dedupe.
+4. Leave Lemon8 running until its cursor reaches `idle`; then recreate only `collector_lemon8` to load the API feed/text changes and apply `LEMON8_FYP_DETAIL_PER_CYCLE=4`. Verify 50+ posts/12h, titles/descriptions, extension candidates, and live dedupe.
 5. Remaining runtime work is the extension/browser gate and other collectors that need safe reloads. Never interrupt Exposure's lock; preserve the one-tab-per-social rule. Verify live badge skips when the extension-enabled browser becomes available. After all phase gates pass, run the 15-minute soak, refresh the per-container 12-hour report, and write `/tmp/unifiedcollector-plan-complete-20261014.md`.
 
 ## Runtime inventory — 2026-10-15 07:16 UTC
@@ -50,6 +50,10 @@ Current task: Complete the UnifiedCollector Full Plan (2026-10-14). The checklis
 - Beeper: 195 messages in 15m, 809 in 1h. Lemon8: cursor `running` at 06:59:51, source health advanced 07:16:53; 23 posts/12h, zero titles/descriptions. Pinterest: 143 pins/12h (one description, no destinations). Snapchat: 1 story, 15 Spotlights, 20 Highlights/12h, zero Spotlight/story titles. Airbnb: 4 listings (3 with descriptions), 22 reviews/12h, 6 hosts without bios; next host retry is 13:50:53.
 - 30 collector containers running, none unhealthy. Exposure still owns the Search mutex; Search cursor and source health remain stale. Shared Search query writes are not attributable; no documents indexed in 12h.
 - Telegram logs show four connected worker IDs, no disconnect markers or tracebacks in 24h, and four FloodWait events in that window. DB has four active account rows, no spider account allowlist, five discussion visits/12h (4 completed, 1 aborted) across two accounts, and zero poll-vote refreshes in 12h. The original zero-visit sample was during the all-account FloodWait cooldown period. CUA has no surfaces; CDP has 0 social and 0 extension targets.
+
+## Lemon8 reload boundary — 2026-10-15 07:23 UTC
+
+- Cursor remains `running` at 06:59:51; source health last advanced at 07:22:53 with zero crashes. The queue has nine `processing` rows created in June/August and one pending feed target created about 18 minutes earlier. Runtime detail cap is 2; Compose config is `LEMON8_FYP_DETAIL_PER_CYCLE=4`. No restart while the cursor is running.
 
 ## Runtime/queue update — 2026-10-15 07:04 UTC
 
