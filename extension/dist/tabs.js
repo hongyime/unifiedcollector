@@ -2,12 +2,10 @@
 (() => {
   // src/tabs.ts
   var $ = (id) => document.getElementById(id);
-  var EXPANDED_PLATFORM_TABS_KEY = "ucOpenExpandedPlatformTabs";
   var lastDiag = null;
   var lastProbe = null;
   var lastAutoProbeAt = 0;
   var autoProbeInFlight = false;
-  var expandedPlatformTabs = false;
   function isControlTabsPage(url) {
     try {
       const u = new URL(String(url || ""));
@@ -89,7 +87,6 @@
   async function render() {
     let platforms = [];
     let backgroundError = null;
-    await loadSettings();
     try {
       platforms = await sendMessage({ type: "getPlatforms" }) || [];
       lastDiag = await sendMessage({ type: "diagnostics" });
@@ -97,7 +94,6 @@
       backgroundError = runtimeErrorText(e);
     }
     renderDiagnostics(backgroundError);
-    renderSettings();
     const list = $("list");
     list.innerHTML = platforms.map((p) => {
       const login = p.noLogin ? badge("login", "idle", "no login needed") : p.loggedIn === true ? badge("login", "ok", "logged in") : p.loggedIn === false ? badge("login", "bad", "not logged in") : badge("login", "idle", "login unknown");
@@ -123,20 +119,8 @@
       });
     });
     const scrapers = platforms.filter((p) => p.scraper).map((p) => p.label).join(", ") || "none yet";
-    $("note").innerHTML = `<b>Scrapers active:</b> ${scrapers}. Other platforms open for login now and will scrape automatically once their scraper is added. Auto-opened scraper tabs are unpinned by default; keep them logged in. Expanded tabs are ${expandedPlatformTabs ? "on" : "off"}.`;
+    $("note").innerHTML = `<b>Scrapers active:</b> ${scrapers}. Other platforms open for login now and will scrape automatically once their scraper is added. Auto-opened scraper tabs are unpinned by default; keep them logged in. One tab per social platform.`;
     maybeAutoProbe(backgroundError);
-  }
-  async function loadSettings() {
-    try {
-      const stored = await chrome.storage.local.get([EXPANDED_PLATFORM_TABS_KEY]);
-      expandedPlatformTabs = stored && stored[EXPANDED_PLATFORM_TABS_KEY] === true;
-    } catch (e) {
-      expandedPlatformTabs = false;
-    }
-  }
-  function renderSettings() {
-    const box = $("expandedTabs");
-    if (box) box.checked = expandedPlatformTabs;
   }
   function renderDiagnostics(backgroundError) {
     const el = $("diag");
@@ -199,13 +183,6 @@
     }
     await render();
   });
-  $("expandedTabs").addEventListener("change", async (event) => {
-    const enabled = !!(event && event.target && event.target.checked);
-    expandedPlatformTabs = enabled;
-    await chrome.storage.local.set({ [EXPANDED_PLATFORM_TABS_KEY]: enabled });
-    await sendMessage({ type: "refreshScraperTabs", reason: "expanded_tabs_toggle" });
-    setTimeout(render, 1e3);
-  });
   async function reloadExtension(options = {}) {
     try {
       await sendMessage({ type: "log", level: "info", msg: "manual extension reload requested" });
@@ -244,18 +221,10 @@
     const shouldRefreshTabs = params.get("refreshTabs") === "1";
     const shouldScrape = params.get("scrape") === "1";
     const shouldTest = params.get("test") === "1";
-    const expandedOverride = params.get("expanded");
     if (!shouldReload && !shouldOpenAll && !openIds.length && !shouldRefreshTabs && !shouldScrape && !shouldTest) return;
     try {
       history.replaceState(null, "", location.pathname);
     } catch (e) {
-    }
-    if (expandedOverride === "0" || expandedOverride === "false" || expandedOverride === "off") {
-      expandedPlatformTabs = false;
-      await chrome.storage.local.set({ [EXPANDED_PLATFORM_TABS_KEY]: false });
-    } else if (expandedOverride === "1" || expandedOverride === "true" || expandedOverride === "on") {
-      expandedPlatformTabs = true;
-      await chrome.storage.local.set({ [EXPANDED_PLATFORM_TABS_KEY]: true });
     }
     if (shouldReload) {
       await reloadExtension({

@@ -421,18 +421,9 @@ function Open-ExtensionControlPage {
 
 function Get-PlatformLaunchUrls {
     param([string[]]$Ids, [bool]$All)
-    $expandedPlatformTabs = [Environment]::GetEnvironmentVariable("UC_CHROME_OPEN_EXPANDED_PLATFORM_TABS") -eq "1"
     $platforms = [ordered]@{
         instagram = "https://www.instagram.com/"
-        tiktok = if ($expandedPlatformTabs) {
-            @(
-                "https://www.tiktok.com/following",
-                "https://www.tiktok.com/foryou",
-                "https://www.tiktok.com/explore"
-            )
-        } else {
-            "https://www.tiktok.com/following"
-        }
+        tiktok = "https://www.tiktok.com/following"
         lemon8 = "https://www.lemon8-app.com/topic/singapore?region=sg"
         x = "https://x.com/home"
         threads = "https://www.threads.com/"
@@ -675,9 +666,6 @@ if ($OpenAll -and -not $NoOpenAll -and $OpenIds.Count -eq 0) {
 if ($OpenIds.Count -gt 0) {
     $encodedIds = @($OpenIds | ForEach-Object { [uri]::EscapeDataString([string]$_) }) -join ","
     $tabsParams.Add("open=$encodedIds")
-    if ([Environment]::GetEnvironmentVariable("UC_CHROME_OPEN_EXPANDED_PLATFORM_TABS") -ne "1") {
-        $tabsParams.Add("expanded=0")
-    }
 }
 if (-not $NoScrape) {
     $tabsParams.Add("scrape=1")

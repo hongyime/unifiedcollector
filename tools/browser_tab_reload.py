@@ -50,23 +50,6 @@ CLOSE_EXCLUDED_AUTO_PLATFORMS = os.getenv("UC_BROWSER_CLOSE_EXCLUDED_PLATFORM_TA
     "false",
     "no",
 }
-EXPANDED_PLATFORM_TABS = os.getenv("UC_CHROME_OPEN_EXPANDED_PLATFORM_TABS", "0").strip().lower() in {
-    "1",
-    "true",
-    "yes",
-} or os.getenv("UC_BROWSER_EXPANDED_PLATFORM_TABS", "0").strip().lower() in {
-    "1",
-    "true",
-    "yes",
-}
-_TIKTOK_HARD_REOPEN_URLS = ["https://www.tiktok.com/following"]
-if EXPANDED_PLATFORM_TABS:
-    _TIKTOK_HARD_REOPEN_URLS.extend(
-        [
-            "https://www.tiktok.com/foryou",
-            "https://www.tiktok.com/explore",
-        ]
-    )
 HARD_REOPEN_URLS = {
     "instagram": [
         "https://www.instagram.com/explore/",
@@ -74,7 +57,9 @@ HARD_REOPEN_URLS = {
     "threads": [
         "https://www.threads.com/following",
     ],
-    "tiktok": _TIKTOK_HARD_REOPEN_URLS,
+    "tiktok": [
+        "https://www.tiktok.com/following",
+    ],
     "lemon8": [
         "https://www.lemon8-app.com/topic/singapore?region=sg",
     ],

@@ -1047,22 +1047,12 @@ async function mapLimit(items, limit, worker) {
 const _tpath = (u) => { try { return new URL(u).pathname.split("?")[0].replace(/\/$/, "") || "/"; } catch (e) { return "/"; } };
 const _mainWorldHookHostRe = /(^|\.)((instagram|tiktok|strava)\.com|threads\.com|x\.com|twitter\.com|facebook\.com)$/i;
 const SCRAPER_TABS_PINNED_KEY = "ucPinScraperTabs";
-const EXPANDED_PLATFORM_TABS_KEY = "ucOpenExpandedPlatformTabs";
 const AUTO_SCRAPER_PLATFORM_IDS = new Set(["instagram", "threads", "tiktok", "lemon8", "x", "facebook", "strava", "pinterest", "snapchat", "airbnb"]);
 
 async function scraperTabsPinned() {
   try {
     const stored = await chrome.storage.local.get([SCRAPER_TABS_PINNED_KEY]);
     return stored && stored[SCRAPER_TABS_PINNED_KEY] === true;
-  } catch (e) {
-    return false;
-  }
-}
-
-async function expandedPlatformTabsEnabled() {
-  try {
-    const stored = await chrome.storage.local.get([EXPANDED_PLATFORM_TABS_KEY]);
-    return stored && stored[EXPANDED_PLATFORM_TABS_KEY] === true;
   } catch (e) {
     return false;
   }
@@ -1075,34 +1065,12 @@ function scraperTabRows(tabs) {
 }
 
 function platformTargetPaths(platform) {
-  if (!platform) return [];
-  return [
-    platform.url,
-    ...((platform.extraUrls || [])),
-    ...((platform.optionalExtraUrls || [])),
-  ]
-    .filter(Boolean)
-    .map(_tpath);
-}
-
-function platformManagedUrls(platform, expanded) {
-  if (!platform) return [];
-  return [
-    platform.url,
-    ...((platform.extraUrls || [])),
-    ...((expanded ? platform.optionalExtraUrls || [] : [])),
-  ].filter(Boolean);
+  return platform && platform.url ? [_tpath(platform.url)] : [];
 }
 
 function canonicalTabKey(row) {
   const platform = row && row.platform;
-  const tab = row && row.tab;
-  if (!platform || !tab) return null;
-  const targets = platformTargetPaths(platform);
-  if (targets.length <= 1) return platform.id;
-  const path = _tpath(tab.url || "");
-  const matched = targets.find((want) => path === want || (want !== "/" && path.startsWith(want)));
-  return `${platform.id}:${matched || path}`;
+  return platform && platform.id ? platform.id : null;
 }
 
 function canonicalTabScore(row) {
@@ -1243,7 +1211,6 @@ async function closeDuplicateExtensionControlTabs(reason) {
 
 async function browserTabBudgetSnapshot() {
   const pinScraperTabs = await scraperTabsPinned();
-  const expandedTabs = await expandedPlatformTabsEnabled();
   const violations = [];
   const counts = {
     extension_control_tabs: 0,
@@ -1262,7 +1229,7 @@ async function browserTabBudgetSnapshot() {
       violations: [{ kind: "tab_query_failed", detail: String(e && e.message ? e.message : e) }],
       counts,
       pin_scraper_tabs: pinScraperTabs,
-      expanded_platform_tabs: expandedTabs,
+      expanded_platform_tabs: false,
       extension_version: extensionVersion(),
     };
   }
@@ -1298,7 +1265,7 @@ async function browserTabBudgetSnapshot() {
   }
   for (const p of scraperPlatforms()) {
     const count = counts.per_platform[p.id] || 0;
-    const allowed = expandedTabs ? Math.max(1, platformManagedUrls(p, true).length) : 1;
+    const allowed = 1;
     if (count > allowed) {
       violations.push({
         kind: "scraper_tab_budget_exceeded",
@@ -1326,7 +1293,7 @@ async function browserTabBudgetSnapshot() {
     violations,
     counts,
     pin_scraper_tabs: pinScraperTabs,
-    expanded_platform_tabs: expandedTabs,
+    expanded_platform_tabs: false,
     extension_version: extensionVersion(),
   };
 }
@@ -1420,10 +1387,8 @@ async function setScraperTabPinnedState(tab, shouldPin) {
   }
 }
 
-// Keep exactly ONE tab per platform by default. Optional expanded tabs can be
-// enabled from storage when broader browser coverage is worth the extra memory.
-// Closes duplicates so the extension never piles up tabs (the old bug: when the
-// auto-opened tab navigated to a sub-path, the dedup missed it and opened another).
+// Keep exactly ONE tab per platform. The most useful existing tab is retained
+// across paths; broader coverage must run in that tab instead of opening extras.
 async function ensureScraperTabsOpen(reason, options = {}) {
   const force = !!options.force;
   if ((!(await autoTabsEnabled()) && !force) || _tabsOpInProgress) return;
@@ -1433,42 +1398,23 @@ async function ensureScraperTabsOpen(reason, options = {}) {
   // it keeps every newly-opened tab pointed at the same group.
   const groupHint = await scraperGroupHint();
   const pinScraperTabs = await scraperTabsPinned();
-  const expandedTabs = await expandedPlatformTabsEnabled();
   try {
     await closeDuplicateExtensionControlTabs(`ensure:${reason || "tabs"}`).catch(() => {});
     for (const p of scraperPlatforms()) {
       const tabs = (await chrome.tabs.query({ url: platformUrlPatterns(p) })) || [];
-      const targets = platformManagedUrls(p, expandedTabs);
-      const wantPaths = targets.map(_tpath);
-      if (targets.length <= 1) {
-        // single-feed: keep one tab on the host, close the rest
-        if (tabs.length === 0) {
-          try { await createTabInSocialGroup({ url: p.url, pinned: pinScraperTabs, active: false }, groupHint); opened++; await _sleep(_humanGap(3000)); } catch (e) {}
-        } else {
-          try { await setScraperTabPinnedState(tabs[0], pinScraperTabs); } catch (e) {}
-          if (shouldNormalizeSingleFeedTab(p, tabs[0], reason)) {
-            try { await chrome.tabs.update(tabs[0].id, { url: p.url }); navigated++; await _sleep(_humanGap(3000)); } catch (e) {}
-          }
-          for (let i = 1; i < tabs.length; i++) { try { await chrome.tabs.remove(tabs[i].id); closed++; } catch (e) {} }
-        }
-      } else {
-        // expanded: one tab per managed target path; close path-duplicates
-        const kept = new Set();
-        for (const t of tabs) {
-          const tp = _tpath(t.url);
-          const m = wantPaths.find((w) => tp === w || (w !== "/" && tp.startsWith(w)));
-          if (m) {
-            if (kept.has(m)) {
-              try { await chrome.tabs.remove(t.id); closed++; } catch (e) {}
-            } else {
-              kept.add(m);
-              try { await setScraperTabPinnedState(t, pinScraperTabs); } catch (e) {}
-            }
-          }
-        }
-        for (let i = 0; i < targets.length; i++) {
-          if (!kept.has(wantPaths[i])) { try { await createTabInSocialGroup({ url: targets[i], pinned: pinScraperTabs, active: false }, groupHint); opened++; await _sleep(_humanGap(3000)); } catch (e) {} }
-        }
+      if (tabs.length === 0) {
+        try { await createTabInSocialGroup({ url: p.url, pinned: pinScraperTabs, active: false }, groupHint); opened++; await _sleep(_humanGap(3000)); } catch (e) {}
+        continue;
+      }
+      const selection = selectCanonicalScraperTabRows(tabs);
+      const keep = selection.rows[0] && selection.rows[0].tab ? selection.rows[0].tab : tabs[0];
+      try { await setScraperTabPinnedState(keep, pinScraperTabs); } catch (e) {}
+      if (shouldNormalizeSingleFeedTab(p, keep, reason)) {
+        try { await chrome.tabs.update(keep.id, { url: p.url }); navigated++; await _sleep(_humanGap(3000)); } catch (e) {}
+      }
+      for (const tab of tabs) {
+        if (tab.id === keep.id) continue;
+        try { await chrome.tabs.remove(tab.id); closed++; } catch (e) {}
       }
     }
     if (opened || closed || navigated) await log("info", `tabs: +${opened} opened, ${closed} dup(s) closed, ${navigated} canonicalized (${reason})`);
@@ -1841,12 +1787,8 @@ async function performStartupRecovery(reason, options = {}) {
 // them dead until the 75-min auto-refresh. This is the "I reloaded the extension and
 // scraping stopped" fix.
 chrome.runtime.onInstalled.addListener(async () => {
-  // Keep the user's browser light by default: one canonical feed per platform.
-  // Existing Expanded Tabs preference is reset on reload/update so stale extra
-  // routes are cleaned up with the next startup sweep.
-  try {
-    await chrome.storage.local.set({ [EXPANDED_PLATFORM_TABS_KEY]: false });
-  } catch (e) {}
+  // Keep exactly one canonical tab per platform; startup recovery removes any
+  // tabs left over from older expanded-tab versions.
   runStartupRecovery("installed", { force: true, refreshTabs: true, refreshGapMs: 1500, retries: 2 });
 });
 chrome.runtime.onStartup.addListener(() => {

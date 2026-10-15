@@ -120,7 +120,7 @@ def test_x_is_auto_managed_by_scraper_tab_recovery():
     background = _read("extension/background.js")
     tabs_js = _read("extension/tabs.js")
 
-    assert 'const AUTO_SCRAPER_PLATFORM_IDS = new Set(["instagram", "threads", "tiktok", "lemon8", "x", "facebook", "strava"])' in background
+    assert 'const AUTO_SCRAPER_PLATFORM_IDS = new Set(["instagram", "threads", "tiktok", "lemon8", "x", "facebook", "strava", "pinterest", "snapchat", "airbnb"])' in background
     assert "p.scraper && AUTO_SCRAPER_PLATFORM_IDS.has(p.id)" in background
     open_all_block = background.split('case "openAll":', 1)[1].split('case "refreshScraperTabs":', 1)[0]
     reload_intent_block = background.split("const openIds = Array.isArray(intent.open_ids)", 1)[1].split(
@@ -130,8 +130,8 @@ def test_x_is_auto_managed_by_scraper_tab_recovery():
     assert "for (const p of scraperPlatforms())" in open_all_block
     assert "globalThis.UC_PLATFORMS" not in open_all_block
     assert "const p = platformById(id);" in reload_intent_block
-    assert 'const expandedOverride = params.get("expanded")' in tabs_js
-    assert "[EXPANDED_PLATFORM_TABS_KEY]: false" in tabs_js
+    assert 'const expandedOverride = params.get("expanded")' not in tabs_js
+    assert "One tab per social platform." in tabs_js
 
 
 def test_lemon8_runs_as_visible_scraper_alongside_headless_collector():
@@ -149,31 +149,35 @@ def test_lemon8_runs_as_visible_scraper_alongside_headless_collector():
     assert 'return topic ? "topic_" + topic : "topic";' in content
 
 
-def test_expanded_social_tabs_are_opt_in():
+def test_scraper_tabs_are_limited_to_one_per_social_platform():
     background = _read("extension/background.js")
     platforms = _read("extension/platforms.js")
     tabs_html = _read("extension/tabs.html")
     tabs_js = _read("extension/tabs.js")
 
     for text in (background, platforms):
-        instagram_line = next(line for line in text.splitlines() if 'id: "instagram"' in line)
         tiktok_line = next(line for line in text.splitlines() if 'id: "tiktok"' in line)
-        assert 'url: "https://www.instagram.com/"' in instagram_line
-        assert "optionalExtraUrls" not in instagram_line
         assert 'url: "https://www.tiktok.com/following"' in tiktok_line
-        assert 'optionalExtraUrls: ["https://www.tiktok.com/foryou", "https://www.tiktok.com/explore"]' in tiktok_line
+        assert "optionalExtraUrls" not in tiktok_line
 
-    assert 'const EXPANDED_PLATFORM_TABS_KEY = "ucOpenExpandedPlatformTabs"' in background
-    assert "async function expandedPlatformTabsEnabled()" in background
     ensure_block = background.split("async function ensureScraperTabsOpen", 1)[1].split(
         "async function refreshScraperTabs",
         1,
     )[0]
-    assert "const expandedTabs = await expandedPlatformTabsEnabled();" in ensure_block
-    assert "const targets = platformManagedUrls(p, expandedTabs);" in ensure_block
-    assert "[p.url, ...p.extraUrls]" not in ensure_block
-    assert 'id="expandedTabs"' in tabs_html
-    assert "ucOpenExpandedPlatformTabs" in tabs_js
+    budget_block = background.split("async function browserTabBudgetSnapshot", 1)[1].split(
+        "async function assertBrowserTabBudget",
+        1,
+    )[0]
+    assert "return platform && platform.id ? platform.id : null;" in background
+    assert "const allowed = 1;" in budget_block
+    assert "const keep = selection.rows[0]" in ensure_block
+    assert "for (const tab of tabs)" in ensure_block
+    assert "chrome.tabs.remove(tab.id)" in ensure_block
+    assert "platformManagedUrls" not in background
+    assert "ucOpenExpandedPlatformTabs" not in background
+    assert "ucOpenExpandedPlatformTabs" not in tabs_js
+    assert 'id="expandedTabs"' not in tabs_html
+    assert "One tab per social" in tabs_html
     assert "closeDuplicateControlTabs" in tabs_js
     assert 'chrome.tabs.create({ url, pinned: false })' in _read("extension/popup.js")
 

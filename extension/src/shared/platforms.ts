@@ -42,8 +42,6 @@ export interface Platform {
    * "not logged in" badge.
    */
   readonly noLogin?: boolean;
-  /** Extra URLs that expanded tabs mode opens for broader coverage. */
-  readonly optionalExtraUrls?: readonly string[];
 }
 
 /**
@@ -57,10 +55,8 @@ export const UC_PLATFORMS: readonly Platform[] = [
   { id: "instagram", label: "Instagram",   url: "https://www.instagram.com/",       host: "www.instagram.com",  cookieUrl: "https://www.instagram.com",      cookie: "sessionid",  scraper: true },
   // Threads moved threads.net → threads.com in Apr 2025 (.net just redirects).
   { id: "threads",   label: "Threads",     url: "https://www.threads.com/",         host: "www.threads.com",    cookieUrl: "https://www.threads.com",        cookie: "sessionid",  scraper: true },
-  // Optional expanded coverage: /foryou and /explore add broader discovery.
-  // Keep one visible /following tab by default to prioritize subscribed feeds
-  // and avoid browser memory spikes.
-  { id: "tiktok",    label: "TikTok",      url: "https://www.tiktok.com/following", host: "www.tiktok.com",     cookieUrl: "https://www.tiktok.com",         cookie: "sessionid",  scraper: true, optionalExtraUrls: ["https://www.tiktok.com/foryou", "https://www.tiktok.com/explore"] },
+  // Keep one visible /following tab per platform; broader coverage runs in that tab.
+  { id: "tiktok",    label: "TikTok",      url: "https://www.tiktok.com/following", host: "www.tiktok.com",     cookieUrl: "https://www.tiktok.com",         cookie: "sessionid",  scraper: true },
   // Lemon8's SPA renders "Not found" for /feed/<cat> and legacy paths as of
   // 2026-08-05. Keep one visible topic tab; the extension supplements the
   // headless collector with paced DOM media candidates.

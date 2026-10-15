@@ -40,7 +40,7 @@ def test_chrome_cdp_launcher_uses_robust_startup_flags():
     assert "$profileProcesses = @(Get-ScraperProfileChromeProcesses -UserDataDir $UserDataDir)" in script
     assert "A failed Chrome startup can keep the scraper profile open" in script
     assert "UC_CHROME_OPEN_TARGET_TIMEOUT_SECONDS" in script
-    assert "UC_CHROME_OPEN_EXPANDED_PLATFORM_TABS" in script
+    assert "UC_CHROME_OPEN_EXPANDED_PLATFORM_TABS" not in script
     assert "$delayMs = 1200" in script
     assert "scraper_chrome_launch.lock" in script
     assert "scraper_chrome_state.json" in script
@@ -170,12 +170,11 @@ def test_chrome_cdp_launcher_defaults_to_one_startup_tab_per_platform():
     script = _read_script("start-scraper-chrome-cdp.ps1")
     launch_section = script[script.index("function Get-PlatformLaunchUrls") : script.index("function Get-ChromeProcesses")]
 
-    assert 'UC_CHROME_OPEN_EXPANDED_PLATFORM_TABS") -eq "1"' in launch_section
     assert '"https://www.tiktok.com/following"' in launch_section
-    assert '"https://www.tiktok.com/foryou"' in launch_section
+    assert '"https://www.tiktok.com/foryou"' not in launch_section
     assert '"https://www.lemon8-app.com/topic/singapore?region=sg"' in launch_section
     assert '"https://www.lemon8-app.com/topic/food?region=sg"' not in launch_section
-    assert 'tiktok = if ($expandedPlatformTabs)' in launch_section
+    assert 'tiktok = "https://www.tiktok.com/following"' in launch_section
     assert 'lemon8 = "https://www.lemon8-app.com/topic/singapore?region=sg"' in launch_section
 
 
@@ -366,15 +365,15 @@ def test_browser_tab_reload_hard_reopens_repeatedly_stuck_tiktok_tabs():
     assert "def _append_duplicate_control_tab_closures" in script
     assert "close_duplicate_control_tab" in script
     assert "duplicate extension control tab" in script
-    assert "EXPANDED_PLATFORM_TABS" in script
-    assert "UC_CHROME_OPEN_EXPANDED_PLATFORM_TABS" in script
-    assert "UC_BROWSER_EXPANDED_PLATFORM_TABS" in script
+    assert "EXPANDED_PLATFORM_TABS" not in script
+    assert "UC_CHROME_OPEN_EXPANDED_PLATFORM_TABS" not in script
+    assert "UC_BROWSER_EXPANDED_PLATFORM_TABS" not in script
     assert '"instagram,threads,tiktok,lemon8,facebook,strava,x"' in script
     assert 'os.getenv("UC_BROWSER_EXCLUDED_PLATFORMS", "")' in script
     assert '"close_excluded"' in script
     assert '"https://www.tiktok.com/following"' in script
-    assert '"https://www.tiktok.com/foryou"' in script
-    assert '"https://www.tiktok.com/explore"' in script
+    assert '"https://www.tiktok.com/foryou"' not in script
+    assert '"https://www.tiktok.com/explore"' not in script
     assert '"lemon8": [' in script
     assert '"https://www.lemon8-app.com/topic/singapore?region=sg"' in script
     assert '"instagram": [' in script
@@ -391,9 +390,7 @@ def test_browser_tab_reload_hard_reopens_repeatedly_stuck_tiktok_tabs():
     assert '"lemon8": [' in hard_reopen_block
     assert '"https://www.tiktok.com/foryou"' not in hard_reopen_block
     assert '"https://www.tiktok.com/explore"' not in hard_reopen_block
-    expanded_block = script.split("if EXPANDED_PLATFORM_TABS:", 1)[1].split("HARD_REOPEN_URLS = {", 1)[0]
-    assert '"https://www.tiktok.com/foryou"' in expanded_block
-    assert '"https://www.tiktok.com/explore"' in expanded_block
+    assert '"tiktok": [\n        "https://www.tiktok.com/following",\n    ]' in hard_reopen_block
     assert "def _platform_had_previous_unresponsive_reload" in script
     assert "def _is_canonical_x_recovery_url" in script
     assert "def _is_canonical_platform_url" in script
@@ -476,11 +473,11 @@ def test_chrome_cdp_launcher_opens_requested_platform_urls_directly():
     assert '([string]$_) -split ","' in script
     assert "function Get-PlatformLaunchUrls" in script
     assert 'instagram = "https://www.instagram.com/"' in script
-    assert 'UC_CHROME_OPEN_EXPANDED_PLATFORM_TABS") -eq "1"' in script
-    assert "tiktok = if ($expandedPlatformTabs)" in script
+    assert 'UC_CHROME_OPEN_EXPANDED_PLATFORM_TABS") -eq "1"' not in script
+    assert 'tiktok = "https://www.tiktok.com/following"' in script
     assert '"https://www.tiktok.com/following"' in script
-    assert '"https://www.tiktok.com/foryou"' in script
-    assert '"https://www.tiktok.com/explore"' in script
+    assert '"https://www.tiktok.com/foryou"' not in script
+    assert '"https://www.tiktok.com/explore"' not in script
     assert "lemon8 = if ($expandedPlatformTabs)" not in script
     assert '"https://www.lemon8-app.com/topic/food?region=sg"' not in script
     assert '"https://www.lemon8-app.com/topic/travel?region=sg"' not in script
@@ -490,7 +487,7 @@ def test_chrome_cdp_launcher_opens_requested_platform_urls_directly():
     assert "$platforms.Keys -contains $id" in script
     assert "Open-RequestedPlatformTabs -Port $RemoteDebuggingPort" in script
     assert '$tabsParams.Add("open=$encodedIds")' in script
-    assert '$tabsParams.Add("expanded=0")' in script
+    assert '$tabsParams.Add("expanded=0")' not in script
 
 
 def test_chrome_cdp_launcher_directly_opens_requested_platforms_after_control():

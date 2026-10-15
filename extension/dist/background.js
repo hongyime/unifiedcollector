@@ -5,10 +5,8 @@
     { id: "instagram", label: "Instagram", url: "https://www.instagram.com/", host: "www.instagram.com", cookieUrl: "https://www.instagram.com", cookie: "sessionid", scraper: true },
     // Threads moved threads.net → threads.com in Apr 2025 (.net just redirects).
     { id: "threads", label: "Threads", url: "https://www.threads.com/", host: "www.threads.com", cookieUrl: "https://www.threads.com", cookie: "sessionid", scraper: true },
-    // Optional expanded coverage: /foryou and /explore add broader discovery.
-    // Keep one visible /following tab by default to prioritize subscribed feeds
-    // and avoid browser memory spikes.
-    { id: "tiktok", label: "TikTok", url: "https://www.tiktok.com/following", host: "www.tiktok.com", cookieUrl: "https://www.tiktok.com", cookie: "sessionid", scraper: true, optionalExtraUrls: ["https://www.tiktok.com/foryou", "https://www.tiktok.com/explore"] },
+    // Keep one visible /following tab per platform; broader coverage runs in that tab.
+    { id: "tiktok", label: "TikTok", url: "https://www.tiktok.com/following", host: "www.tiktok.com", cookieUrl: "https://www.tiktok.com", cookie: "sessionid", scraper: true },
     // Lemon8's SPA renders "Not found" for /feed/<cat> and legacy paths as of
     // 2026-08-05. Keep one visible topic tab; the extension supplements the
     // headless collector with paced DOM media candidates.
@@ -1045,7 +1043,6 @@
   };
   var _mainWorldHookHostRe = /(^|\.)((instagram|tiktok|strava)\.com|threads\.com|x\.com|twitter\.com|facebook\.com)$/i;
   var SCRAPER_TABS_PINNED_KEY = "ucPinScraperTabs";
-  var EXPANDED_PLATFORM_TABS_KEY = "ucOpenExpandedPlatformTabs";
   var AUTO_SCRAPER_PLATFORM_IDS = /* @__PURE__ */ new Set(["instagram", "threads", "tiktok", "lemon8", "x", "facebook", "strava", "pinterest", "snapchat", "airbnb"]);
   async function scraperTabsPinned() {
     try {
@@ -1055,42 +1052,15 @@
       return false;
     }
   }
-  async function expandedPlatformTabsEnabled() {
-    try {
-      const stored = await chrome.storage.local.get([EXPANDED_PLATFORM_TABS_KEY]);
-      return stored && stored[EXPANDED_PLATFORM_TABS_KEY] === true;
-    } catch (e) {
-      return false;
-    }
-  }
   function scraperTabRows(tabs) {
     return (tabs || []).map((tab) => ({ tab, platform: platformForTabUrl(tab.url) })).filter((row) => row.platform && row.tab && row.tab.id != null);
   }
   function platformTargetPaths(platform) {
-    if (!platform) return [];
-    return [
-      platform.url,
-      ...platform.extraUrls || [],
-      ...platform.optionalExtraUrls || []
-    ].filter(Boolean).map(_tpath);
-  }
-  function platformManagedUrls(platform, expanded) {
-    if (!platform) return [];
-    return [
-      platform.url,
-      ...platform.extraUrls || [],
-      ...expanded ? platform.optionalExtraUrls || [] : []
-    ].filter(Boolean);
+    return platform && platform.url ? [_tpath(platform.url)] : [];
   }
   function canonicalTabKey(row) {
     const platform = row && row.platform;
-    const tab = row && row.tab;
-    if (!platform || !tab) return null;
-    const targets = platformTargetPaths(platform);
-    if (targets.length <= 1) return platform.id;
-    const path = _tpath(tab.url || "");
-    const matched = targets.find((want) => path === want || want !== "/" && path.startsWith(want));
-    return `${platform.id}:${matched || path}`;
+    return platform && platform.id ? platform.id : null;
   }
   function canonicalTabScore(row) {
     const tab = row && row.tab ? row.tab : {};
@@ -1222,7 +1192,6 @@
   }
   async function browserTabBudgetSnapshot() {
     const pinScraperTabs = await scraperTabsPinned();
-    const expandedTabs = await expandedPlatformTabsEnabled();
     const violations = [];
     const counts = {
       extension_control_tabs: 0,
@@ -1241,7 +1210,7 @@
         violations: [{ kind: "tab_query_failed", detail: String(e && e.message ? e.message : e) }],
         counts,
         pin_scraper_tabs: pinScraperTabs,
-        expanded_platform_tabs: expandedTabs,
+        expanded_platform_tabs: false,
         extension_version: extensionVersion()
       };
     }
@@ -1275,7 +1244,7 @@
     }
     for (const p of scraperPlatforms()) {
       const count = counts.per_platform[p.id] || 0;
-      const allowed = expandedTabs ? Math.max(1, platformManagedUrls(p, true).length) : 1;
+      const allowed = 1;
       if (count > allowed) {
         violations.push({
           kind: "scraper_tab_budget_exceeded",
@@ -1303,7 +1272,7 @@
       violations,
       counts,
       pin_scraper_tabs: pinScraperTabs,
-      expanded_platform_tabs: expandedTabs,
+      expanded_platform_tabs: false,
       extension_version: extensionVersion()
     };
   }
@@ -1385,73 +1354,40 @@
     let opened = 0, closed = 0, navigated = 0;
     const groupHint = await scraperGroupHint();
     const pinScraperTabs = await scraperTabsPinned();
-    const expandedTabs = await expandedPlatformTabsEnabled();
     try {
       await closeDuplicateExtensionControlTabs(`ensure:${reason || "tabs"}`).catch(() => {
       });
       for (const p of scraperPlatforms()) {
         const tabs = await chrome.tabs.query({ url: platformUrlPatterns(p) }) || [];
-        const targets = platformManagedUrls(p, expandedTabs);
-        const wantPaths = targets.map(_tpath);
-        if (targets.length <= 1) {
-          if (tabs.length === 0) {
-            try {
-              await createTabInSocialGroup({ url: p.url, pinned: pinScraperTabs, active: false }, groupHint);
-              opened++;
-              await _sleep(_humanGap(3e3));
-            } catch (e) {
-            }
-          } else {
-            try {
-              await setScraperTabPinnedState(tabs[0], pinScraperTabs);
-            } catch (e) {
-            }
-            if (shouldNormalizeSingleFeedTab(p, tabs[0], reason)) {
-              try {
-                await chrome.tabs.update(tabs[0].id, { url: p.url });
-                navigated++;
-                await _sleep(_humanGap(3e3));
-              } catch (e) {
-              }
-            }
-            for (let i = 1; i < tabs.length; i++) {
-              try {
-                await chrome.tabs.remove(tabs[i].id);
-                closed++;
-              } catch (e) {
-              }
-            }
+        if (tabs.length === 0) {
+          try {
+            await createTabInSocialGroup({ url: p.url, pinned: pinScraperTabs, active: false }, groupHint);
+            opened++;
+            await _sleep(_humanGap(3e3));
+          } catch (e) {
           }
-        } else {
-          const kept = /* @__PURE__ */ new Set();
-          for (const t of tabs) {
-            const tp = _tpath(t.url);
-            const m = wantPaths.find((w) => tp === w || w !== "/" && tp.startsWith(w));
-            if (m) {
-              if (kept.has(m)) {
-                try {
-                  await chrome.tabs.remove(t.id);
-                  closed++;
-                } catch (e) {
-                }
-              } else {
-                kept.add(m);
-                try {
-                  await setScraperTabPinnedState(t, pinScraperTabs);
-                } catch (e) {
-                }
-              }
-            }
+          continue;
+        }
+        const selection = selectCanonicalScraperTabRows(tabs);
+        const keep = selection.rows[0] && selection.rows[0].tab ? selection.rows[0].tab : tabs[0];
+        try {
+          await setScraperTabPinnedState(keep, pinScraperTabs);
+        } catch (e) {
+        }
+        if (shouldNormalizeSingleFeedTab(p, keep, reason)) {
+          try {
+            await chrome.tabs.update(keep.id, { url: p.url });
+            navigated++;
+            await _sleep(_humanGap(3e3));
+          } catch (e) {
           }
-          for (let i = 0; i < targets.length; i++) {
-            if (!kept.has(wantPaths[i])) {
-              try {
-                await createTabInSocialGroup({ url: targets[i], pinned: pinScraperTabs, active: false }, groupHint);
-                opened++;
-                await _sleep(_humanGap(3e3));
-              } catch (e) {
-              }
-            }
+        }
+        for (const tab of tabs) {
+          if (tab.id === keep.id) continue;
+          try {
+            await chrome.tabs.remove(tab.id);
+            closed++;
+          } catch (e) {
           }
         }
       }
@@ -1752,10 +1688,6 @@
     }
   }
   chrome.runtime.onInstalled.addListener(async () => {
-    try {
-      await chrome.storage.local.set({ [EXPANDED_PLATFORM_TABS_KEY]: false });
-    } catch (e) {
-    }
     runStartupRecovery("installed", { force: true, refreshTabs: true, refreshGapMs: 1500, retries: 2 });
   });
   chrome.runtime.onStartup.addListener(() => {
