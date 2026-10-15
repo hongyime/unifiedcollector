@@ -29,7 +29,7 @@ which contains `manifest.json` and the built scripts under `dist/`:
 2. Enable Developer mode.
 3. Select **Load unpacked** and choose `extension/`.
 
-The tracked manifest currently declares extension version `1.23.104`.
+The tracked manifest currently declares extension version `1.23.116`.
 
 ## Verification and recovery
 
@@ -39,8 +39,17 @@ Check the configured CDP endpoint from the host:
 curl -s http://localhost:9336/json/version
 ```
 
-The Compose service exposes its health endpoint on port 8790. Cookie snapshots
-are stored under `credentials/browser_cookies/`; restoration is an explicit
-operator action through `python -m src.tools.browser_cookie_vault restore`.
+The Compose service exposes its health endpoint on port 8790. It snapshots
+cookies every five minutes for the configured collector domains, including
+Snapchat, Pinterest, and Airbnb, under the git-ignored
+`credentials/browser_cookies/` directory. The health endpoint reports the
+snapshot time, count, and auth-cookie names without exposing values. To capture
+a just-completed sign-in immediately, run
+`docker exec unifiedcollector_browser_cookie_vault python -m src.tools.browser_cookie_vault backup`.
+
+Compose enables automatic restore when the vault service starts. A Chrome-only
+restart does not restart the vault or trigger restore; restore a
+known-good snapshot explicitly with
+`docker exec unifiedcollector_browser_cookie_vault python -m src.tools.browser_cookie_vault restore`.
 If CDP is unreachable, confirm Chrome is running with the configured port and
 that the container can reach the host through `host.docker.internal`.

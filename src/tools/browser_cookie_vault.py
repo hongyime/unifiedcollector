@@ -12,13 +12,14 @@ restart cookie-loss incidents that motivated `research/browser-cdp-cookie-
 comparison.md`.
 
 This daemon closes that gap by treating Chrome's cookie jar as ephemeral state
-and the on-disk snapshots as the source of truth. Every ``BROWSER_COOKIE_VAULT_
-INTERVAL_SECONDS`` seconds it snapshots ALL cookies for the seven social
-domains via CDP ``Storage.getCookies``, atomically writes them to
-``credentials/browser_cookies/latest.json``, and keeps a rolling window of the
-last ``BROWSER_COOKIE_VAULT_KEEP_SNAPSHOTS`` timestamped snapshots for rollback.
-Restore is an explicit ``python -m src.tools.browser_cookie_vault restore``
-so a bad snapshot can never silently clobber a working live session.
+and the on-disk snapshots as the source of truth. Every
+``BROWSER_COOKIE_VAULT_INTERVAL_SECONDS`` seconds it snapshots cookies for the
+configured collection-platform domains via CDP ``Storage.getCookies``,
+atomically writes them to ``credentials/browser_cookies/latest.json``, and
+keeps a rolling window of timestamped snapshots for rollback. The standalone
+module defaults auto-restore off; Compose enables it when the vault daemon
+starts. A Chrome-only restart does not trigger restore. An explicit restore is
+available through ``python -m src.tools.browser_cookie_vault restore``.
 
 Runtime
 -------
@@ -118,9 +119,9 @@ _BACKOFF_MULT = 2.0
 
 # ─── Domain filter ───────────────────────────────────────────────────────────
 
-# Primary hosts + first-party CDN suffixes for the 8 social platforms. Storing
-# CDN cookies matters for Instagram/Meta/X where imagery + video servers set
-# their own auth cookies (fbcdn, cdninstagram, twimg) that die alongside the
+# Primary hosts for the 10 browser collection platforms, plus first-party CDN
+# suffixes. Storing CDN cookies matters for Instagram/Meta/X where imagery and
+# video servers set their own auth cookies (fbcdn, cdninstagram, twimg) that die alongside the
 # main login when the profile SQLite is rewritten.
 SOCIAL_COOKIE_DOMAINS: tuple[str, ...] = (
     "instagram.com",
@@ -133,6 +134,9 @@ SOCIAL_COOKIE_DOMAINS: tuple[str, ...] = (
     "facebook.com",
     "strava.com",
     "pinterest.com",
+    "snapchat.com",
+    "airbnb.com",
+    "airbnb.com.sg",
     "cdninstagram.com",
     "twimg.com",
     "fbcdn.net",
