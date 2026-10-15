@@ -1,6 +1,6 @@
 # Agent State
 
-Current task: Complete the UnifiedCollector Full Plan (2026-10-14). This is the active checklist. Reconciled 2026-10-15 12:46 UTC; latest runtime evidence is 12:46 UTC. The one-tab-per-social change is pushed as `f7cf0df5`; Compose version consumers are updated. The managed extension reload and correct browser-profile logins remain unverified.
+Current task: Complete the UnifiedCollector Full Plan (2026-10-14). This is the active checklist. Reconciled 2026-10-15 12:50 UTC; latest runtime evidence is 12:46 UTC (no newer runtime sample taken during this checklist check). The one-tab-per-social change is pushed as `f7cf0df5`; Compose version consumers are updated. The managed extension reload and correct browser-profile logins remain unverified.
 
 ## User decisions and operating rules
 
@@ -14,6 +14,8 @@ Current task: Complete the UnifiedCollector Full Plan (2026-10-14). This is the 
 ## At a glance
 
 Phase 1 is complete. Remaining acceptance gates: reload and verify the strict one-tab-per-social extension in the collector profile; Lemon8 API reaches 50+ in 12h and fresh extension candidates arrive with dedupe verified; Pinterest native boards, profile fields, and pins include captions/destinations/engagement; Snapchat public profiles, stories, highlights, and Spotlights are proven from followed targets; Airbnb's scheduled host-bio retry; Telegram's four features after FloodWaits expire; Search terms and indexed documents after Exposure releases its mutex; then the final 15-minute soak/report. Follow-first and conditional broadening are compatible: use followed identities first and broaden only after those queues drain with capacity left. For Airbnb, “follow-first” means Airbnb listing links surfaced by followed identities, not an Airbnb follow graph. Cookie-vault snapshots at 12:34, 12:39, and 12:44 each contain one cookie and no authenticated platform markers. At 12:46 CDP shows one Lemon8 page, no extension worker, and no fresh extension telemetry.
+
+Immediate checkpoint: the collector is configured for extension v1.23.116, but its latest heartbeat is v1.23.108 and its CDP profile has no extension worker. The user's reload/login actions are not yet visible in that profile, so those gates stay open until fresh telemetry appears. The priority rule is consistent across platforms: process followed identities (Airbnb links found from followed identities) first; broaden only when those queues are empty and capacity remains. Explicit verified-badge evidence is the only reason to exclude an account; missing/unknown badge data stays eligible. Telegram remains all eligible groups across all four connected accounts, plus any configured later.
 
 ## Master checklist — evidence through 2026-10-15 12:46 UTC
 
