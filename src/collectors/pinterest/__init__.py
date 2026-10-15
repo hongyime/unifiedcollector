@@ -199,6 +199,27 @@ def _same_pinterest_page_kind(url: str, target_kind: tuple[str, str | None, str 
     )
 
 
+def _external_pin_destination(value: Any) -> str | None:
+    """Keep only explicit HTTPS destinations linked from the same pin card."""
+    try:
+        parsed = urlparse(str(value or "").strip())
+        host = (parsed.hostname or "").lower().rstrip(".")
+        if (
+            parsed.scheme.lower() != "https"
+            or not host
+            or host == "pinterest.com"
+            or host.endswith(".pinterest.com")
+            or host == "pin.it"
+            or parsed.username
+            or parsed.password
+        ):
+            return None
+        destination = parsed.geturl()
+        return destination if len(destination) <= 2000 else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _pin_membership_matches(
     url: str,
     page_kind: str,
@@ -487,11 +508,20 @@ class PinterestCollector(ProfileOnlyCollector):
               }
               const anchors = Array.from(document.querySelectorAll('a[href]')).slice(0, 1200).map((a) => {
                 const image = a.querySelector('img');
-                const card = a.closest('[data-test-id="pin"], [data-pin-id], [data-pinid]');
+                const card = a.closest('[data-test-id="pin"], [data-test-id*="pinWrapper" i], [data-pin-id], [data-pinid]');
+                const cardLinks = Array.from((card || a).querySelectorAll('a[href]'));
                 const membershipLinks = Array.from(new Set([
                   a.href,
-                  ...Array.from((card || a).querySelectorAll('a[href]')).map((link) => link.href),
+                  ...cardLinks.map((link) => link.href),
                 ]));
+                const destinationUrl = membershipLinks.find((href) => {
+                  try {
+                    const parsed = new URL(href, location.href);
+                    return parsed.protocol === 'https:'
+                      && !/(^|\\.)pinterest\\.com$/i.test(parsed.hostname)
+                      && parsed.hostname.toLowerCase() !== 'pin.it';
+                  } catch { return false; }
+                }) || null;
                 return {
                   href: a.href,
                   text: text(a.innerText || a.getAttribute('aria-label')),
@@ -499,6 +529,7 @@ class PinterestCollector(ProfileOnlyCollector):
                   image_url: image?.currentSrc || image?.src || null,
                   pin_id: card?.getAttribute('data-pin-id') || card?.getAttribute('data-pinid') || null,
                   membership_links: membershipLinks,
+                  destination_url: destinationUrl,
                   card_text: fullText(card?.innerText || a.innerText || '').slice(0, 2000),
                   control_labels: Array.from(card?.querySelectorAll('button,[role="button"]') || [])
                     .map((control) => control.getAttribute('aria-label') || control.getAttribute('title') || '')
@@ -506,13 +537,21 @@ class PinterestCollector(ProfileOnlyCollector):
                 };
               });
               const pinCards = Array.from(document.querySelectorAll(
-                '[data-test-id="pin"], [data-pin-id], [data-pinid]'
+                '[data-test-id="pin"], [data-test-id*="pinWrapper" i], [data-pin-id], [data-pinid]'
               )).slice(0, 1200).map((card) => {
                 const pinElement = card.matches('[data-pin-id], [data-pinid]')
                   ? card : card.querySelector('[data-pin-id], [data-pinid]');
                 const pinId = pinElement?.getAttribute('data-pin-id')
                   || pinElement?.getAttribute('data-pinid') || null;
                 const links = Array.from(card.querySelectorAll('a[href]')).map((link) => link.href);
+                const destinationUrl = links.find((href) => {
+                  try {
+                    const parsed = new URL(href, location.href);
+                    return parsed.protocol === 'https:'
+                      && !/(^|\\.)pinterest\\.com$/i.test(parsed.hostname)
+                      && parsed.hostname.toLowerCase() !== 'pin.it';
+                  } catch { return false; }
+                }) || null;
                 const pinHref = links.find((href) => {
                   const parts = new URL(href).pathname.split('/').filter(Boolean);
                   return parts.length >= 2 && parts[0].toLowerCase() === 'pin'
@@ -523,6 +562,7 @@ class PinterestCollector(ProfileOnlyCollector):
                 return {
                   href: pinHref,
                   pin_id: pinId,
+                  destination_url: destinationUrl,
                   membership_links: Array.from(new Set([
                     ...links,
                     ...(expectedPageKind === 'board' ? [location.href] : []),
@@ -688,6 +728,7 @@ class PinterestCollector(ProfileOnlyCollector):
                 "image_url": str(anchor.get("image_url") or "")[:2000] or None,
                 "repin_count": _labeled_count(card_text, r"re-?pins?"),
                 "comment_count": _labeled_count(card_text, r"comments?"),
+                "destination_url": _external_pin_destination(anchor.get("destination_url")),
                 "url": pin_url,
             }
 
@@ -762,7 +803,7 @@ class PinterestCollector(ProfileOnlyCollector):
                             INSERT INTO pinterest_pins
                                 (pin_id,username,board_id,board_url,title,description,image_url,
                                  destination_url,pin_url,repin_count,comment_count,collected_at,metadata)
-                            VALUES ($1,$2,$3,$4,$5,$6,$7,NULL,$8,$9,$10,now(),$11::jsonb)
+                            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now(),$12::jsonb)
                             ON CONFLICT (pin_id) DO UPDATE SET
                                 username=CASE
                                     WHEN EXCLUDED.metadata->>'owner_verified'='true' THEN EXCLUDED.username
@@ -773,6 +814,7 @@ class PinterestCollector(ProfileOnlyCollector):
                                 title=COALESCE(EXCLUDED.title,pinterest_pins.title),
                                 description=COALESCE(EXCLUDED.description,pinterest_pins.description),
                                 image_url=COALESCE(EXCLUDED.image_url,pinterest_pins.image_url),
+                                destination_url=COALESCE(EXCLUDED.destination_url,pinterest_pins.destination_url),
                                 repin_count=COALESCE(EXCLUDED.repin_count,pinterest_pins.repin_count),
                                 comment_count=COALESCE(EXCLUDED.comment_count,pinterest_pins.comment_count),
                                 pin_url=EXCLUDED.pin_url,collected_at=now(),
@@ -782,7 +824,8 @@ class PinterestCollector(ProfileOnlyCollector):
                                         (EXCLUDED.metadata->>'owner_verified'='true'))
                             """,
                             pin["id"], pin["username"], pin["board_id"], pin["board_url"],
-                            pin["title"], pin["description"], pin["image_url"], pin["url"],
+                            pin["title"], pin["description"], pin["image_url"],
+                            pin["destination_url"], pin["url"],
                             pin["repin_count"], pin["comment_count"],
                             json.dumps({
                                 "collector": "playwright",
