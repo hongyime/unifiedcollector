@@ -1,5 +1,5 @@
 # Agent State
-Current task: Complete the UnifiedCollector Full Plan (2026-10-14), with this checklist as the single progress tracker. Last reconciled: 2026-10-15 09:42 UTC. Lemon8 fix `1f7b1fcb` persists captioned ID-less cards under deterministic IDs and is pushed, but not deployed because the Lemon8 cursor remains running. Pinterest's native pin gate is still unmet; Snapchat and Airbnb native row-output gates pass, while Airbnb field completeness remains open. Telegram's four feature tables have rows and all eligible groups/accounts are authorized; current 4/4 connection state is unverified. Search remains behind Exposure's granted mutex (owner session idle ~20h); do not interrupt it. CDP 9336 has one Lemon8 page and zero extension targets, CUA exposes no browser UI, and the cookie-vault snapshot has one non-auth cookie. The extension's default-on auto-tab watchdog opens one tab per ten scraper platforms, not per Telegram account. Browser capture, live badge-skip, Airbnb retry, Search-owned output, and final soak/report remain open.
+Current task: Complete the UnifiedCollector Full Plan (2026-10-14), using this checklist as the single progress tracker. Last scope reconciliation: 2026-10-15 09:44 UTC; latest runtime evidence: 09:42 UTC. Lemon8 fix `1f7b1fcb` is pushed but not loaded because the cursor was still running at 09:42. Pinterest's native pin gate is unmet; Snapchat and Airbnb native row-output gates pass, while Airbnb field completeness remains open. Telegram's four feature tables have rows and all eligible groups/accounts are authorized; four accounts were connected at 07:49, but visits in that sample covered only two accounts. Search remains behind Exposure's granted mutex; do not interrupt it. Browser capture, live badge-skip, Airbnb retry, Search-owned output, Telegram per-account activity, and final soak/report remain open.
 
 ## Agreed scope and rules
 
@@ -9,6 +9,13 @@ Current task: Complete the UnifiedCollector Full Plan (2026-10-14), with this ch
 - Telegram may use all four current accounts, any accounts configured later, and all eligible groups; no allowlist restriction.
 - Keep at most one extension-managed tab per social. The extension's default-on auto-tab watchdog opens one canonical tab for each of 10 scraper platforms; Telegram accounts do not use browser tabs. Do not print credentials, exceed provider backoffs, or interrupt Exposure/release its Search mutex.
 - Checklist key: `[x]` verified, `[~]` in progress or awaiting evidence, `[ ]` not complete. Refresh this checklist after each meaningful live verification, implementation step, or user scope correction, and show the current gates in chat.
+
+## Current focus — 2026-10-15 09:44 UTC
+
+- Keep the checklist visible in chat as well as here. The status below is the latest verified picture; runtime counts are from the 09:42 snapshot, not a new scrape.
+- Telegram scope is clear: all four connected accounts and every eligible group may be used, with future connected accounts included automatically. The 07:49 evidence showed 4/4 connected, but discussion visits only from two accounts; verify distribution before claiming all four were active in collection.
+- Browser tab scope is clear: at most one tab per social. The extension watchdog can open one tab for each of ten platforms, explaining the prior tab count; Telegram accounts do not create tabs.
+- Continue when a safe boundary or browser surface is available: let Lemon8 reach `idle` before its targeted restart; verify Pinterest only with the extension-enabled logged-in profile; leave Exposure's Search mutex untouched. Finish remaining gates, then run the final soak/report.
 
 ## Master checklist
 
