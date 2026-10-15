@@ -333,6 +333,88 @@ _FOLLOWED_AIRBNB_LINKS_SQL = r"""
         updated_at=now()
 """
 
+_FOLLOWED_AIRBNB_PROFILE_URLS_SQL = r"""
+    WITH source_links AS (
+        SELECT p.external_url AS raw_url, p.updated_at AS seen_at
+          FROM instagram_profiles p
+          JOIN follow_edges f ON f.platform='instagram' AND f.direction='following'
+            AND (f.target_uid::text=p.platform_user_id::text
+                 OR LOWER(f.target_username)=LOWER(p.username))
+         WHERE p.is_verified IS NOT TRUE AND p.external_url IS NOT NULL
+        UNION ALL
+        SELECT p.external_url, p.updated_at
+          FROM x_profiles p
+          JOIN follow_edges f ON f.platform='x' AND f.direction='following'
+            AND (f.target_uid::text=p.platform_user_id::text
+                 OR LOWER(f.target_username)=LOWER(p.username))
+         WHERE p.is_verified IS NOT TRUE AND p.external_url IS NOT NULL
+        UNION ALL
+        SELECT p.bio, p.updated_at
+          FROM tiktok_profiles p
+          JOIN follow_edges f ON f.platform='tiktok' AND f.direction='following'
+            AND (f.target_uid::text=p.platform_user_id::text
+                 OR LOWER(f.target_username)=LOWER(p.username))
+         WHERE p.is_verified IS NOT TRUE AND p.bio IS NOT NULL
+        UNION ALL
+        SELECT p.blog, p.collected_at
+          FROM github_users p
+          JOIN follow_edges f ON f.platform='github' AND f.direction='following'
+            AND (f.target_uid::text=p.platform_user_id::text
+                 OR LOWER(f.target_username)=LOWER(p.login))
+         WHERE p.blog IS NOT NULL
+        UNION ALL
+        SELECT link.value->>'url', c.updated_at
+          FROM youtube_channels c
+          JOIN follow_edges f ON f.platform='youtube' AND f.direction='following'
+            AND (f.target_uid::text=c.platform_channel_id::text
+                 OR LOWER(f.target_username)=LOWER(c.custom_url))
+          CROSS JOIN LATERAL jsonb_array_elements(COALESCE(c.external_links, '[]'::jsonb)) AS link(value)
+         WHERE c.last_skip_reason IS DISTINCT FROM 'verified_account'
+           AND link.value->>'url' IS NOT NULL
+        UNION ALL
+        SELECT c.description, c.updated_at
+          FROM youtube_channels c
+          JOIN follow_edges f ON f.platform='youtube' AND f.direction='following'
+            AND (f.target_uid::text=c.platform_channel_id::text
+                 OR LOWER(f.target_username)=LOWER(c.custom_url))
+         WHERE c.last_skip_reason IS DISTINCT FROM 'verified_account'
+           AND c.description IS NOT NULL
+    ), normalized AS (
+        SELECT DISTINCT ON (extracted.parts[1])
+               'https://www.airbnb.com/rooms/' || extracted.parts[1] AS target_url,
+               source_links.seen_at
+          FROM source_links
+          CROSS JOIN LATERAL (
+              SELECT regexp_match(source_links.raw_url, $3, 'i') AS parts
+          ) AS extracted
+         WHERE extracted.parts IS NOT NULL
+         ORDER BY extracted.parts[1], source_links.seen_at DESC NULLS LAST
+    )
+    INSERT INTO browser_native_scrape_queue
+        (platform, target_url, username, source, priority)
+    SELECT 'airbnb', normalized.target_url, NULL, 'followed_account_link', $1
+      FROM normalized
+     WHERE NOT EXISTS (
+            SELECT 1 FROM browser_native_scrape_queue q
+             WHERE q.platform='airbnb' AND q.target_url=normalized.target_url
+               AND (
+                   q.status='completed'
+                   OR q.source='followed_account_link'
+                   OR (q.status='claimed' AND COALESCE(q.claim_expires_at, 'infinity'::timestamptz) > now())
+               )
+     )
+     ORDER BY normalized.seen_at DESC NULLS LAST, normalized.target_url
+     LIMIT GREATEST(0, $2 - (
+            SELECT count(*) FROM browser_native_scrape_queue
+             WHERE platform='airbnb' AND source='followed_account_link'
+               AND status IN ('pending','claimed')
+     ))
+    ON CONFLICT (platform, target_url) DO UPDATE SET
+        source='followed_account_link',
+        priority=GREATEST(browser_native_scrape_queue.priority, EXCLUDED.priority),
+        updated_at=now()
+"""
+
 
 def snapchat_storage_target(content_type: str) -> tuple[str, str]:
     """Return the fixed table/key pair for a public Snapchat content type."""
@@ -595,6 +677,12 @@ async def seed_native_targets(pool: Any, platform: str) -> None:
                     _FOLLOWED_AIRBNB_LINKS_SQL,
                     _FOLLOWED_TARGET_PRIORITY,
                     _FOLLOWED_TARGET_CAP,
+                )
+                await conn.execute(
+                    _FOLLOWED_AIRBNB_PROFILE_URLS_SQL,
+                    _FOLLOWED_TARGET_PRIORITY,
+                    _FOLLOWED_TARGET_CAP,
+                    r"(?:^|[^A-Za-z0-9.-])(?:https?://)?(?:www\.)?airbnb\.(?:com(?:\.[a-z]{2})?|co\.[a-z]{2}|[a-z]{2,3})/rooms/([0-9]{1,24})",
                 )
 
             preferred_count = await conn.fetchval(

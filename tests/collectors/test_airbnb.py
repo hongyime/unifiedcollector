@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from contextlib import asynccontextmanager
 from datetime import date
 from unittest.mock import AsyncMock, MagicMock
@@ -9,7 +10,11 @@ import pytest
 
 from src.collectors import airbnb as airbnb_mod
 from src.collectors.airbnb import AirbnbCollector
-from src.collectors.native_platform_scrape import _remaining_queue_capacity, seed_native_targets
+from src.collectors.native_platform_scrape import (
+    _FOLLOWED_AIRBNB_PROFILE_URLS_SQL,
+    _remaining_queue_capacity,
+    seed_native_targets,
+)
 
 
 def test_airbnb_error_code_keeps_safe_runtime_codes_without_leaking_messages():
@@ -552,10 +557,12 @@ async def test_airbnb_listing_seed_respects_remaining_active_queue_capacity(
                 self.listing_limit = args[0]
                 self.seeded_count = min(5, args[0])
 
-        async def fetchval(self, query):
-            assert "status IN ('pending','claimed')" in query
-            assert "source='airbnb_listings'" in query
-            return active_count
+        async def fetchval(self, query, *args):
+            if "source='airbnb_listings'" in query:
+                assert "status IN ('pending','claimed')" in query
+                return active_count
+            assert args == ("airbnb", "followed_account_link")
+            return 0
 
     class Pool:
         def __init__(self):
@@ -572,6 +579,55 @@ async def test_airbnb_listing_seed_respects_remaining_active_queue_capacity(
     assert pool.conn.listing_limit == expected_limit
     assert pool.conn.seeded_count == expected_seeded
     assert _remaining_queue_capacity(14) == 0
+
+
+@pytest.mark.asyncio
+async def test_airbnb_followed_profile_links_are_seeded_before_broad_discovery(monkeypatch):
+    from src.collectors import native_platform_scrape as native_scrape
+
+    class Transaction:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class Connection:
+        def __init__(self):
+            self.executed = []
+
+        def transaction(self):
+            return Transaction()
+
+        async def execute(self, query, *args):
+            self.executed.append((query, args))
+
+        async def fetchval(self, _query, *_args):
+            return 0
+
+    class Pool:
+        def __init__(self):
+            self.conn = Connection()
+
+        @asynccontextmanager
+        async def acquire(self):
+            yield self.conn
+
+    monkeypatch.setattr(native_scrape, "_SEED_QUERIES", {"airbnb": []})
+    pool = Pool()
+
+    await seed_native_targets(pool, "airbnb")
+
+    query, args = next(
+        (query, args) for query, args in pool.conn.executed
+        if query == _FOLLOWED_AIRBNB_PROFILE_URLS_SQL
+    )
+    assert args[:2] == (native_scrape._FOLLOWED_TARGET_PRIORITY, native_scrape._FOLLOWED_TARGET_CAP)
+    assert "youtube_channels c" in query
+    assert "c.last_skip_reason IS DISTINCT FROM 'verified_account'" in query
+    assert "strava_athletes" not in query
+    assert re.search(args[2], "bio: https://www.airbnb.com/rooms/12345").group(1) == "12345"
+    assert re.search(args[2], "https://notairbnb.com/rooms/12345") is None
 
 
 @pytest.mark.asyncio
