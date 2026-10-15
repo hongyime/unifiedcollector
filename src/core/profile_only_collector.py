@@ -201,6 +201,8 @@ class ProfileOnlyCollector(BaseCollector):
                     self.SOURCE_NAME,
                     _FOLLOW_GRAPH_TARGET_BATCH,
                 )
+            # Native targets live in a second queue. Keep spider/public profile
+            # probes parked until followed targets from either queue are drained.
             rows = await conn.fetch(
                 """
                 SELECT id, username
@@ -208,15 +210,24 @@ class ProfileOnlyCollector(BaseCollector):
                 WHERE source = $1 AND status = 'pending'
                   AND (
                       enqueued_by LIKE 'followed:%'
-                      OR enqueued_by='spider_discovered_links'
-                      OR NOT EXISTS (
-                          SELECT 1 FROM profile_probe_queue preferred
-                           WHERE preferred.source=$1
-                             AND preferred.status='pending'
-                             AND (
-                                 preferred.enqueued_by LIKE 'followed:%'
-                                 OR preferred.enqueued_by='spider_discovered_links'
-                             )
+                      OR (
+                          NOT EXISTS (
+                              SELECT 1 FROM profile_probe_queue preferred
+                               WHERE preferred.source=$1
+                                 AND preferred.status='pending'
+                                 AND preferred.enqueued_by LIKE 'followed:%'
+                          )
+                          AND NOT EXISTS (
+                              SELECT 1 FROM browser_native_scrape_queue native_preferred
+                               WHERE native_preferred.platform=$1
+                                 AND (
+                                      ($1 IN ('pinterest','snapchat')
+                                       AND native_preferred.source='followed_handle_candidate')
+                                      OR ($1='airbnb'
+                                          AND native_preferred.source='followed_account_link')
+                                 )
+                                 AND native_preferred.status IN ('pending','claimed')
+                          )
                       )
                   )
                 ORDER BY
