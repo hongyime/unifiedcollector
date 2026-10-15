@@ -616,6 +616,44 @@ _SEED_QUERIES: dict[str, tuple[str, ...]] = {
     ),
     "airbnb": (
         """
+        WITH candidates AS (
+            SELECT DISTINCT ON (l.host_id)
+                   l.host_id,
+                   'https://www.airbnb.com/users/show/' || l.host_id AS target_url,
+                   l.collected_at
+              FROM airbnb_listings l
+              LEFT JOIN airbnb_hosts h ON h.host_id=l.host_id
+             WHERE l.host_id ~ '^[0-9]{1,20}$'
+               AND (
+                    h.host_id IS NULL
+                    OR NULLIF(BTRIM(h.display_name), '') IS NULL
+                    OR NULLIF(BTRIM(h.avatar_url), '') IS NULL
+                    OR NULLIF(BTRIM(h.bio), '') IS NULL
+                    OR h.rating IS NULL
+                    OR h.reviews_count IS NULL
+                    OR h.host_since IS NULL
+                    OR h.response_rate IS NULL
+               )
+               AND NOT EXISTS (
+                    SELECT 1 FROM browser_native_scrape_queue q
+                     WHERE q.platform='airbnb'
+                       AND q.target_url='https://www.airbnb.com/users/show/' || l.host_id
+               )
+             ORDER BY l.host_id, l.collected_at DESC NULLS LAST
+        )
+        INSERT INTO browser_native_scrape_queue
+            (platform, target_url, username, source, priority)
+        SELECT 'airbnb', candidates.target_url, candidates.host_id,
+               'airbnb_listing_hosts', 20
+          FROM candidates
+         ORDER BY candidates.collected_at DESC NULLS LAST, candidates.host_id
+         LIMIT GREATEST(0, 10 - (
+                SELECT count(*) FROM browser_native_scrape_queue
+                 WHERE platform='airbnb' AND status IN ('pending','claimed')
+         ))
+        ON CONFLICT (platform, target_url) DO NOTHING
+        """,
+        """
         INSERT INTO browser_native_scrape_queue (platform, target_url, username, source, priority)
         SELECT 'airbnb', l.url, NULL, 'discovered_links', 10
           FROM discovered_links l

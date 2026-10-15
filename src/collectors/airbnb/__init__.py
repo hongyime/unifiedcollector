@@ -1039,6 +1039,7 @@ class AirbnbCollector(ProfileOnlyCollector):
         *,
         base_url: str = _AIRBNB_DEFAULT_BASE_URL,
         trailing_slash: bool = False,
+        allow_partial_data: bool = False,
     ) -> dict[str, Any]:
         params = {
             "operationName": operation,
@@ -1068,10 +1069,19 @@ class AirbnbCollector(ProfileOnlyCollector):
             raise RuntimeError("graphql_payload_unavailable") from exc
         if not isinstance(payload, dict):
             raise RuntimeError("graphql_payload_unavailable")
-        if payload.get("errors"):
+        data = payload.get("data")
+        errors = payload.get("errors")
+        if errors and not (
+            allow_partial_data and isinstance(data, dict) and data
+        ):
             raise RuntimeError("graphql_query_failed")
-        if not isinstance(payload.get("data"), dict):
+        if not isinstance(data, dict):
             raise RuntimeError("graphql_payload_unavailable")
+        if errors:
+            logger.info(
+                "Airbnb GraphQL %s returned partial data; retaining available fields",
+                operation,
+            )
         return payload
 
     async def _fetch_host_profile(self, host_id: str, profile_url: str) -> dict[str, Any]:
@@ -1131,6 +1141,7 @@ class AirbnbCollector(ProfileOnlyCollector):
                         "fetchCombinedSportsAndInterests": True,
                     },
                     base_url=base_url,
+                    allow_partial_data=True,
                 )
             except RuntimeError as graphql_error:
                 # Airbnb sometimes serves the public host page even when its
