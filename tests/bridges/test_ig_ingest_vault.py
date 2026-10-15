@@ -1676,6 +1676,79 @@ def test_posts_handler_queues_structured_ingest_without_waiting(monkeypatch):
     assert scheduled[0][0] == "browser_posts_ingest"
 
 
+@pytest.mark.parametrize(
+    "platform",
+    ["instagram", "snapchat", "pinterest", "x", "threads", "tiktok", "youtube"],
+)
+def test_profile_handler_skips_only_explicitly_verified_targets(platform):
+    req = _FakeRequest(
+        {"pool": _FakePool()},
+        {"platform": platform, "profile": {"username": "badge_target", "is_blue_verified": True}},
+    )
+
+    resp = asyncio.run(ig_ingest.profile_handler(req))
+
+    assert json.loads(resp.text) == {"ok": True, "excluded_verified": True}
+    assert req.app["pool"].conn.executes == []
+
+
+@pytest.mark.parametrize(
+    "platform",
+    ["instagram", "snapchat", "pinterest", "x", "threads", "tiktok", "youtube"],
+)
+def test_posts_handler_drops_verified_authors_and_keeps_unknown_authors(platform, monkeypatch):
+    scheduled = []
+    saved_posts = []
+
+    def fake_schedule(_app, coro, _label):
+        scheduled.append(coro)
+
+    async def fake_archive(_pool, _platform, _kind, body):
+        assert [post["platform_post_id"] for post in body["posts"]] == ["unknown"]
+
+    async def fake_save(_pool, _platform, posts, *_args):
+        saved_posts.extend(posts)
+        return len(posts)
+
+    async def fake_event(*_args, **_kwargs):
+        return None
+
+    async def fake_users(*_args, **_kwargs):
+        return 0
+
+    monkeypatch.setattr(ig_ingest, "_schedule_app_task", fake_schedule)
+    monkeypatch.setattr(ig_ingest, "_archive_browser_capture", fake_archive)
+    monkeypatch.setattr(ig_ingest, "_save_posts", fake_save)
+    monkeypatch.setattr(ig_ingest, "_record_browser_ingest_event", fake_event)
+    monkeypatch.setattr(ig_ingest, "_record_users", fake_users)
+    req = _FakeRequest(
+        {"pool": _FakePool(), "tasks": set()},
+        {
+            "platform": platform,
+            "username": "timeline",
+            # A verified owner is the logged-in collector, not a reason to
+            # discard captures from the target's timeline.
+            "owner": {"verified": True},
+            "posts": [
+                {"platform_post_id": "verified", "author": {"is_verified": "yes"}},
+                {"platform_post_id": "unknown", "author_username": "unclassified"},
+            ],
+        },
+    )
+
+    resp = asyncio.run(ig_ingest.posts_handler(req))
+    asyncio.run(scheduled.pop())
+
+    assert json.loads(resp.text) == {
+        "ok": True,
+        "queued": True,
+        "observed": 2,
+        "excluded_verified": 1,
+        "saved": 0,
+    }
+    assert [post["platform_post_id"] for post in saved_posts] == ["unknown"]
+
+
 def test_posts_background_ingest_keeps_archive_save_event_and_author_writes(monkeypatch):
     calls = []
 
