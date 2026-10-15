@@ -1957,7 +1957,7 @@ async def _ingest(app, platform, body):
     surface = normalize_collection_surface(body.get("collection_surface") or body.get("surface"))
     items = body.get("items") or []
     if platform in _VERIFIED_FILTER_PLATFORMS and _explicitly_verified_capture(body):
-        items = []
+        return {"accepted": 0, "platform": platform, "excluded_verified": True}
     if isinstance(items, list):
         if platform in _VERIFIED_FILTER_PLATFORMS:
             items = [item for item in items if not _explicitly_verified_capture(item)]
@@ -4042,7 +4042,9 @@ async def profile_handler(request):
     body = await _safe_json(request)
     platform = _norm_platform(body.get("platform"))
     p = body.get("profile") or {}
-    if platform in _VERIFIED_FILTER_PLATFORMS and _explicitly_verified_capture(p):
+    if platform in _VERIFIED_FILTER_PLATFORMS and (
+        _explicitly_verified_capture(body) or _explicitly_verified_capture(p)
+    ):
         return _cors(web.json_response({"ok": True, "excluded_verified": True}))
     await _archive_browser_capture(request.app["pool"], platform, "profile", body)
     await _save_profile(request.app["pool"], platform, p)
@@ -4078,6 +4080,15 @@ async def posts_handler(request):
     raw_posts = body.get("posts") or []
     if not isinstance(raw_posts, list):
         raw_posts = []
+    if platform in _VERIFIED_FILTER_PLATFORMS and _explicitly_verified_capture(body):
+        return _cors(web.json_response({
+            "ok": True,
+            "queued": False,
+            "observed": len(raw_posts),
+            "excluded_verified": len(raw_posts),
+            "excluded_verified_target": True,
+            "saved": 0,
+        }))
     posts = (
         [post for post in raw_posts if not _explicitly_verified_capture(post)]
         if platform in _VERIFIED_FILTER_PLATFORMS else raw_posts
@@ -4098,6 +4109,8 @@ async def posts_handler(request):
 
 
 async def _posts_ingest_background(app, platform: str, body: dict) -> None:
+    if platform in _VERIFIED_FILTER_PLATFORMS and _explicitly_verified_capture(body):
+        return
     posts = body.get("posts") or []
     if not isinstance(posts, list):
         posts = []
@@ -4142,6 +4155,14 @@ async def comments_handler(request):
     platform = _norm_platform(body.get("platform"))
     raw_comments = body.get("comments") or []
     comments = raw_comments if isinstance(raw_comments, list) else []
+    if platform in _VERIFIED_FILTER_PLATFORMS and _explicitly_verified_capture(body):
+        return _cors(web.json_response({
+            "ok": True,
+            "observed": len(comments),
+            "saved": 0,
+            "excluded_verified": len(comments),
+            "excluded_verified_target": True,
+        }))
     if platform in _VERIFIED_FILTER_PLATFORMS:
         comments = [comment for comment in comments if not _explicitly_verified_capture(comment)]
     body = {**body, "comments": comments}
