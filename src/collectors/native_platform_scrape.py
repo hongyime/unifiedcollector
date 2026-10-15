@@ -50,6 +50,47 @@ _FOLLOWED_HANDLE_SEED_SQL = """
                        AND (p.platform_user_id::text=f.target_uid
                             OR LOWER(p.username)=LOWER(BTRIM(f.target_username)))
                )
+               AND NOT EXISTS (
+                    SELECT 1 FROM threads_posts p
+                     WHERE f.platform='threads'
+                       AND LOWER(p.author_username)=LOWER(BTRIM(f.target_username))
+                       AND (p.metadata->>'author_is_verified'='true'
+                            OR p.metadata->>'is_verified'='true'
+                            OR p.metadata->>'verified'='true'
+                            OR p.metadata->>'isVerified'='true'
+                            OR p.metadata->>'is_blue_verified'='true'
+                            OR p.metadata->>'isBlueVerified'='true'
+                            OR p.metadata->>'blue_verified'='true'
+                            OR p.metadata->>'blueVerified'='true'
+                            OR p.metadata->>'verified_badge'='true')
+               )
+               AND NOT EXISTS (
+                    SELECT 1 FROM pinterest_profiles p
+                     WHERE (f.platform='pinterest' OR $1='pinterest')
+                       AND LOWER(p.username)=LOWER(BTRIM(f.target_username))
+                       AND (p.raw_payload->>'profile_is_verified'='true'
+                            OR p.raw_payload->>'is_verified'='true'
+                            OR p.raw_payload->>'verified'='true'
+                            OR p.raw_payload->>'isVerified'='true'
+                            OR p.raw_payload->>'is_blue_verified'='true'
+                            OR p.raw_payload->>'isBlueVerified'='true'
+                            OR p.raw_payload->>'blue_verified'='true'
+                            OR p.raw_payload->>'blueVerified'='true'
+                            OR p.raw_payload->>'verified_badge'='true')
+               )
+               AND NOT EXISTS (
+                    SELECT 1 FROM snapchat_profiles p
+                     WHERE (f.platform='snapchat' OR $1='snapchat')
+                       AND LOWER(p.username)=LOWER(BTRIM(f.target_username))
+                       AND (p.raw_payload->>'verified'='true'
+                            OR p.raw_payload->>'isVerified'='true'
+                            OR p.raw_payload->>'is_verified'='true'
+                            OR p.raw_payload->>'is_blue_verified'='true'
+                            OR p.raw_payload->>'isBlueVerified'='true'
+                            OR p.raw_payload->>'blue_verified'='true'
+                            OR p.raw_payload->>'blueVerified'='true'
+                            OR p.raw_payload->>'verified_badge'='true')
+               )
              ORDER BY LOWER(BTRIM(f.target_username)),
                       f.last_seen DESC NULLS LAST
       ) followed
@@ -88,6 +129,15 @@ _FOLLOWED_AIRBNB_LINKS_SQL = r"""
                     WHERE l.source_table='instagram_posts'
                       AND (l.source_record_id=p.id::text OR l.source_record_id=p.platform_post_id)
                       AND profile.is_verified IS NOT TRUE
+                      AND p.metadata->>'author_is_verified' IS DISTINCT FROM 'true'
+                      AND p.metadata->>'is_verified' IS DISTINCT FROM 'true'
+                      AND p.metadata->>'verified' IS DISTINCT FROM 'true'
+                      AND p.metadata->>'isVerified' IS DISTINCT FROM 'true'
+                      AND p.metadata->>'is_blue_verified' IS DISTINCT FROM 'true'
+                      AND p.metadata->>'isBlueVerified' IS DISTINCT FROM 'true'
+                      AND p.metadata->>'blue_verified' IS DISTINCT FROM 'true'
+                      AND p.metadata->>'blueVerified' IS DISTINCT FROM 'true'
+                      AND p.metadata->>'verified_badge' IS DISTINCT FROM 'true'
                 )
                 OR EXISTS (
                     SELECT 1 FROM x_posts p
@@ -97,6 +147,15 @@ _FOLLOWED_AIRBNB_LINKS_SQL = r"""
                     WHERE l.source_table='x_posts'
                       AND (l.source_record_id=p.id::text OR l.source_record_id=p.platform_post_id)
                       AND profile.is_verified IS NOT TRUE
+                      AND p.metadata->>'author_is_verified' IS DISTINCT FROM 'true'
+                      AND p.metadata->>'is_verified' IS DISTINCT FROM 'true'
+                      AND p.metadata->>'verified' IS DISTINCT FROM 'true'
+                      AND p.metadata->>'isVerified' IS DISTINCT FROM 'true'
+                      AND p.metadata->>'is_blue_verified' IS DISTINCT FROM 'true'
+                      AND p.metadata->>'isBlueVerified' IS DISTINCT FROM 'true'
+                      AND p.metadata->>'blue_verified' IS DISTINCT FROM 'true'
+                      AND p.metadata->>'blueVerified' IS DISTINCT FROM 'true'
+                      AND p.metadata->>'verified_badge' IS DISTINCT FROM 'true'
                 )
                 OR EXISTS (
                     SELECT 1 FROM tiktok_posts p
@@ -107,6 +166,15 @@ _FOLLOWED_AIRBNB_LINKS_SQL = r"""
                     WHERE l.source_table='tiktok_posts'
                       AND (l.source_record_id=p.id::text OR l.source_record_id=p.platform_post_id)
                       AND profile.is_verified IS NOT TRUE
+                      AND p.metadata->>'author_is_verified' IS DISTINCT FROM 'true'
+                      AND p.metadata->>'is_verified' IS DISTINCT FROM 'true'
+                      AND p.metadata->>'verified' IS DISTINCT FROM 'true'
+                      AND p.metadata->>'isVerified' IS DISTINCT FROM 'true'
+                      AND p.metadata->>'is_blue_verified' IS DISTINCT FROM 'true'
+                      AND p.metadata->>'isBlueVerified' IS DISTINCT FROM 'true'
+                      AND p.metadata->>'blue_verified' IS DISTINCT FROM 'true'
+                      AND p.metadata->>'blueVerified' IS DISTINCT FROM 'true'
+                      AND p.metadata->>'verified_badge' IS DISTINCT FROM 'true'
                 )
                 OR EXISTS (
                     SELECT 1 FROM threads_posts p
@@ -114,22 +182,105 @@ _FOLLOWED_AIRBNB_LINKS_SQL = r"""
                         AND LOWER(f.target_username)=LOWER(p.author_username)
                     WHERE l.source_table='threads_posts'
                       AND (l.source_record_id=p.id::text OR l.source_record_id=p.platform_post_id)
+                      AND p.metadata->>'author_is_verified' IS DISTINCT FROM 'true'
+                      AND p.metadata->>'is_verified' IS DISTINCT FROM 'true'
+                      AND p.metadata->>'verified' IS DISTINCT FROM 'true'
+                      AND p.metadata->>'isVerified' IS DISTINCT FROM 'true'
+                      AND p.metadata->>'is_blue_verified' IS DISTINCT FROM 'true'
+                      AND p.metadata->>'isBlueVerified' IS DISTINCT FROM 'true'
+                      AND p.metadata->>'blue_verified' IS DISTINCT FROM 'true'
+                      AND p.metadata->>'blueVerified' IS DISTINCT FROM 'true'
+                      AND p.metadata->>'verified_badge' IS DISTINCT FROM 'true'
                 )
                 OR EXISTS (
                     SELECT 1 FROM pinterest_pins p
                     JOIN follow_edges f ON f.platform='pinterest' AND f.direction='following'
                         AND LOWER(f.target_username)=LOWER(p.username)
+                    LEFT JOIN pinterest_profiles profile ON LOWER(profile.username)=LOWER(p.username)
                     WHERE l.source_table='pinterest_pins'
                       AND l.source_record_id=p.pin_id
                       AND p.metadata->>'author_is_verified' IS DISTINCT FROM 'true'
+                      AND p.metadata->>'is_verified' IS DISTINCT FROM 'true'
+                      AND p.metadata->>'verified' IS DISTINCT FROM 'true'
+                      AND p.metadata->>'isVerified' IS DISTINCT FROM 'true'
+                      AND p.metadata->>'is_blue_verified' IS DISTINCT FROM 'true'
+                      AND p.metadata->>'isBlueVerified' IS DISTINCT FROM 'true'
+                      AND p.metadata->>'blue_verified' IS DISTINCT FROM 'true'
+                      AND p.metadata->>'blueVerified' IS DISTINCT FROM 'true'
+                      AND p.metadata->>'verified_badge' IS DISTINCT FROM 'true'
+                      AND profile.raw_payload->>'profile_is_verified' IS DISTINCT FROM 'true'
+                      AND profile.raw_payload->>'is_verified' IS DISTINCT FROM 'true'
+                      AND profile.raw_payload->>'verified' IS DISTINCT FROM 'true'
+                      AND profile.raw_payload->>'isVerified' IS DISTINCT FROM 'true'
+                      AND profile.raw_payload->>'is_blue_verified' IS DISTINCT FROM 'true'
+                      AND profile.raw_payload->>'isBlueVerified' IS DISTINCT FROM 'true'
+                      AND profile.raw_payload->>'blue_verified' IS DISTINCT FROM 'true'
+                      AND profile.raw_payload->>'blueVerified' IS DISTINCT FROM 'true'
+                      AND profile.raw_payload->>'verified_badge' IS DISTINCT FROM 'true'
                 )
                 OR EXISTS (
                     SELECT 1 FROM snapchat_stories p
                     JOIN follow_edges f ON f.platform='snapchat' AND f.direction='following'
                         AND LOWER(f.target_username)=LOWER(p.username)
+                    LEFT JOIN snapchat_profiles profile ON LOWER(profile.username)=LOWER(p.username)
                     WHERE l.source_table='snapchat_stories'
                       AND l.source_record_id=p.story_id
                       AND p.metadata->>'author_is_verified' IS DISTINCT FROM 'true'
+                      AND p.metadata->>'is_verified' IS DISTINCT FROM 'true'
+                      AND p.metadata->>'verified' IS DISTINCT FROM 'true'
+                      AND p.metadata->>'isVerified' IS DISTINCT FROM 'true'
+                      AND p.metadata->>'is_blue_verified' IS DISTINCT FROM 'true'
+                      AND p.metadata->>'isBlueVerified' IS DISTINCT FROM 'true'
+                      AND p.metadata->>'blue_verified' IS DISTINCT FROM 'true'
+                      AND p.metadata->>'blueVerified' IS DISTINCT FROM 'true'
+                      AND p.metadata->>'verified_badge' IS DISTINCT FROM 'true'
+                      AND profile.raw_payload->>'is_verified' IS DISTINCT FROM 'true'
+                      AND profile.raw_payload->>'verified' IS DISTINCT FROM 'true'
+                      AND profile.raw_payload->>'isVerified' IS DISTINCT FROM 'true'
+                      AND profile.raw_payload->>'is_blue_verified' IS DISTINCT FROM 'true'
+                      AND profile.raw_payload->>'isBlueVerified' IS DISTINCT FROM 'true'
+                      AND profile.raw_payload->>'blue_verified' IS DISTINCT FROM 'true'
+                      AND profile.raw_payload->>'blueVerified' IS DISTINCT FROM 'true'
+                      AND profile.raw_payload->>'verified_badge' IS DISTINCT FROM 'true'
+                )
+                OR EXISTS (
+                    SELECT 1 FROM youtube_videos p
+                    JOIN youtube_channels channel ON channel.id=p.channel_id
+                    JOIN follow_edges f ON f.platform='youtube' AND f.direction='following'
+                        AND (f.target_uid=channel.platform_channel_id
+                             OR LOWER(f.target_username)=LOWER(channel.custom_url))
+                    WHERE l.source_table='youtube_videos'
+                      AND (l.source_record_id=p.id::text
+                           OR l.source_record_id=p.platform_video_id)
+                      AND channel.last_skip_reason IS DISTINCT FROM 'verified_account'
+                      AND p.metadata->>'channel_is_verified' IS DISTINCT FROM 'true'
+                      AND p.metadata->>'is_verified' IS DISTINCT FROM 'true'
+                      AND p.metadata->>'verified' IS DISTINCT FROM 'true'
+                )
+                OR EXISTS (
+                    SELECT 1 FROM youtube_community_posts p
+                    JOIN youtube_channels channel
+                      ON channel.platform_channel_id=p.channel_id
+                    JOIN follow_edges f ON f.platform='youtube' AND f.direction='following'
+                        AND (f.target_uid=channel.platform_channel_id
+                             OR LOWER(f.target_username)=LOWER(channel.custom_url))
+                    WHERE l.source_table='youtube_community_posts'
+                      AND (l.source_record_id=p.id::text
+                           OR l.source_record_id=p.platform_post_id)
+                      AND channel.last_skip_reason IS DISTINCT FROM 'verified_account'
+                      AND p.metadata->>'channel_is_verified' IS DISTINCT FROM 'true'
+                      AND p.metadata->>'is_verified' IS DISTINCT FROM 'true'
+                      AND p.metadata->>'verified' IS DISTINCT FROM 'true'
+                )
+                OR EXISTS (
+                    SELECT 1 FROM youtube_channels channel
+                    JOIN follow_edges f ON f.platform='youtube' AND f.direction='following'
+                        AND (f.target_uid=channel.platform_channel_id
+                             OR LOWER(f.target_username)=LOWER(channel.custom_url))
+                    WHERE l.source_table='youtube_channels'
+                      AND (l.source_record_id=channel.id::text
+                           OR l.source_record_id=channel.platform_channel_id)
+                      AND channel.last_skip_reason IS DISTINCT FROM 'verified_account'
                 )
            )
            AND NOT EXISTS (
@@ -211,6 +362,15 @@ _SEED_QUERIES: dict[str, tuple[str, ...]] = {
                btrim(p.username), 'pinterest_profiles'
           FROM pinterest_profiles p
          WHERE btrim(p.username) ~ '^[A-Za-z0-9._-]{1,100}$'
+           AND p.raw_payload->>'profile_is_verified' IS DISTINCT FROM 'true'
+           AND p.raw_payload->>'is_verified' IS DISTINCT FROM 'true'
+           AND p.raw_payload->>'verified' IS DISTINCT FROM 'true'
+           AND p.raw_payload->>'isVerified' IS DISTINCT FROM 'true'
+           AND p.raw_payload->>'is_blue_verified' IS DISTINCT FROM 'true'
+           AND p.raw_payload->>'isBlueVerified' IS DISTINCT FROM 'true'
+           AND p.raw_payload->>'blue_verified' IS DISTINCT FROM 'true'
+           AND p.raw_payload->>'blueVerified' IS DISTINCT FROM 'true'
+           AND p.raw_payload->>'verified_badge' IS DISTINCT FROM 'true'
            AND NOT EXISTS (
                 SELECT 1 FROM browser_native_scrape_queue q
                  WHERE q.platform='pinterest' AND q.username=btrim(p.username)
@@ -250,6 +410,14 @@ _SEED_QUERIES: dict[str, tuple[str, ...]] = {
                btrim(p.username), 'snapchat_profiles'
           FROM snapchat_profiles p
          WHERE btrim(p.username) ~ '^[A-Za-z0-9._-]{1,100}$'
+           AND p.raw_payload->>'is_verified' IS DISTINCT FROM 'true'
+           AND p.raw_payload->>'verified' IS DISTINCT FROM 'true'
+           AND p.raw_payload->>'isVerified' IS DISTINCT FROM 'true'
+           AND p.raw_payload->>'is_blue_verified' IS DISTINCT FROM 'true'
+           AND p.raw_payload->>'isBlueVerified' IS DISTINCT FROM 'true'
+           AND p.raw_payload->>'blue_verified' IS DISTINCT FROM 'true'
+           AND p.raw_payload->>'blueVerified' IS DISTINCT FROM 'true'
+           AND p.raw_payload->>'verified_badge' IS DISTINCT FROM 'true'
            AND NOT EXISTS (
                 SELECT 1 FROM browser_native_scrape_queue q
                  WHERE q.platform='snapchat' AND q.username=btrim(p.username)
@@ -278,6 +446,50 @@ _SEED_QUERIES: dict[str, tuple[str, ...]] = {
          WHERE l.domain ~* '(^|\\.)airbnb\\.(com|com\\.sg|co\\.uk|co\\.kr)$'
            AND l.url ~* '^https://([^/]+\\.)?airbnb\\.(com|com\\.sg|co\\.uk|co\\.kr)/rooms/[0-9]+'
            AND COALESCE(l.status, '') NOT IN ('404', 'error', 'ignored')
+           AND NOT EXISTS (
+                SELECT 1 FROM pinterest_profiles p
+                 WHERE l.source_table='pinterest_profiles'
+                   AND l.source_record_id=p.username
+                   AND (p.raw_payload->>'profile_is_verified'='true'
+                        OR p.raw_payload->>'is_verified'='true'
+                        OR p.raw_payload->>'verified'='true'
+                        OR p.raw_payload->>'isVerified'='true'
+                        OR p.raw_payload->>'is_blue_verified'='true'
+                        OR p.raw_payload->>'isBlueVerified'='true'
+                        OR p.raw_payload->>'blue_verified'='true'
+                        OR p.raw_payload->>'blueVerified'='true'
+                        OR p.raw_payload->>'verified_badge'='true')
+           )
+           AND NOT EXISTS (
+                SELECT 1 FROM youtube_videos p
+                LEFT JOIN youtube_channels channel ON channel.id=p.channel_id
+                 WHERE l.source_table='youtube_videos'
+                   AND (l.source_record_id=p.id::text
+                        OR l.source_record_id=p.platform_video_id)
+                   AND (channel.last_skip_reason='verified_account'
+                        OR p.metadata->>'channel_is_verified'='true'
+                        OR p.metadata->>'is_verified'='true'
+                        OR p.metadata->>'verified'='true')
+           )
+           AND NOT EXISTS (
+                SELECT 1 FROM youtube_community_posts p
+                LEFT JOIN youtube_channels channel
+                  ON channel.platform_channel_id=p.channel_id
+                 WHERE l.source_table='youtube_community_posts'
+                   AND (l.source_record_id=p.id::text
+                        OR l.source_record_id=p.platform_post_id)
+                   AND (channel.last_skip_reason='verified_account'
+                        OR p.metadata->>'channel_is_verified'='true'
+                        OR p.metadata->>'is_verified'='true'
+                        OR p.metadata->>'verified'='true')
+           )
+           AND NOT EXISTS (
+                SELECT 1 FROM youtube_channels channel
+                 WHERE l.source_table='youtube_channels'
+                   AND (l.source_record_id=channel.id::text
+                        OR l.source_record_id=channel.platform_channel_id)
+                   AND channel.last_skip_reason='verified_account'
+           )
            AND NOT EXISTS (
                 SELECT 1 FROM browser_native_scrape_queue q
                  WHERE q.platform='airbnb' AND q.target_url=l.url
