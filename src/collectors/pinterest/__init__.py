@@ -208,6 +208,13 @@ def _pinterest_page_kind(url: str) -> tuple[str, str | None, str | None] | None:
     return "board", username, board_slug
 
 
+def _explicitly_verified_capture(value: Any) -> bool:
+    """Return true only for an explicit badge flag from the visible pin card."""
+    if value is True or (isinstance(value, int) and not isinstance(value, bool) and value == 1):
+        return True
+    return isinstance(value, str) and value.strip().lower() in {"true", "1", "yes"}
+
+
 def _contains_private_marker(data: dict[str, Any]) -> bool:
     return bool(_PRIVATE_MARKER_RE.search(
         f"{data.get('body_text') or ''} {data.get('serialized_state') or ''}"
@@ -525,6 +532,14 @@ class PinterestCollector(ProfileOnlyCollector):
             """({expectedUsername, expectedPageKind}) => {
               const text = (value) => String(value || '').replace(/\\s+/g, ' ').trim().slice(0, 500);
               const fullText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+              const hasExplicitVerifiedBadge = (node) => {
+                if (!node) return false;
+                const candidates = [node, ...Array.from(node.querySelectorAll('[aria-label],[title]'))];
+                return candidates.some((element) => [
+                  element.getAttribute('aria-label') || '',
+                  element.getAttribute('title') || '',
+                ].some((label) => /\\bverified\\b/i.test(label) && !/\\bnot\\s+verified\\b/i.test(label)));
+              };
               const heading = document.querySelector('h1');
               let boardHeader = heading;
               for (let depth = 0; boardHeader && depth < 3 && boardHeader.parentElement; depth++) {
@@ -555,6 +570,7 @@ class PinterestCollector(ProfileOnlyCollector):
                   membership_links: membershipLinks,
                   destination_url: destinationUrl,
                   card_text: fullText(card?.innerText || a.innerText || '').slice(0, 2000),
+                  author_is_verified: hasExplicitVerifiedBadge(card || a),
                   control_labels: Array.from(card?.querySelectorAll('button,[role="button"]') || [])
                     .map((control) => control.getAttribute('aria-label') || control.getAttribute('title') || '')
                     .filter(Boolean).join(' ').slice(0, 1000),
@@ -595,6 +611,7 @@ class PinterestCollector(ProfileOnlyCollector):
                   image_alt: text(image?.alt),
                   image_url: image?.currentSrc || image?.src || null,
                   card_text: fullText(card.innerText || '').slice(0, 2000),
+                  author_is_verified: hasExplicitVerifiedBadge(card),
                   control_labels: Array.from(card.querySelectorAll('button,[role="button"]'))
                     .map((control) => control.getAttribute('aria-label') || control.getAttribute('title') || '')
                     .filter(Boolean).join(' ').slice(0, 1000),
@@ -615,12 +632,7 @@ class PinterestCollector(ProfileOnlyCollector):
               });
               const identityTokens = identityText.toLowerCase().match(/@[a-z0-9._-]+/g) || [];
               const profileIdentityVerified = identityByLink || identityTokens.includes('@' + expectedHandle);
-              const profileIsVerified = Array.from(
-                identityRegion?.querySelectorAll('[aria-label],[title]') || []
-              ).some((element) => [
-                element.getAttribute('aria-label') || '',
-                element.getAttribute('title') || '',
-              ].some((label) => label.toLowerCase().includes('verified')));
+              const profileIsVerified = hasExplicitVerifiedBadge(identityRegion);
               return {
                 url: location.href,
                 title: text(heading?.innerText || document.title),
@@ -715,6 +727,18 @@ class PinterestCollector(ProfileOnlyCollector):
             *data.get("anchors", [])[:1200],
             *data.get("pin_cards", [])[:1200],
         ]
+        verified_pin_ids: set[str] = set()
+        for candidate in candidates:
+            if not isinstance(candidate, dict) or not _explicitly_verified_capture(
+                candidate.get("author_is_verified")
+            ):
+                continue
+            href = str(candidate.get("href") or "")
+            pin_match = _PIN_PATH_RE.match(urlparse(href).path)
+            raw_id = str(candidate.get("pin_id") or "")
+            pin_id = pin_match.group(1) if pin_match else raw_id if raw_id.isdigit() else ""
+            if pin_id:
+                verified_pin_ids.add(pin_id)
         for anchor in candidates:
             if not isinstance(anchor, dict):
                 continue
@@ -726,7 +750,11 @@ class PinterestCollector(ProfileOnlyCollector):
             pin_match = _PIN_PATH_RE.match(parsed.path)
             raw_id = str(anchor.get("pin_id") or "")
             pin_id = pin_match.group(1) if pin_match else (raw_id if raw_id.isdigit() else "")
-            if not pin_id:
+            if (
+                not pin_id
+                or pin_id in verified_pin_ids
+                or _explicitly_verified_capture(anchor.get("author_is_verified"))
+            ):
                 continue
             page_identity_verified = (
                 kind != "profile" or data.get("profile_identity_verified") is True

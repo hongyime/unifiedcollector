@@ -209,7 +209,7 @@
     return candidates.some((element) => [
       element.getAttribute("aria-label") || "",
       element.getAttribute("title") || ""
-    ].some((label) => label.toLowerCase().includes("verified")));
+    ].some((label) => /\bverified\b/i.test(label) && !/\bnot\s+verified\b/i.test(label)));
   }
   function pinterestUsername(pageUrl) {
     try {

@@ -101,6 +101,39 @@ def test_pinterest_parser_extracts_pin_cards_without_anchor_links():
     assert pins[0]["board_id"] == "alice/travel"
 
 
+def test_pinterest_parser_skips_explicit_verified_pin_authors_but_keeps_unknown_authors():
+    _boards, pins = PinterestCollector._parse_native_page(
+        "https://www.pinterest.com/alice/travel/",
+        {
+            "primary_heading": "Travel",
+            "board_header_text": "Travel board 42 pins",
+            "pin_cards": [
+                {
+                    "href": "https://www.pinterest.com/pin/111/",
+                    "pin_id": "111",
+                    "author_is_verified": True,
+                },
+                {
+                    "href": "https://www.pinterest.com/pin/222/",
+                    "pin_id": "222",
+                    "author_is_verified": "yes",
+                },
+                {
+                    "href": "https://www.pinterest.com/pin/333/",
+                    "pin_id": "333",
+                },
+                {
+                    "href": "https://www.pinterest.com/pin/444/",
+                    "pin_id": "444",
+                    "author_is_verified": False,
+                },
+            ],
+        },
+    )
+
+    assert {pin["id"] for pin in pins} == {"333", "444"}
+
+
 @pytest.mark.asyncio
 async def test_pinterest_profile_probe_extracts_following_and_monthly_views(monkeypatch):
     response = type("Response", (), {
