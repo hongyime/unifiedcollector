@@ -223,6 +223,7 @@ _DYNAMIC_TERM_SOURCE_QUERIES = (
                username, full_name, bio AS text_blob, ARRAY[]::text[] AS hashtags
           FROM instagram_profiles
          WHERE updated_at >= now() - interval '90 days'
+           AND is_verified IS NOT TRUE
            AND (username IS NOT NULL OR full_name IS NOT NULL OR bio IS NOT NULL)
          ORDER BY updated_at DESC LIMIT $1
     """),
@@ -231,6 +232,7 @@ _DYNAMIC_TERM_SOURCE_QUERIES = (
                username, nickname AS full_name, bio AS text_blob, ARRAY[]::text[] AS hashtags
           FROM tiktok_profiles
          WHERE updated_at >= now() - interval '90 days'
+           AND is_verified IS NOT TRUE
            AND (username IS NOT NULL OR nickname IS NOT NULL OR bio IS NOT NULL)
          ORDER BY updated_at DESC LIMIT $1
     """),
@@ -247,6 +249,7 @@ _DYNAMIC_TERM_SOURCE_QUERIES = (
                username, display_name AS full_name, bio AS text_blob, ARRAY[]::text[] AS hashtags
           FROM pinterest_profiles
          WHERE probed_at >= now() - interval '90 days'
+           AND raw_payload->>'profile_is_verified' IS DISTINCT FROM 'true'
            AND (username IS NOT NULL OR display_name IS NOT NULL OR bio IS NOT NULL)
          ORDER BY probed_at DESC LIMIT $1
     """),
@@ -255,6 +258,10 @@ _DYNAMIC_TERM_SOURCE_QUERIES = (
                username, display_name AS full_name, display_name AS text_blob, ARRAY[]::text[] AS hashtags
           FROM snapchat_profiles
          WHERE probed_at >= now() - interval '90 days'
+           AND raw_payload->>'is_verified' IS DISTINCT FROM 'true'
+           AND raw_payload->>'verified' IS DISTINCT FROM 'true'
+           AND raw_payload->>'isVerified' IS DISTINCT FROM 'true'
+           AND raw_payload->>'is_blue_verified' IS DISTINCT FROM 'true'
            AND (username IS NOT NULL OR display_name IS NOT NULL)
          ORDER BY probed_at DESC LIMIT $1
     """),
@@ -271,6 +278,7 @@ _DYNAMIC_TERM_SOURCE_QUERIES = (
                username, display_name AS full_name, bio AS text_blob, ARRAY[]::text[] AS hashtags
           FROM x_profiles
          WHERE updated_at >= now() - interval '90 days'
+           AND is_verified IS NOT TRUE
            AND (username IS NOT NULL OR display_name IS NOT NULL OR bio IS NOT NULL)
          ORDER BY updated_at DESC LIMIT $1
     """),
@@ -296,6 +304,10 @@ _DYNAMIC_TERM_SOURCE_QUERIES = (
           FROM instagram_posts p
           LEFT JOIN instagram_profiles u ON u.id = p.profile_id
          WHERE p.collected_at >= now() - interval '90 days'
+           AND u.is_verified IS NOT TRUE
+           AND p.metadata->>'author_is_verified' IS DISTINCT FROM 'true'
+           AND p.metadata->>'is_verified' IS DISTINCT FROM 'true'
+           AND p.metadata->>'verified' IS DISTINCT FROM 'true'
            AND (p.caption IS NOT NULL OR p.hashtags IS NOT NULL)
          ORDER BY p.collected_at DESC LIMIT $1
     """),
@@ -305,6 +317,10 @@ _DYNAMIC_TERM_SOURCE_QUERIES = (
           FROM tiktok_posts p
           LEFT JOIN tiktok_profiles u ON u.id = p.profile_id
          WHERE p.collected_at >= now() - interval '90 days'
+           AND u.is_verified IS NOT TRUE
+           AND p.metadata->>'author_is_verified' IS DISTINCT FROM 'true'
+           AND p.metadata->>'is_verified' IS DISTINCT FROM 'true'
+           AND p.metadata->>'verified' IS DISTINCT FROM 'true'
            AND (p.title IS NOT NULL OR p.description IS NOT NULL OR p.hashtags IS NOT NULL)
          ORDER BY p.collected_at DESC LIMIT $1
     """),
@@ -321,6 +337,9 @@ _DYNAMIC_TERM_SOURCE_QUERIES = (
                author_username AS username, caption AS text_blob, hashtags
           FROM threads_posts
          WHERE collected_at >= now() - interval '90 days'
+           AND metadata->>'author_is_verified' IS DISTINCT FROM 'true'
+           AND metadata->>'is_verified' IS DISTINCT FROM 'true'
+           AND metadata->>'verified' IS DISTINCT FROM 'true'
            AND (caption IS NOT NULL OR hashtags IS NOT NULL)
          ORDER BY collected_at DESC LIMIT $1
     """),
@@ -333,31 +352,47 @@ _DYNAMIC_TERM_SOURCE_QUERIES = (
          ORDER BY collected_at DESC LIMIT $1
     """),
     ("x_posts", """
-        SELECT 'x' AS platform, id::text AS source_reference,
-               author_username AS username, caption AS text_blob, hashtags
-          FROM x_posts
-         WHERE collected_at >= now() - interval '90 days'
-           AND (caption IS NOT NULL OR hashtags IS NOT NULL)
-         ORDER BY collected_at DESC LIMIT $1
+        SELECT 'x' AS platform, p.id::text AS source_reference,
+               p.author_username AS username, p.caption AS text_blob, p.hashtags
+          FROM x_posts p
+          LEFT JOIN x_profiles u ON LOWER(u.username)=LOWER(p.author_username)
+         WHERE p.collected_at >= now() - interval '90 days'
+           AND u.is_verified IS NOT TRUE
+           AND p.metadata->>'author_is_verified' IS DISTINCT FROM 'true'
+           AND p.metadata->>'is_verified' IS DISTINCT FROM 'true'
+           AND p.metadata->>'verified' IS DISTINCT FROM 'true'
+           AND (p.caption IS NOT NULL OR p.hashtags IS NOT NULL)
+         ORDER BY p.collected_at DESC LIMIT $1
     """),
     ("pinterest_pins", """
-        SELECT 'pinterest' AS platform, pin_id AS source_reference,
-               username, concat_ws(' ', title, description) AS text_blob,
+        SELECT 'pinterest' AS platform, p.pin_id AS source_reference,
+               p.username, concat_ws(' ', p.title, p.description) AS text_blob,
                ARRAY[]::text[] AS hashtags
-          FROM pinterest_pins
-         WHERE collected_at >= now() - interval '90 days'
-           AND (title IS NOT NULL OR description IS NOT NULL OR username IS NOT NULL)
-         ORDER BY collected_at DESC LIMIT $1
+          FROM pinterest_pins p
+          LEFT JOIN pinterest_profiles profile ON LOWER(profile.username)=LOWER(p.username)
+         WHERE p.collected_at >= now() - interval '90 days'
+           AND profile.raw_payload->>'profile_is_verified' IS DISTINCT FROM 'true'
+           AND profile.raw_payload->>'is_verified' IS DISTINCT FROM 'true'
+           AND profile.raw_payload->>'verified' IS DISTINCT FROM 'true'
+           AND p.metadata->>'author_is_verified' IS DISTINCT FROM 'true'
+           AND p.metadata->>'is_verified' IS DISTINCT FROM 'true'
+           AND p.metadata->>'verified' IS DISTINCT FROM 'true'
+           AND (p.title IS NOT NULL OR p.description IS NOT NULL OR p.username IS NOT NULL)
+         ORDER BY p.collected_at DESC LIMIT $1
     """),
     ("pinterest_boards", """
-        SELECT 'pinterest' AS platform, board_id AS source_reference,
-               username, NULL::text AS full_name,
-               concat_ws(' ', name, description) AS text_blob,
+        SELECT 'pinterest' AS platform, b.board_id AS source_reference,
+               b.username, NULL::text AS full_name,
+               concat_ws(' ', b.name, b.description) AS text_blob,
                ARRAY[]::text[] AS hashtags
-          FROM pinterest_boards
-         WHERE collected_at >= now() - interval '90 days'
-           AND (username IS NOT NULL OR name IS NOT NULL OR description IS NOT NULL)
-         ORDER BY collected_at DESC LIMIT $1
+          FROM pinterest_boards b
+          LEFT JOIN pinterest_profiles profile ON LOWER(profile.username)=LOWER(b.username)
+         WHERE b.collected_at >= now() - interval '90 days'
+           AND profile.raw_payload->>'profile_is_verified' IS DISTINCT FROM 'true'
+           AND profile.raw_payload->>'is_verified' IS DISTINCT FROM 'true'
+           AND profile.raw_payload->>'verified' IS DISTINCT FROM 'true'
+           AND (b.username IS NOT NULL OR b.name IS NOT NULL OR b.description IS NOT NULL)
+         ORDER BY b.collected_at DESC LIMIT $1
     """),
     ("youtube_videos", """
         SELECT 'youtube' AS platform, v.id::text AS source_reference,
@@ -366,6 +401,8 @@ _DYNAMIC_TERM_SOURCE_QUERIES = (
           FROM youtube_videos v
           LEFT JOIN youtube_channels c ON c.id = v.channel_id
          WHERE v.collected_at >= now() - interval '90 days'
+           AND v.metadata->>'channel_is_verified' IS DISTINCT FROM 'true'
+           AND v.metadata->>'is_verified' IS DISTINCT FROM 'true'
            AND (v.title IS NOT NULL OR v.description IS NOT NULL OR v.tags IS NOT NULL)
          ORDER BY v.collected_at DESC LIMIT $1
     """),
@@ -376,6 +413,8 @@ _DYNAMIC_TERM_SOURCE_QUERIES = (
           FROM youtube_community_posts p
           LEFT JOIN youtube_channels c ON c.platform_channel_id = p.channel_id
          WHERE p.collected_at >= now() - interval '90 days'
+           AND p.metadata->>'channel_is_verified' IS DISTINCT FROM 'true'
+           AND p.metadata->>'is_verified' IS DISTINCT FROM 'true'
            AND (p.text IS NOT NULL OR c.custom_url IS NOT NULL)
          ORDER BY p.collected_at DESC LIMIT $1
     """),
@@ -446,31 +485,58 @@ _DYNAMIC_TERM_SOURCE_QUERIES = (
          ORDER BY collected_at DESC LIMIT $1
     """),
     ("snapchat_stories", """
-        SELECT 'snapchat' AS platform, story_id AS source_reference,
-               username, NULL::text AS full_name, title AS text_blob,
+        SELECT 'snapchat' AS platform, s.story_id AS source_reference,
+               s.username, NULL::text AS full_name, s.title AS text_blob,
                ARRAY[]::text[] AS hashtags
-          FROM snapchat_stories
-         WHERE collected_at >= now() - interval '90 days'
-           AND (username IS NOT NULL OR title IS NOT NULL)
-         ORDER BY collected_at DESC LIMIT $1
+          FROM snapchat_stories s
+          LEFT JOIN snapchat_profiles profile ON LOWER(profile.username)=LOWER(s.username)
+         WHERE s.collected_at >= now() - interval '90 days'
+           AND profile.raw_payload->>'is_verified' IS DISTINCT FROM 'true'
+           AND profile.raw_payload->>'verified' IS DISTINCT FROM 'true'
+           AND profile.raw_payload->>'isVerified' IS DISTINCT FROM 'true'
+           AND profile.raw_payload->>'is_blue_verified' IS DISTINCT FROM 'true'
+           AND s.metadata->>'author_is_verified' IS DISTINCT FROM 'true'
+           AND s.metadata->>'is_verified' IS DISTINCT FROM 'true'
+           AND s.metadata->>'verified' IS DISTINCT FROM 'true'
+           AND s.metadata->>'is_blue_verified' IS DISTINCT FROM 'true'
+           AND (s.username IS NOT NULL OR s.title IS NOT NULL)
+         ORDER BY s.collected_at DESC LIMIT $1
     """),
     ("snapchat_spotlights", """
-        SELECT 'snapchat' AS platform, spotlight_id AS source_reference,
-               username, NULL::text AS full_name, title AS text_blob,
+        SELECT 'snapchat' AS platform, s.spotlight_id AS source_reference,
+               s.username, NULL::text AS full_name, s.title AS text_blob,
                ARRAY[]::text[] AS hashtags
-          FROM snapchat_spotlights
-         WHERE collected_at >= now() - interval '90 days'
-           AND (username IS NOT NULL OR title IS NOT NULL)
-         ORDER BY collected_at DESC LIMIT $1
+          FROM snapchat_spotlights s
+          LEFT JOIN snapchat_profiles profile ON LOWER(profile.username)=LOWER(s.username)
+         WHERE s.collected_at >= now() - interval '90 days'
+           AND profile.raw_payload->>'is_verified' IS DISTINCT FROM 'true'
+           AND profile.raw_payload->>'verified' IS DISTINCT FROM 'true'
+           AND profile.raw_payload->>'isVerified' IS DISTINCT FROM 'true'
+           AND profile.raw_payload->>'is_blue_verified' IS DISTINCT FROM 'true'
+           AND s.metadata->>'author_is_verified' IS DISTINCT FROM 'true'
+           AND s.metadata->>'is_verified' IS DISTINCT FROM 'true'
+           AND s.metadata->>'verified' IS DISTINCT FROM 'true'
+           AND s.metadata->>'is_blue_verified' IS DISTINCT FROM 'true'
+           AND (s.username IS NOT NULL OR s.title IS NOT NULL)
+         ORDER BY s.collected_at DESC LIMIT $1
     """),
     ("snapchat_highlights", """
-        SELECT 'snapchat' AS platform, highlight_id AS source_reference,
-               username, NULL::text AS full_name, title AS text_blob,
+        SELECT 'snapchat' AS platform, s.highlight_id AS source_reference,
+               s.username, NULL::text AS full_name, s.title AS text_blob,
                ARRAY[]::text[] AS hashtags
-          FROM snapchat_highlights
-         WHERE collected_at >= now() - interval '90 days'
-           AND (username IS NOT NULL OR title IS NOT NULL)
-         ORDER BY collected_at DESC LIMIT $1
+          FROM snapchat_highlights s
+          LEFT JOIN snapchat_profiles profile ON LOWER(profile.username)=LOWER(s.username)
+         WHERE s.collected_at >= now() - interval '90 days'
+           AND profile.raw_payload->>'is_verified' IS DISTINCT FROM 'true'
+           AND profile.raw_payload->>'verified' IS DISTINCT FROM 'true'
+           AND profile.raw_payload->>'isVerified' IS DISTINCT FROM 'true'
+           AND profile.raw_payload->>'is_blue_verified' IS DISTINCT FROM 'true'
+           AND s.metadata->>'author_is_verified' IS DISTINCT FROM 'true'
+           AND s.metadata->>'is_verified' IS DISTINCT FROM 'true'
+           AND s.metadata->>'verified' IS DISTINCT FROM 'true'
+           AND s.metadata->>'is_blue_verified' IS DISTINCT FROM 'true'
+           AND (s.username IS NOT NULL OR s.title IS NOT NULL)
+         ORDER BY s.collected_at DESC LIMIT $1
     """),
     ("telegram_chats", """
         SELECT 'telegram' AS platform, id::text AS source_reference,
