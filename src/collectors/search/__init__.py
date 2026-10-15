@@ -219,7 +219,10 @@ def _expand_dynamic_dorks(term: str) -> list[str]:
 
 _EXPLICIT_BADGE_JSON_FLAGS = (
     "author_is_verified",
+    "author_verified",
+    "verified_author",
     "channel_is_verified",
+    "channelIsVerified",
     "profile_is_verified",
     "is_verified",
     "verified",
@@ -229,6 +232,10 @@ _EXPLICIT_BADGE_JSON_FLAGS = (
     "blue_verified",
     "blueVerified",
     "verified_badge",
+    "verifiedBadge",
+    "is_verified_merchant",
+    "isVerifiedMerchant",
+    "verifiedMerchant",
 )
 _DYNAMIC_TERM_REFRESH_CURSOR = "search_dynamic_terms_v2"
 _DYNAMIC_TERM_BADGE_SCRUB_CURSOR = "search_verified_terms_scrub_v1"
@@ -237,7 +244,7 @@ _DYNAMIC_TERM_BADGE_SCRUB_CURSOR = "search_verified_terms_scrub_v1"
 def _explicit_badge_json_exclusion(json_expr: str) -> str:
     """Keep unknown verification signals and exclude explicit true badges."""
     return " AND ".join(
-        f"{json_expr}->>'{flag}' IS DISTINCT FROM 'true'"
+        f"COALESCE(LOWER(BTRIM({json_expr}->>'{flag}')), '') NOT IN ('true', '1', 'yes')"
         for flag in _EXPLICIT_BADGE_JSON_FLAGS
     )
 

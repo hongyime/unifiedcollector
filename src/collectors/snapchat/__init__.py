@@ -44,6 +44,19 @@ _NEXT_DATA_RE = re.compile(r'<script[^>]*id=["\']__NEXT_DATA__["\'][^>]*>(.*?)</
 _PUBLIC_PATH_RE = re.compile(r"^/(?:discover|spotlight|@[A-Za-z0-9._-]{1,100}|add/[A-Za-z0-9._-]{1,100}|profile/[A-Za-z0-9._-]{1,100})/?$")
 _REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 _MAX_PUBLIC_REDIRECTS = 5
+_VERIFIED_FLAGS = ("verified", "isVerified", "is_verified", "is_blue_verified")
+
+
+def _explicitly_verified(value: Any) -> bool:
+    """Recognize explicit verification values from public Snapchat payloads."""
+    if not isinstance(value, dict):
+        return False
+    return any(
+        (flag is True)
+        or (isinstance(flag, int) and not isinstance(flag, bool) and flag == 1)
+        or (isinstance(flag, str) and flag.strip().lower() in {"true", "1", "yes"})
+        for flag in (value.get(key) for key in _VERIFIED_FLAGS)
+    )
 
 
 def _decode_json_str(s: str) -> str:
@@ -171,9 +184,7 @@ def _make_public_snap_item(
         or _scalar(story.get("storySubtitle"))
     )
     creator = video.get("creator") or story.get("creator")
-    if isinstance(creator, dict) and any(
-        creator.get(key) is True for key in ("verified", "isVerified", "is_verified", "is_blue_verified")
-    ):
+    if _explicitly_verified(creator):
         return None
     username = _public_profile_handle(creator, fallback_username)
     posted = (
@@ -247,11 +258,7 @@ def _extract_public_snap_items(html: str, target_url: str, username: str | None)
         user_profile.get("publicProfileInfo")
         if isinstance(user_profile.get("publicProfileInfo"), dict) else {}
     )
-    if any(
-        obj.get(key) is True
-        for obj in (user_profile, profile_info)
-        for key in ("verified", "isVerified", "is_verified", "is_blue_verified")
-    ):
+    if any(_explicitly_verified(obj) for obj in (user_profile, profile_info)):
         return []
     page_username = _public_profile_handle(profile_info, username)
 

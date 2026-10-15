@@ -1307,7 +1307,7 @@
         "isVerifiedMerchant",
         "verifiedMerchant",
         "verified_badge"
-      ].some((key) => value[key] === true || typeof value[key] === "string" && /^(true|1|yes)$/i.test(value[key].trim()));
+      ].some((key) => value[key] === true || value[key] === 1 || typeof value[key] === "string" && /^(true|1|yes)$/i.test(value[key].trim()));
     }
     function hasVerifiedCreator(value, platform) {
       if (platform !== "tiktok") return false;
