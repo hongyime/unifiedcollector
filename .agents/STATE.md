@@ -1,48 +1,50 @@
 # Agent State
-Current task: Complete the UnifiedCollector Full Plan (2026-10-14), including the user's follow-first, verified-account, one-tab, and Telegram account/group decisions. Last reconciled: 2026-10-15 05:12 UTC; live evidence refreshed and checklist reconciled.
+Current task: Complete the UnifiedCollector Full Plan (2026-10-14). The checklist below is the single progress tracker and acceptance source. Last reconciled: 2026-10-15 05:24 UTC; latest DB evidence is 05:20 and container inventory is 05:16.
 
 ## Agreed scope and rules
 
-- Pinterest, Snapchat, and Airbnb are Phase 2 WIP; use original Phase 5a–5c acceptance criteria.
-- Pinterest/Snapchat prioritize followed identities; widen only when preferred queues drain and capacity remains. Airbnb starts from listings linked to followed identities, then broadens only with spare capacity.
-- Exclude only explicit blue-badge/verified metadata on Instagram, Snapchat, Pinterest, X, Threads, TikTok, and YouTube. Unknown stays eligible; do not infer from names or popularity.
-- Telegram may use all four current accounts, any accounts configured later, and all eligible groups. No group/account allowlist restriction.
-- Keep at most one extension-managed tab per social. Do not touch Spider/SpiderFoot files, print credentials, exceed provider backoffs, or interrupt Exposure/release its Search mutex.
+- Pinterest, Snapchat, and Airbnb remain Phase 2 work against the Full Plan's Phase 5a–5c acceptance criteria.
+- Start Pinterest/Snapchat from followed identities and Airbnb from listings linked to followed identities. Broaden only after preferred queues drain and capacity remains; this does not authorize changes to Spider/SpiderFoot.
+- Exclude accounts only when explicit blue-badge/verified metadata is present on Instagram, Snapchat, Pinterest, X, Threads, TikTok, or YouTube. Unknown remains eligible; never infer verification from names or popularity.
+- Telegram may use all four current accounts, any accounts configured later, and all eligible groups; no allowlist restriction.
+- Keep at most one extension-managed tab per social. Do not print credentials, exceed provider backoffs, or interrupt Exposure/release its Search mutex.
 - Checklist key: `[x]` verified, `[~]` in progress or awaiting evidence, `[ ]` not complete.
 
 ## Master checklist
 
 - [x] **Phase 1 — split and rename:** Exposure/Lemon8 and Search/Strava are separated; `instagram_ingest` is `browser_ingest`; changes are pushed.
-- [x] **Phase 2a — Beeper output:** Current DB sample at 05:11 shows 190 messages/15m and 740/1h. Include a fresh sample in the final soak.
-- [~] **Phase 2b — Lemon8 API + extension:** 1,521 posts total; 25 posts/12h, latest 04:09 (recounted at 05:11). Extension capture and dedupe are unverified. Runtime detail cap is 2 vs Compose 4. Cursor remains `running` at 02:22; source health last advanced 04:37:59 with zero crashes. Do not restart until the active collection call reaches a safe boundary.
-- [~] **Phase 2c — Pinterest, Snapchat, Airbnb:** Pinterest has 143 pins, 438 boards, and 3,121 profiles; only 1 pin has a description, the latest pin is from 00:52, and 10 followed-native targets remain pending. Its cookie-vault snapshot is healthy but the reachable Chrome profile has 0 cookies. Snapchat has 10 stories and 28 Spotlights in 12h, 20 highlights total, and 2,353 profiles; latest story/Spotlight is 02:39 and 9 followed-native targets remain pending. Airbnb has 4 listings and 14 reviews in 12h, 6 hosts, 0 host bios, and no followed-linked listing URL found yet. The slug/numeric host-route fix is loaded after the 05:04 worker restart; three host rows are waiting for the 05:50:30 retry, with 5 failed Airbnb queue rows total and none due yet.
-- [~] **Phase 3 — Telegram advanced features:** Four accounts are active: three cooldowns end at 06:01:03 UTC and the fourth at 06:21:41 UTC. At 05:11, discussion visits, poll-voter rows, join/leave events, and refreshed non-anonymous polls were all 0/12h; 593 member rows refreshed. Recheck the four features after cooldown.
-- [~] **Phase 4 — Search:** Badge-filtered dynamic sources and profile sources are committed. The v2 refresh ran at 04:37:56; all 10 active terms remain due and never searched (3 Instagram, 3 TikTok, 1 YouTube, 1 Airbnb, 1 GitHub, 1 WhatsApp). Search cursor is stale at 2026-10-14 00:59 and its health at 2026-10-14 16:51. Tables show 39 queries, 7,525 results, and 28 documents in 12h, but those tables are shared with Exposure and do not prove Search work. Exposure's idle DB session still owns the advisory lock; leave it untouched and verify Search after natural release.
-- [~] **Verified-account exclusion + extension:** Explicit metadata guards are implemented; Search changes are pushed as `95bff26c`. A live verified-account skip has not yet been exercised. Repo extension is v1.23.110; latest ingest evidence was v1.23.108. User reports logging in/reloading the extension; CUA exposes no browser surface. The reachable managed Chrome currently has one blank page, zero social pages, and zero cookies, so the reported login/reload is not reflected in the profile the collector can read.
-- [ ] **Final gate:** After phase gates pass, run a fresh 15-minute soak, refresh per-container rolling 12-hour evidence, and write `/tmp/unifiedcollector-plan-complete-20261014.md`.
+- [~] **Phase 2a — Beeper:** Live output is confirmed: 188 messages/15m and 722/1h at 05:20. The final 15-minute soak is still required.
+- [~] **Phase 2b — Lemon8 API + extension:** API output is 25 posts/12h (1,521 total), below the plan's 50+ target; newest post 04:09. Extension capture and URL/content-hash dedupe remain unverified. Runtime detail cap is 2 vs Compose 4. Cursor is still `running` at 02:22; do not restart until it reaches a safe idle boundary.
+- [~] **Phase 2c — Pinterest:** 143 pins/12h, 438 boards, 3,121 profiles; only 1 pin has a description, newest pin 00:52. Ten followed-native targets remain pending. Cookie-vault health is OK, but the collector-readable browser profile has 0 cookies, so authenticated capture is not verified.
+- [~] **Phase 2c — Snapchat:** 10 stories and 28 Spotlights/12h, 20 highlights total, 2,353 profiles; newest content 02:39. Ten followed-native targets remain pending (queue checked around 05:22). Keep those ahead of any broad discovery.
+- [~] **Phase 2c — Airbnb:** 4 listings and 14 reviews/12h, 6 hosts, 0 host bios. No followed-linked listing URL is queued yet. The slug/numeric host-route fix is loaded; three host retries are due 05:50:30, with five failed queue rows currently not due.
+- [~] **Phase 3 — Telegram advanced features:** All four accounts are active/authorized, and all eligible groups are in scope. Cooldowns extend through 06:21:41. At 05:20, discussion visits, poll-voter rows, refreshed non-anonymous polls, and join/leave events were 0 in 12h; 597 member rows refreshed, but full roster-field coverage is not yet verified. Recheck after cooldown.
+- [~] **Phase 4 — Search:** Badge-filtered dynamic/profile sources are committed; v2 term refresh ran at 04:37:56. All 10 active terms remain due and never searched. Search cursor (2026-10-14 00:59) and source health (2026-10-14 16:51) are stale. Shared tables show 43 queries, 7,525 results, and 28 documents/12h, but cannot attribute those rows to Search. Exposure owns the shared advisory lock; verify Search only after its natural release.
+- [~] **Verified-account exclusion + extension:** Explicit metadata guards are implemented, but no live verified-account skip has exercised them. User reports sign-in/reload; the collector-readable profile still shows 0 cookies and no social tabs, and CUA has no browser surface. Tab count, extension runtime version, and session capture therefore remain unverified. Enforce at most one managed tab per social when browser access is available.
+- [ ] **Final gate:** Once phase gates pass, run a fresh 15-minute soak, refresh per-container rolling 12-hour evidence, and write `/tmp/unifiedcollector-plan-complete-20261014.md`.
 
 ## Ordered next actions
 
-1. Keep Exposure uninterrupted and leave its Search mutex alone. Its cursor and health are active, while Search cursor/health remain stale and all 10 dynamic terms are due. Verify Search's own queries, results, and documents only after natural lock release.
-2. Let Lemon8 reach a safe idle boundary before recreating just `collector_lemon8` to load detail cap 4; verify API volume, extension capture, and URL/content-hash dedupe.
-3. Keep followed-native queues first. Verify Snapchat targets and content, Pinterest authenticated capture/captions, and Airbnb host profiles after its 05:50:30 retry; do not broaden discovery before preferred queues drain and capacity remains.
-4. After Telegram cooldowns expire at 06:21:41, verify discussion visits and non-anonymous poll voters across all four accounts and eligible groups; inspect roster fields and join/leave events.
-5. Keep at most one extension-managed tab per social. Browser UI is unavailable to CUA; reachable Chrome still has one blank page and no session cookies. Audit tabs before any requested tab changes.
-6. After all phase gates pass, perform the 15-minute soak, refresh per-container 12-hour evidence, and write `/tmp/unifiedcollector-plan-complete-20261014.md`.
+1. Keep Exposure running and leave its Search mutex untouched. Search has 10 due terms and stale cursor/health; verify its own query, result, and document rows after natural lock release.
+2. Wait for Lemon8's safe idle boundary, then reload only `collector_lemon8` to apply detail cap 4. Verify 50+ posts/12h, extension candidates, and URL/content-hash dedupe.
+3. Keep followed targets first. Check Airbnb host retries after 05:50:30; verify linked listing targets, Pinterest authenticated pins/captions, and Snapchat follow-target/content coverage before considering broader discovery.
+4. After the Telegram cooldown ends at 06:21:41, check discussion visits, non-anonymous poll voters, member roster fields, and join/leave events across all four accounts and eligible groups.
+5. When browser access is visible, verify the user's reported login/reload, extension capture, and one-managed-tab-per-social limit. Do not open, navigate, or close tabs as part of this check.
+6. After the phase gates pass, run the 15-minute soak, refresh the per-container 12-hour report, and write `/tmp/unifiedcollector-plan-complete-20261014.md`.
 
-## Latest evidence snapshot — 2026-10-15 05:12 UTC
+## Latest evidence snapshot — 2026-10-15 05:22 UTC (DB sample 05:20; containers checked 05:16)
 
-- All 30 UnifiedCollector containers are running; none are unhealthy or exited. Beeper sample at 05:11: 190 messages/15m and 740/1h. The final soak and per-container 12-hour report remain pending.
-- Lemon8 has 25 posts/12h (1,521 total), latest 04:09. Cursor remains running at 02:22; source health last advanced 04:37:59. Runtime detail cap is 2 vs Compose 4; no safe idle boundary yet.
-- Pinterest has 143 pins/12h, 438 boards, and 3,121 profiles; only 1 pin contains a description. Latest pin is 00:52; 10 followed targets remain pending. Cookie-vault health is OK on reachable Chrome endpoint 9336, but its snapshot has 0 cookies and the profile has one blank page, no social tabs. No page was opened, navigated, or closed.
-- Snapchat has 10 stories and 28 Spotlights/12h, 20 highlights total, and 2,353 profiles. Latest story/Spotlight is 02:39; 9 followed-native targets remain pending. Airbnb has 4 listings and 14 reviews/12h, 6 hosts, and 0 host bios; latest listing/review is 23:05/22:58. Fix 338bf6d8 is loaded after the 05:04 restart; three host rows are due at 05:50:30. Five Airbnb queue rows are failed, none due.
-- Telegram has 4 active accounts; discussion visits, poll votes, refreshed non-anonymous polls, and join/leave events remain 0/12h. 593 member rows refreshed/12h. Cooldowns run through 06:21:41.
-- Search has 10 active terms due/unsearched, stale cursor at 2026-10-14 00:59, and stale source health at 2026-10-14 16:51. Shared tables contain 39 queries, 7,525 results, and 28 documents/12h, which cannot be attributed to Search. Exposure's idle DB session owns the advisory lock; do not interrupt Exposure or release it.
-- Verified-account guards are committed; no live verified skip has been observed. The source extension is v1.23.110 and last ingest evidence was v1.23.108. CUA exposes no browser surface. Cookie-vault auto-restore is disabled in local runtime config while the authenticated profile is absent. No tests or provider requests were run for this refresh.
+- All 30 UnifiedCollector containers were running; none were unhealthy or exited. Beeper: 188 messages/15m, 722/1h.
+- Lemon8: 25 posts/12h (1,521 total), newest 04:09. Cursor remains running at 02:22; source health last advanced 04:37:59. Runtime detail cap is 2 vs Compose 4; no safe idle boundary observed.
+- Pinterest: 143 pins/12h, 438 boards, 3,121 profiles; only 1 pin has a description. Ten followed targets pending. Cookie-vault health is OK on reachable Chrome 9336, but its snapshot has 0 cookies and the only page is `chrome://newtab/`. No tabs were changed.
+- Snapchat: 10 stories and 28 Spotlights/12h, 20 highlights total, 2,353 profiles; newest content 02:39. Pinterest and Snapchat each have 10 followed-native targets pending (queue checked around 05:22). Airbnb: 4 listings, 14 reviews, 6 hosts, 0 host bios; newest listing/review 23:05/22:58. Three host retries are due 05:50:30; five failed rows are not due.
+- Telegram: 4 active accounts; 0 discussion visits, poll-voter rows, refreshed non-anonymous polls, or join/leave events in 12h; 597 member rows refreshed. Cooldowns extend through 06:21:41.
+- Search: 10 due/unsearched terms; stale cursor/health. Its tables show 43 queries, 7,525 results, 28 documents/12h, but Exposure shares these tables and owns the mutex. Do not interrupt Exposure or release the lock.
+- Verified-account guards are committed; live skip remains unobserved. Source extension is v1.23.110; latest ingest evidence is v1.23.108. CUA exposes no browser surface. No tests, provider requests, tab changes, or collector restarts were made for this refresh.
 
 ## Current handoff
 
-The supplied Full Plan remains the acceptance source. This is the single active checklist; notes below are historical. Continue from the ordered gates above.
+The Full Plan and the checklist above are the active acceptance source. The tracker was stale at 05:12 despite newer evidence; this refresh reconciles it to the 05:20 DB sample and 05:16 container inventory. Continue from the ordered gates above and update this checklist after each meaningful verification or change.
 
 ## Prior handoff history
 
