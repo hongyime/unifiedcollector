@@ -774,6 +774,25 @@ class Lemon8Collector(BaseCollector):
         seed = "|".join(seed_parts)
         return "fyp_" + hashlib.sha256(seed.encode("utf-8", "ignore")).hexdigest()[:32]
 
+    @staticmethod
+    def _feed_item_post_id(item: dict) -> str:
+        """Return a provider post ID or one encoded in a card href."""
+        for key in (
+            "id", "itemId", "item_id", "note_id", "noteId",
+            "card_id", "cardId", "post_id", "postId", "aweme_id", "awemeId",
+        ):
+            value = item.get(key)
+            if value not in (None, ""):
+                post_id = str(value).strip()
+                if post_id and post_id.lower() not in {"none", "null", "0"}:
+                    return post_id
+        href = item.get("href")
+        if isinstance(href, str):
+            match = re.search(r"/(\d{10,24})(?:[/?#]|$)", href)
+            if match:
+                return match.group(1)
+        return ""
+
     async def _link_lemon8_media(
         self, note_id: str, username: str, url: str, is_video: bool,
         *, collection_surface: str = "for_you",
@@ -1325,6 +1344,41 @@ class Lemon8Collector(BaseCollector):
         detail_seen: set[str] = set()
         post_fields_upserted: set[str] = set()
         detail_fetches = 0
+        # Persist captioned cards even when the feed omits its platform ID.
+        # Media-only cards remain media records so they do not inflate post counts.
+        fallback_feed_posts: dict[tuple[str, str, str], dict[str, Any]] = {}
+        for item in media_items[:max_media]:
+            if not isinstance(item, dict) or item.get("is_profile_photo"):
+                continue
+            if self._feed_item_post_id(item):
+                continue
+            title = item.get("title") if isinstance(item.get("title"), str) else ""
+            description = item.get("description") if isinstance(item.get("description"), str) else ""
+            title = title.strip()
+            description = description.strip()
+            if not title and not description:
+                continue
+            username = str(item.get("username") or "feed").strip().lstrip("@") or "feed"
+            key = (
+                username.casefold(),
+                re.sub(r"\s+", " ", title).casefold(),
+                re.sub(r"\s+", " ", description).casefold(),
+            )
+            record = fallback_feed_posts.setdefault(key, {
+                "username": username,
+                "title": title,
+                "description": description,
+                "media": {},
+                "stats": item.get("stats") if isinstance(item.get("stats"), dict) else {},
+            })
+            media_url = item.get("url")
+            if isinstance(media_url, str) and media_url.strip():
+                normalized_url = _enhance_image_url(media_url.strip()) if self._enhance_urls else media_url.strip()
+                record["media"][normalized_url] = {
+                    "url": normalized_url,
+                    "media_type": str(item.get("media_type") or "image"),
+                }
+
         for item in media_items[: max_media]:
             if self._stop.is_set(): break
             url = item.get("url")
@@ -1342,13 +1396,7 @@ class Lemon8Collector(BaseCollector):
             # embed it in content_id AND link it into lemon8_posts.image_urls/video_url
             # (was 0% — the media existed only as loose files). Falls back to the old
             # feed_<hash> key when the card exposes no id (algorithmic FYP thumbnails).
-            note_id = ""
-            if not item.get("is_profile_photo"):
-                note_id = str(item.get("note_id") or item.get("itemId") or item.get("item_id") or "")
-                if not note_id and item.get("href"):
-                    nm = re.search(r'/(\d{10,20})(?:\?|$)', item["href"])
-                    if nm:
-                        note_id = nm.group(1)
+            note_id = "" if item.get("is_profile_photo") else self._feed_item_post_id(item)
             uhash = hashlib.sha256(url.encode("utf-8", "ignore")).hexdigest()
             content_id = f"{note_id}_{uhash}" if note_id else "feed_" + uhash
             enhanced_url = _enhance_image_url(url) if self._enhance_urls else url
@@ -1414,6 +1462,43 @@ class Lemon8Collector(BaseCollector):
                 "raw": item,
                 "collection_surface": "for_you",
             })
+
+        fallback_posts_saved = 0
+        for record in fallback_feed_posts.values():
+            media = sorted(record["media"].values(), key=lambda entry: entry["url"])
+            if not media:
+                continue
+            stable_media_urls = []
+            for entry in media:
+                parsed = urlparse(entry["url"])
+                stable_media_urls.append(urlunparse((
+                    parsed.scheme, parsed.netloc, parsed.path, parsed.params, "", "",
+                )))
+            stable_seed = json.dumps([
+                record["username"].casefold(),
+                record["title"],
+                record["description"],
+                sorted(set(stable_media_urls)),
+            ], ensure_ascii=False, separators=(",", ":"))
+            synthetic_id = "fyp_" + hashlib.sha256(stable_seed.encode("utf-8", "ignore")).hexdigest()[:32]
+            saved = await self._upsert_post(
+                record["username"],
+                {
+                    "id": synthetic_id,
+                    "title": record["title"],
+                    "description": record["description"],
+                    "media": media,
+                    "stats": record["stats"],
+                },
+                collection_surface="for_you",
+            )
+            if saved:
+                fallback_posts_saved += 1
+        if fallback_posts_saved:
+            logger.info(
+                "Lemon8 FYP: persisted %d text-bearing card(s) with deterministic fallback IDs",
+                fallback_posts_saved,
+            )
 
     async def _collect_tag(self, client: httpx.AsyncClient, tag_id: str):
         """Scrape a topic/tag landing page using the same web-extraction pipeline as feed."""
