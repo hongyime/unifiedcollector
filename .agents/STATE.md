@@ -1,7 +1,7 @@
 # Agent State
 Current task: Complete the UnifiedCollector Full Plan (2026-10-14), including the user's later verified-account, follow-priority, one-tab, and Phase 2 native-collector clarifications.
-Status snapshot — verified 2026-10-15 02:46 UTC (collector DB 02:38–02:39; Docker 02:46).
-- Runtime: 30/33 UnifiedCollector containers running, 24 healthy, 0 unhealthy; 3 legacy containers exited. Beeper is adding 165 messages/15m and 741/1h.
+Status snapshot — verified 2026-10-15 02:50 UTC (collector DB 02:49; Docker 02:50).
+- Runtime: 30/33 UnifiedCollector containers running, 24 healthy, 0 unhealthy; 3 retired containers exited. Beeper is adding 159 messages/15m and 752/1h.
 - Lemon8: 27 posts/12h, 0/15m, 0 extension rows; newest post 01:43. Cursor stayed `running` across a verified one-minute wait, last progress 02:22:08; source health refreshed at 02:38 with no error. Runtime detail cap is 2 vs Compose 4; do not restart until `idle`.
 - Native: Pinterest 143 pins (1 description, 0 destinations), Snapchat 9 Stories/24 Spotlights/0 Highlights, Airbnb 4 listings/14 reviews. Followed queues: Pinterest 9 pending/98 failed, Snapchat 9 pending/50 failed. In the last 20m logs, Pinterest had 24 and Snapchat 20 error markers, with 0 tracebacks/429s; Airbnb had 0 error markers.
 - Telegram: 4/4 session env slots nonempty; 4 persisted accounts active; allowlist empty; 10 discussion rechecks pending. Latest 12h data: 0 visits, 0 voter refreshes; 10 polls refreshed and all anonymous; 223,893 member rows (203,824 joined_at), 1 join/leave event. Latest observed FloodWait deadlines are 06:01–06:21 UTC.
@@ -16,14 +16,14 @@ Status snapshot — verified 2026-10-15 02:46 UTC (collector DB 02:38–02:39; D
 - Keep at most one extension-managed tab per social platform. Snapchat Requests and Airbnb GraphQL do not need extension tabs; Pinterest's Playwright context is separate from an extension tab. The user reports the extension panel says Strava/Pinterest scraper active while Pinterest/Snapchat/Airbnb show no tab. This panel state does not prove live collection. Repo v1.23.110 clears expanded-tab mode and deduplicates on startup; live heartbeats still report v1.23.108, so live rollout and tab count are unverified.
 - Do not touch Spider/SpiderFoot files, print credentials, exceed provider backoffs, or interrupt Exposure/release its shared search-engine mutex.
 
-Checklist key: `[x]` verified, `[~]` in progress or awaiting live evidence, `[ ]` not complete.
+Checklist key: `[x]` verified, `[~]` in progress or awaiting live evidence, `[ ]` not complete. This is the active tracker mapped to the supplied Full Plan; `[~]` items are the remaining acceptance gates.
 
 ## Active checklist
 
-Latest evidence snapshot is 02:38–02:39 UTC. `[~]` means partial implementation/output exists, but an acceptance gate still needs live proof.
+Latest evidence snapshot is 02:49 UTC for DB metrics and 02:50 UTC for containers. `[~]` means partial implementation/output exists, but an acceptance gate still needs live proof.
 
 - [x] **Phase 1 — service split and rename:** Exposure/Lemon8 and Search/Strava are separate; `instagram_ingest` is renamed `browser_ingest`; changes are pushed. Runtime: 30/33 running, 24 healthy, 0 unhealthy; 3 legacy containers exited.
-- [x] **Phase 2a — Beeper:** 165 messages/15m and 741/1h at 02:38. Include another sample in the final soak.
+- [x] **Phase 2a — Beeper:** 159 messages/15m and 752/1h at 02:49. Include another sample in the final soak.
 - [~] **Phase 2b — Lemon8 API + extension:** API has 27 posts/12h, below the 50+ goal; 0 posts/15m and 0 extension rows. The cursor stayed `running` after a one-minute poll, its last progress is 02:22:08, and source health refreshed at 02:38 without error. Runtime cap 2 vs Compose 4. Wait for `idle`, recreate only Lemon8 to load cap 4, then verify API output, extension capture, and URL/content-hash dedupe on a populated feed.
 - [~] **Phase 2c — Pinterest, Snapchat, Airbnb (original Phase 5):** These remain Phase 2 WIP. Pinterest/Snapchat start from followed identities; broaden only when preferred work drains and capacity remains. Airbnb starts from listing links associated with followed identities, then broadens only with spare capacity.
 - [~] **Phase 3 — Telegram's four advanced features:** (1) linked-discussion join/scrape/leave and visit rows, (2) non-anonymous poll voters where available, (3) member roster fields, (4) join/leave events. Runtime has four nonempty session slots, four persisted active accounts, and an empty spider allowlist; all eligible groups/accounts are permitted. Latest: 0 visits; 10 discussion rechecks pending; 0 voter refreshes; 10 polls refreshed, all anonymous; 223,893 member rows, 203,824 with `joined_at`, and 1 join/leave event. Latest observed FloodWait deadlines are 06:01–06:21 UTC. Recheck visits after that window; voter rows are only expected when non-anonymous polls are available.
