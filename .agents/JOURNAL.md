@@ -826,3 +826,5 @@ Machine-specific values in this document use privacy placeholders.
 2026-10-15 22:03 UTC Pinterest deployment hold: focused native scraper tests passed and the roster/seeder code review found no issue. The Pinterest container is still on its old process, while a fresh Docker stats sample shows PostgreSQL at 266.23% CPU. Defer the Pinterest restart until database load settles; no browser, queue, or cookie state changed.
 
 2026-10-15 22:04 UTC execution checklist refreshed: Updated the existing `/tmp/unifiedcollector-plan-complete-20261014.md` with current phase gates, the user's all-groups Telegram scope, Pinterest's 27-profile roster and pushed commit, current service output, and remaining cooldown/load blockers. No container or browser state changed.
+
+2026-10-15 22:05 UTC load recheck: PostgreSQL Docker CPU eased from 266.23% at 22:03 to 173.28%, but Pinterest is using 459.2/512 MiB. Keep its restart deferred. The git worktree is clean after pushing the roster and checklist commits; no browser or container state changed.
