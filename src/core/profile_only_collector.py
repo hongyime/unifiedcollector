@@ -50,7 +50,7 @@ _FOLLOW_GRAPH_SOURCE_SQL = """
                f.last_seen
           FROM follow_edges f
          WHERE f.direction='following'
-               AND f.platform IN ('instagram','x','tiktok','threads','pinterest','snapchat')
+               AND f.platform IN ('github','instagram','x','tiktok','threads','pinterest','snapchat')
                AND BTRIM(COALESCE(f.target_username,'')) ~ '^[A-Za-z0-9._-]{1,100}$'
            AND NOT EXISTS (
                 SELECT 1 FROM instagram_profiles p
