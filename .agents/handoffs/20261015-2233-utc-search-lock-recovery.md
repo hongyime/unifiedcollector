@@ -1,6 +1,6 @@
 # UnifiedCollector full-plan handoff
 
-Updated: 2026-10-15 22:45 UTC
+Updated: 2026-10-15 22:47 UTC
 
 ## Scope and state
 
@@ -15,9 +15,12 @@ Continue the full UnifiedCollector plan supplied in the conversation; do not red
 - Beeper has 12,018 messages/12h; Lemon8 API has 110 posts. Lemon8 extension media events in the 12h window have 62 stored rows and 968 dedupe outcomes; the most recent partial For You event is 18:51 UTC. The current visible page is not producing fresh For You content.
 - Telegram has 0 discussion visits/12h, 7 polls refreshed/12h with 0 voter rows, 710 refreshed members, and 1 join/leave event. All four Telegram accounts remain FloodWait-limited through 2026-10-16 06:22:07 UTC. No account allowlist is set; all configured groups/accounts remain eligible. Do not restart before expiry.
 - Search has 283 queries and 7,599 results/12h, 0 documents indexed/12h, and 10 due/unsearched terms. Exposure was restarted alone at 22:34:11 UTC; the old idle backend session disappeared. Search acquired the advisory key and currently holds it while a live HTTPS connection is open. At 22:45 it had not written query/result/document rows or advanced a dynamic term in the latest 5m; no rate/error signal appeared. Leave the live request alone and recheck its completion. Exposure's last success was 22:41:16; Search's last success remains 2026-10-14 16:51:50.
-- X's live content script v1.23.118 repeatedly reported `try_again_empty_state`. The previous form guard did not prevent X's retry-button handler from detaching the form during the click's default action. Updated only this X recovery reason to use the existing paced navigation fallback, avoiding the native button. Extension v1.23.119 is built; the regression assertion failed against the old bundle, then passed after the change. All 45 `tests/extension/test_extension_bundle_static.py` tests pass. Compose expects 1.23.119, but the live Chrome browser still runs 1.23.118. CUA exposes no browser control; user needs to reload the existing extension and then the existing X tab before runtime verification.
+- X's live content script v1.23.118 repeatedly reported `try_again_empty_state`. The previous form guard did not prevent X's retry-button handler from detaching the form during the click's default action. Updated only this X recovery reason to use the existing paced navigation fallback, avoiding the native button. Extension v1.23.119 is built; the regression assertion failed against the old bundle, then passed after the change. All 45 `tests/extension/test_extension_bundle_static.py` tests pass. Compose services `browser_ingest`, `scheduler`, and `dashboard` were recreated at 22:47 and now expect 1.23.119. Chrome still runs 1.23.118. CUA exposes no browser control; user needs to reload the existing extension and then the existing X tab before runtime verification.
 
 ## Next actions
+
+A post-deploy soak of the updated bridge/scheduler/dashboard began at 22:47:19 UTC and ends at 23:02:19 UTC.
+
 
 1. Let Search's current HTTPS request finish, then verify Search `last_success_at`, dynamic terms, query/results, and documents. Do not restart while its provider socket is live.
 2. Recreate only the three Compose services that carry `UC_EXTENSION_EXPECTED_VERSION` (`browser_ingest`, `scheduler`, `dashboard`) when operational load permits; their containers still have 1.23.118 until recreated.
