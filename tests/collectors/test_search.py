@@ -901,7 +901,8 @@ async def test_dynamic_search_query_uses_rotating_approved_dork(monkeypatch):
     monkeypatch.setenv("SEARCH_DYNAMIC_TERM_CAP", "1")
     coll = SearchCollector()
     pool = _make_pool()
-    pool._conn.fetchval = AsyncMock(return_value=True)
+    # The verified-term cleanup marker already exists on this recurring cycle.
+    pool._conn.fetchval = AsyncMock(return_value=None)
 
     async def fetch(query, *args, **kwargs):
         if "FROM search_dynamic_terms" in query:
@@ -935,7 +936,8 @@ async def test_dynamic_term_refresh_runs_each_collection_cycle_by_default(monkey
 
     await coll._refresh_dynamic_search_terms(pool._conn)
 
-    assert not pool._conn.fetchval.await_args_list
+    assert pool._conn.fetchval.await_count == 1
+    assert pool._conn.fetchval.await_args.args[1] == search_mod._DYNAMIC_TERM_BADGE_SCRUB_CURSOR
     assert pool._conn.fetch.await_count == len(search_mod._DYNAMIC_TERM_SOURCE_QUERIES)
     assert any("FROM airbnb_listings" in call.args[0] for call in pool._conn.fetch.await_args_list)
 
