@@ -23,6 +23,7 @@ from src.collectors.snapchat import (
     _allowed_public_page,
     _extract_public_snap_items,
     _retry_after_seconds,
+    _snapchat_add_profile_url,
 )
 
 
@@ -428,10 +429,18 @@ def test_snapchat_allowlist_limits_requests_to_public_pages():
     assert _allowed_public_page("https://www.snapchat.com/discover")
     assert _allowed_public_page("https://www.snapchat.com/spotlight")
     assert _allowed_public_page("https://www.snapchat.com/@alice")
+    assert _allowed_public_page("https://www.snapchat.com/add/alice")
     assert _allowed_public_page("https://story.snapchat.com/@alice")
     assert not _allowed_public_page("https://www.snapchat.com/chat/alice")
     assert not _allowed_public_page("http://www.snapchat.com/discover")
     assert not _allowed_public_page("https://evil.example/discover")
+
+
+def test_snapchat_add_profile_url_only_accepts_safe_handles():
+    assert _snapchat_add_profile_url("alice") == "https://www.snapchat.com/add/alice"
+    assert _snapchat_add_profile_url("@alice.name") == "https://www.snapchat.com/add/alice.name"
+    assert _snapchat_add_profile_url("../outside") is None
+    assert _snapchat_add_profile_url(None) is None
 
 
 def test_snapchat_native_seeds_global_public_discover_and_spotlight_pages():
@@ -567,6 +576,89 @@ def test_snapchat_story_page_parser_emits_each_public_content_type():
         "https://cf-st.sc-cdn.net/highlight.mp4",
         "https://cf-st.sc-cdn.net/spotlight.mp4",
     }
+
+
+@pytest.mark.asyncio
+async def test_snapchat_native_scrape_falls_back_to_public_add_page_on_story_404(monkeypatch):
+    profile_html = '''<script id="__NEXT_DATA__" type="application/json">{
+      "props":{"pageProps":{"userProfile":{"publicProfileInfo":{"username":"alice"}},
+        "curatedHighlights":[{"highlightId":"highlight-1","storyTitle":"Trip",
+          "snapList":[{"snapId":"highlight-snap",
+            "snapUrls":{"mediaUrl":"https://cf-st.sc-cdn.net/highlight.mp4"}}]}]}}
+    }</script>'''
+    calls = []
+
+    def fetch(url):
+        calls.append(url)
+        if url == "https://story.snapchat.com/@alice":
+            raise _PublicPageHttpError(404)
+        return profile_html
+
+    monkeypatch.setattr(
+        snapchat_mod.SnapchatCollector,
+        "_fetch_public_page",
+        staticmethod(fetch),
+    )
+    collector = object.__new__(snapchat_mod.SnapchatCollector)
+
+    final_url, items = await collector._scrape_public_items(
+        "https://story.snapchat.com/@alice", "alice",
+    )
+
+    assert calls == [
+        "https://story.snapchat.com/@alice",
+        "https://www.snapchat.com/add/alice",
+    ]
+    assert final_url == "https://www.snapchat.com/add/alice"
+    assert len(items) == 1
+    assert items[0]["metadata"]["content_type"] == "highlight"
+
+
+@pytest.mark.asyncio
+async def test_snapchat_native_scrape_does_not_fallback_after_rate_limit(monkeypatch):
+    calls = []
+
+    def fetch(url):
+        calls.append(url)
+        raise _PublicPageHttpError(429, 900)
+
+    monkeypatch.setattr(
+        snapchat_mod.SnapchatCollector,
+        "_fetch_public_page",
+        staticmethod(fetch),
+    )
+    collector = object.__new__(snapchat_mod.SnapchatCollector)
+
+    with pytest.raises(_PublicPageHttpError) as error:
+        await collector._scrape_public_items(
+            "https://story.snapchat.com/@alice", "alice",
+        )
+
+    assert error.value.retry_after_seconds == 900
+    assert calls == ["https://story.snapchat.com/@alice"]
+
+
+@pytest.mark.asyncio
+async def test_snapchat_native_scrape_stops_on_explicit_verified_badge(monkeypatch):
+    calls = []
+
+    def fetch(url):
+        calls.append(url)
+        return '<div aria-label="Verified account"></div>'
+
+    monkeypatch.setattr(
+        snapchat_mod.SnapchatCollector,
+        "_fetch_public_page",
+        staticmethod(fetch),
+    )
+    collector = object.__new__(snapchat_mod.SnapchatCollector)
+
+    with pytest.raises(RuntimeError, match="verified_account_excluded"):
+        await collector._scrape_public_items(
+            "https://story.snapchat.com/@alice", "alice",
+        )
+
+    assert calls == ["https://story.snapchat.com/@alice"]
 
 
 def test_snapchat_item_cap_gives_each_content_type_a_bounded_share():

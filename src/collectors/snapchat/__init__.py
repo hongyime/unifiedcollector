@@ -76,6 +76,14 @@ def _allowed_public_page(url: str) -> bool:
     )
 
 
+def _snapchat_add_profile_url(username: str | None) -> str | None:
+    """Return the canonical public profile URL for a safe handle."""
+    handle = str(username or "").strip().lstrip("@")
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,100}", handle):
+        return None
+    return f"https://www.snapchat.com/add/{handle}"
+
+
 def _retry_after_seconds(value: Any, *, now: datetime | None = None) -> int | None:
     """Parse either Retry-After delta-seconds or its HTTP-date form."""
     text = str(value or "").strip()
@@ -555,10 +563,7 @@ class SnapchatCollector(ProfileOnlyCollector):
         target_url = str(target["target_url"])
         username = str(target["username"]) if target.get("username") else None
         try:
-            html = await asyncio.to_thread(self._fetch_public_page, target_url)
-            items = _extract_public_snap_items(html, target_url, username)
-            if not items:
-                raise RuntimeError("empty_public_page")
+            target_url, items = await self._scrape_public_items(target_url, username)
             async with self.pool.acquire() as conn:
                 async with conn.transaction():
                     for item in items:
@@ -589,6 +594,12 @@ class SnapchatCollector(ProfileOnlyCollector):
             )
             summary["items"] = len(items)
         except Exception as exc:
+            if str(exc) == "verified_account_excluded":
+                await finish_native_target(
+                    self.pool, self.SOURCE_NAME, int(target["id"]), success=True,
+                )
+                summary["excluded_verified"] = 1
+                return summary
             is_empty = str(exc) == "empty_public_page"
             attempts = int(target.get("attempts") or 1)
             exponential_retry = min(24 * 60 * 60, 15 * 60 * (2 ** min(max(attempts - 1, 0), 6)))
@@ -613,6 +624,41 @@ class SnapchatCollector(ProfileOnlyCollector):
             logger.warning("Snapchat public scrape failed: %s", error)
             summary["error"] = error
         return summary
+
+    async def _scrape_public_items(
+        self, target_url: str, username: str | None,
+    ) -> tuple[str, list[dict[str, Any]]]:
+        """Try the story page, then Snapchat's public /add profile page.
+
+        Some followed accounts publish Highlights on their public profile page
+        even when the story URL returns 404 or has no story payload. The second
+        request is limited to that public profile URL and is only made when the
+        primary page is missing/empty; 403/429 and other request errors retain
+        their existing backoff behavior.
+        """
+        fallback_url = _snapchat_add_profile_url(username)
+        urls = [target_url]
+        if fallback_url and fallback_url != target_url:
+            urls.append(fallback_url)
+
+        for index, url in enumerate(urls):
+            try:
+                html = await asyncio.to_thread(self._fetch_public_page, url)
+            except _PublicPageHttpError as exc:
+                if exc.status_code == 404 and index + 1 < len(urls):
+                    continue
+                raise
+
+            if self._page_has_explicit_verified_badge(html):
+                raise RuntimeError("verified_account_excluded")
+            items = _extract_public_snap_items(html, url, username)
+            if items:
+                return url, items
+            if index + 1 < len(urls):
+                continue
+            raise RuntimeError("empty_public_page")
+
+        raise RuntimeError("empty_public_page")
 
 
 __all__ = ["SnapchatCollector"]
