@@ -22,7 +22,7 @@ import time
 from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import quote, urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -36,6 +36,10 @@ logger = logging.getLogger(__name__)
 _DISPLAY_RE = re.compile(r'"first_name"\s*:\s*"((?:[^"\\]|\\.)*?)"')
 _LAST_RE = re.compile(r'"last_name"\s*:\s*"((?:[^"\\]|\\.)*?)"')
 _AVATAR_RE = re.compile(r'"picture_url"\s*:\s*"((?:[^"\\]|\\.)*?)"')
+_PROFILE_BIO_RE = re.compile(
+    r'"(?:hostProfileDescription|aboutMe|about_me|about|biography|bio|htmlText)"\s*:\s*"((?:[^"\\]|\\.)*?)"',
+    re.IGNORECASE,
+)
 _HOST_SINCE_RE = re.compile(r'"created_at"\s*:\s*"(\d{4}-\d{2}-\d{2})')
 _SUPERHOST_RE = re.compile(r'"is_superhost"\s*:\s*(true|false)')
 _LOCATION_RE = re.compile(r'"location"\s*:\s*"((?:[^"\\]|\\.)*?)"')
@@ -47,6 +51,7 @@ _REVIEWS_RE = re.compile(r'"reviews_count"\s*:\s*(\d+)')
 _PDP_SECTIONS_HASH = "80c7889b4b0027d99ffea830f6c0d4911a6e863a957cbe1044823f0fc746bf1f"
 _PDP_REVIEWS_HASH = "dec1c8061483e78373602047450322fd474e79ba9afa8d3dbbc27f504030f91d"
 _PDP_AVAILABILITY_HASH = "8f08e03c7bd16fcad3c92a3592c19a8b559a0d0855a84028d1163d4733ed9ade"
+_USER_PROFILE_HASH = "a56d8909f271740ccfef23dd6c34d098f194f4a6e7157f244814c5610b8ad76a"
 _AIRBNB_API_KEY_RE = re.compile(r'"api_config"\s*:\s*\{[^{}]*"key"\s*:\s*"([^"]+)"')
 _AIRBNB_HOSTS = frozenset({
     "airbnb.com", "www.airbnb.com", "airbnb.com.sg", "www.airbnb.com.sg",
@@ -54,6 +59,7 @@ _AIRBNB_HOSTS = frozenset({
 })
 _LISTING_PATH_RE = re.compile(r"^/rooms/(\d{1,24})/?$")
 _HOST_PATH_RE = re.compile(r"^/users/show/(\d{1,20})/?$")
+_HOST_PROFILE_PATH_RE = re.compile(r"^/users/profile/([A-Za-z0-9._-]{1,100})/?$")
 _AIRBNB_DEFAULT_BASE_URL = "https://www.airbnb.com"
 _AIRBNB_API_KEY_CACHE: tuple[str, str, float] | None = None
 _AIRBNB_REGION_CACHE: tuple[str, float] | None = None
@@ -69,6 +75,9 @@ class _AirbnbPublicHttpError(RuntimeError):
 _AIRBNB_SAFE_ERROR_CODES = frozenset({
     "graphql_payload_unavailable",
     "graphql_query_failed",
+    "host_profile_page_unavailable",
+    "host_profile_payload_unavailable",
+    "host_profile_unavailable",
     "host_listing_unavailable",
     "listing_page_payload_unavailable",
     "listing_page_unavailable",
@@ -606,6 +615,43 @@ def _parse_airbnb_reviews(payload: dict[str, Any], listing_id: str) -> list[dict
     return results
 
 
+def _parse_airbnb_host_profile(payload: dict[str, Any], host_id: str) -> dict[str, Any]:
+    """Extract the public host fields returned by Airbnb's GetUserProfile query."""
+    profile = _find_node(payload, ("userProfile", "profile"))
+    if not isinstance(profile, dict):
+        profile = payload
+
+    first_name = _text_value(_find_scalar(profile, ("firstName",)), 150)
+    last_name = _text_value(_find_scalar(profile, ("lastName",)), 150)
+    display_name = _text_value(_find_scalar(profile, ("displayName", "name")), 300)
+    if not display_name:
+        display_name = " ".join(part for part in (first_name, last_name) if part) or None
+
+    bio = _airbnb_text(_find_scalar(
+        profile,
+        ("hostProfileDescription", "aboutMe", "about", "biography", "bio", "htmlText", "description"),
+    ))
+    host_since = _text_value(_find_scalar(profile, ("timeAsHost", "hostSince", "memberSince", "createdAt")), 64)
+    return {
+        "host_id": host_id,
+        "display_name": display_name,
+        "profile_url": f"https://www.airbnb.com/users/show/{host_id}",
+        "avatar_url": _https_value(_find_scalar(
+            profile,
+            ("profilePictureUrl", "pictureUrl", "avatarUrl", "profilePicture", "avatar"),
+        )),
+        "rating": _number_value(_find_scalar(profile, ("ratingAverage", "averageRating", "rating"))),
+        "reviews_count": _number_value(
+            _find_scalar(profile, ("ratingCount", "reviewsCount", "reviewCount")), integer=True,
+        ),
+        "host_since": host_since,
+        "bio": bio,
+        "response_rate": _response_rate_value(
+            _find_scalar(profile, ("responseRate", "responseRatePercentage", "response_rate")),
+        ),
+    }
+
+
 def _stays_detail_variables(
     listing_id: str,
     check_in: date | None = None,
@@ -845,8 +891,9 @@ class AirbnbCollector(ProfileOnlyCollector):
     PROFILE_TABLE = "airbnb_profiles"
 
     async def probe_profile(self, username: str) -> ProfileResult:
-        # Airbnb profiles are addressed by their numeric user ID.
-        url = f"https://www.airbnb.com/users/show/{username}"
+        # Airbnb uses numeric `/users/show/` IDs and slug `/users/profile/` routes.
+        route = "show" if username.isdigit() else "profile"
+        url = f"https://www.airbnb.com/users/{route}/{quote(username, safe='')}"
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                           "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
@@ -862,8 +909,12 @@ class AirbnbCollector(ProfileOnlyCollector):
         if r.status_code == 404:
             return ProfileResult(exists=False, username=username, fields={})
         if r.status_code >= 400:
+            retry_after = _retry_after_seconds(r.headers.get("Retry-After"))
+            error = f"http:{r.status_code}"
+            if retry_after is not None:
+                error += f":retry_after:{retry_after}"
             return ProfileResult(exists=False, username=username, fields={},
-                                 error=f"http:{r.status_code}")
+                                 error=error)
 
         html = r.text
         first_m = _DISPLAY_RE.search(html)
@@ -884,6 +935,7 @@ class AirbnbCollector(ProfileOnlyCollector):
         location_m = _LOCATION_RE.search(html)
         listings_m = _LISTINGS_RE.search(html)
         reviews_m = _REVIEWS_RE.search(html)
+        bio_m = _PROFILE_BIO_RE.search(html)
 
         display_name = _decode_json_str(first_m.group(1))
         if last_m:
@@ -907,6 +959,7 @@ class AirbnbCollector(ProfileOnlyCollector):
                 "location_city": _decode_json_str(location_m.group(1)) if location_m else None,
                 "properties_count": int(listings_m.group(1)) if listings_m else None,
                 "reviews_count": int(reviews_m.group(1)) if reviews_m else None,
+                "bio": _airbnb_text(_decode_json_str(bio_m.group(1))) if bio_m else None,
             },
         )
 
@@ -921,6 +974,9 @@ class AirbnbCollector(ProfileOnlyCollector):
         host_match = _HOST_PATH_RE.fullmatch(parsed.path)
         if host_match:
             return "host", host_match.group(1)
+        profile_match = _HOST_PROFILE_PATH_RE.fullmatch(parsed.path)
+        if profile_match:
+            return "host", profile_match.group(1)
         return None
 
     @staticmethod
@@ -966,6 +1022,71 @@ class AirbnbCollector(ProfileOnlyCollector):
         if not isinstance(payload.get("data"), dict):
             raise RuntimeError("graphql_payload_unavailable")
         return payload
+
+    async def _fetch_host_profile(self, host_id: str, profile_url: str) -> dict[str, Any]:
+        if not host_id.isdigit():
+            result = await self.probe_profile(host_id)
+            if not result.exists:
+                status = re.fullmatch(r"http:(\d{3})(?::retry_after:(\d+))?", result.error or "")
+                if status and int(status.group(1)) in {403, 429}:
+                    raise _AirbnbPublicHttpError(
+                        int(status.group(1)),
+                        int(status.group(2)) if status.group(2) else None,
+                    )
+                raise RuntimeError(
+                    "host_profile_payload_unavailable"
+                    if result.error == "profile_payload_unavailable"
+                    else "host_profile_unavailable"
+                )
+            fields = result.fields
+            host_since = fields.get("host_since")
+            return {
+                "host_id": host_id,
+                "display_name": fields.get("display_name"),
+                "profile_url": profile_url,
+                "avatar_url": _https_value(fields.get("avatar_url")),
+                "rating": None,
+                "reviews_count": _number_value(fields.get("reviews_count"), integer=True),
+                "host_since": host_since.isoformat() if hasattr(host_since, "isoformat") else host_since,
+                "bio": _airbnb_text(fields.get("bio")),
+                "response_rate": None,
+            }
+
+        headers = {
+            "X-Airbnb-GraphQL-Platform-Client": "minimalist-niobe",
+            "X-Airbnb-GraphQL-Platform": "web",
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+            ),
+            "Accept": "application/json",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+        async with httpx.AsyncClient(
+            headers=headers, timeout=httpx.Timeout(20.0), follow_redirects=False,
+        ) as client:
+            api_key, base_url = await _resolve_public_api_key(client)
+            client.headers["X-Airbnb-API-Key"] = api_key
+            encoded_user_id = base64.b64encode(f"User:{host_id}".encode()).decode()
+            payload = await self._graphql(
+                client,
+                "GetUserProfile",
+                _USER_PROFILE_HASH,
+                {
+                    "userId": encoded_user_id,
+                    "isPassportStampsEnabled": True,
+                    "mockIdentifier": None,
+                    "fetchCombinedSportsAndInterests": True,
+                },
+                base_url=base_url,
+            )
+        profile = _parse_airbnb_host_profile(payload, host_id)
+        profile["profile_url"] = profile_url
+        if not any(profile.get(key) for key in (
+            "display_name", "avatar_url", "rating", "reviews_count", "host_since", "bio", "response_rate",
+        )):
+            raise RuntimeError("host_profile_payload_unavailable")
+        return profile
 
     async def _fetch_listing_data(
         self, listing_id: str,
@@ -1077,19 +1198,38 @@ class AirbnbCollector(ProfileOnlyCollector):
                 raise RuntimeError("unsupported_public_page")
             target_kind, target_value = parsed_target
             if target_kind == "host":
+                host = await self._fetch_host_profile(
+                    target_value,
+                    str(target["target_url"]),
+                )
                 async with self.pool.acquire() as conn:
-                    listing_id = await conn.fetchval(
+                    await conn.execute(
                         """
-                        SELECT listing_id FROM airbnb_listings
-                         WHERE host_id=$1
-                         ORDER BY collected_at DESC, listing_id
-                         LIMIT 1
+                        INSERT INTO airbnb_hosts
+                            (host_id,display_name,profile_url,avatar_url,rating,reviews_count,
+                             host_since,bio,response_rate,collected_at,metadata)
+                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,now(),$10::jsonb)
+                        ON CONFLICT (host_id) DO UPDATE SET
+                            display_name=COALESCE(EXCLUDED.display_name,airbnb_hosts.display_name),
+                            profile_url=EXCLUDED.profile_url,
+                            avatar_url=COALESCE(EXCLUDED.avatar_url,airbnb_hosts.avatar_url),
+                            rating=COALESCE(EXCLUDED.rating,airbnb_hosts.rating),
+                            reviews_count=COALESCE(EXCLUDED.reviews_count,airbnb_hosts.reviews_count),
+                            host_since=COALESCE(EXCLUDED.host_since,airbnb_hosts.host_since),
+                            bio=COALESCE(EXCLUDED.bio,airbnb_hosts.bio),
+                            response_rate=COALESCE(EXCLUDED.response_rate,airbnb_hosts.response_rate),
+                            collected_at=now(),metadata=airbnb_hosts.metadata||EXCLUDED.metadata
                         """,
-                        target_value,
+                        host["host_id"], host["display_name"], host["profile_url"],
+                        host["avatar_url"], host["rating"], host["reviews_count"],
+                        host["host_since"], host["bio"], host["response_rate"],
+                        json.dumps({"source": "airbnb_user_profile_graphql"}),
                     )
-                if not listing_id:
-                    raise RuntimeError("host_listing_unavailable")
-                target_value = str(listing_id)
+                await finish_native_target(
+                    self.pool, self.SOURCE_NAME, int(target["id"]), success=True,
+                )
+                summary["hosts"] = 1
+                return summary
 
             listing, reviews, availability = await self._fetch_listing_data(target_value)
             async with self.pool.acquire() as conn:
