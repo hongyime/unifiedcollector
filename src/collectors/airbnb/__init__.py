@@ -1189,6 +1189,28 @@ class AirbnbCollector(ProfileOnlyCollector):
                 return fallback_profile
         profile = _parse_airbnb_host_profile(payload, host_id)
         profile["profile_url"] = profile_url
+        if not profile.get("bio"):
+            # The persisted GetUserProfile response can contain ratings and
+            # avatar data while omitting the public biography. Reuse the
+            # existing public-page parser as a field-level fallback; keep the
+            # successful GraphQL fields and fill only values it did not give.
+            page_result = await self.probe_profile(host_id)
+            if not page_result.exists:
+                status = re.fullmatch(
+                    r"http:(\d{3})(?::retry_after:(\d+))?",
+                    page_result.error or "",
+                )
+                if status and int(status.group(1)) in {403, 429}:
+                    raise _AirbnbPublicHttpError(
+                        int(status.group(1)),
+                        int(status.group(2)) if status.group(2) else None,
+                    )
+            else:
+                fallback_fields = page_result.fields or {}
+                for field in ("display_name", "avatar_url", "reviews_count", "host_since", "bio"):
+                    value = fallback_fields.get(field)
+                    if not profile.get(field) and value:
+                        profile[field] = value.isoformat() if hasattr(value, "isoformat") else value
         if not any(profile.get(key) for key in (
             "display_name", "avatar_url", "rating", "reviews_count", "host_since", "bio", "response_rate",
         )):

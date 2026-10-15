@@ -212,6 +212,95 @@ async def test_probe_profile_treats_unparsed_200_as_error_not_404(monkeypatch):
     assert result.error == "profile_payload_unavailable"
 
 
+@pytest.mark.asyncio
+async def test_airbnb_host_profile_falls_back_for_missing_graphql_bio(monkeypatch):
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            self.headers = {}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+    monkeypatch.setattr(airbnb_mod.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(
+        airbnb_mod,
+        "_resolve_public_api_key",
+        AsyncMock(return_value=("public-test-key", "https://www.airbnb.com")),
+    )
+    collector = AirbnbCollector()
+    collector._graphql = AsyncMock(return_value={
+        "data": {
+            "userProfile": {
+                "userId": "350595032",
+                "displayName": "Public Host",
+                "profilePictureUrl": "https://a0.muscache.com/avatar.jpg",
+                "ratingAverage": 4.9,
+                "ratingCount": 20,
+                "responseRate": "98%",
+            },
+        },
+    })
+    collector.probe_profile = AsyncMock(return_value=airbnb_mod.ProfileResult(
+        exists=True,
+        username="350595032",
+        fields={
+            "display_name": "Public Host",
+            "avatar_url": "https://a0.muscache.com/avatar.jpg",
+            "bio": "A short public host biography.",
+        },
+    ))
+
+    result = await collector._fetch_host_profile(
+        "350595032", "https://www.airbnb.com/users/show/350595032",
+    )
+
+    assert result["bio"] == "A short public host biography."
+    assert result["rating"] == 4.9
+    assert result["response_rate"] == 98.0
+    collector.probe_profile.assert_awaited_once_with("350595032")
+
+
+@pytest.mark.asyncio
+async def test_airbnb_host_profile_skips_page_request_when_graphql_has_bio(monkeypatch):
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            self.headers = {}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+    monkeypatch.setattr(airbnb_mod.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(
+        airbnb_mod,
+        "_resolve_public_api_key",
+        AsyncMock(return_value=("public-test-key", "https://www.airbnb.com")),
+    )
+    collector = AirbnbCollector()
+    collector._graphql = AsyncMock(return_value={
+        "data": {
+            "userProfile": {
+                "userId": "350595032",
+                "displayName": "Public Host",
+                "hostProfileDescription": "GraphQL biography.",
+            },
+        },
+    })
+    collector.probe_profile = AsyncMock()
+
+    result = await collector._fetch_host_profile(
+        "350595032", "https://www.airbnb.com/users/show/350595032",
+    )
+
+    assert result["bio"] == "GraphQL biography."
+    collector.probe_profile.assert_not_awaited()
+
+
 def test_airbnb_pdp_parser_extracts_public_listing_and_host_fields():
     payload = {
         "data": {
