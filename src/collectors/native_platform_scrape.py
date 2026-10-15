@@ -30,7 +30,7 @@ _FOLLOWED_HANDLE_SEED_SQL = """
                    f.last_seen
               FROM follow_edges f
              WHERE f.direction='following'
-               AND f.platform IN ('instagram','x','tiktok','threads','pinterest','snapchat','youtube')
+               AND f.platform IN ('github','instagram','x','tiktok','threads','pinterest','snapchat','youtube')
                AND BTRIM(COALESCE(f.target_username,'')) ~ '^[A-Za-z0-9._-]{1,100}$'
                AND NOT EXISTS (
                     SELECT 1 FROM instagram_profiles p
