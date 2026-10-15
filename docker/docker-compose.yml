@@ -1391,7 +1391,7 @@ services:
       # Auto-restore is safe to leave on because latest.json is guarded:
       # weaker logged-out snapshots are archived but cannot replace a better
       # auth-bearing latest snapshot.
-      BROWSER_COOKIE_VAULT_AUTORESTORE: "1"
+      BROWSER_COOKIE_VAULT_AUTORESTORE: "${BROWSER_COOKIE_VAULT_AUTORESTORE:-1}"
     volumes:
       - ../src:/app/src
       - ../credentials/browser_cookies:/app/credentials/browser_cookies
