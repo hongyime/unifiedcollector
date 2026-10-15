@@ -85,7 +85,15 @@ _PINTEREST_NATIVE_ERROR_CODES = frozenset({
     "public_target_redirected",
     "private_content_rejected",
     "empty_public_page",
+    "following_auth_required",
+    "following_owner_unconfirmed",
+    "following_page_unavailable",
+    "following_roster_unconfirmed",
+    "following_storage_state_unavailable",
 })
+_PINTEREST_FOLLOWING_REFRESH_SECONDS = 24 * 60 * 60
+_PINTEREST_FOLLOWING_FAILURE_RETRY_SECONDS = 6 * 60 * 60
+_PINTEREST_FOLLOWING_HANDLE_CAP = 250
 
 
 def _pinterest_native_error_code(exc: Exception) -> str:
@@ -268,6 +276,62 @@ def _same_pinterest_page_kind(url: str, target_kind: tuple[str, str | None, str 
     )
 
 
+def _pinterest_following_handles(
+    page_url: str,
+    owner_username: str,
+    profile_links: list[dict[str, Any]],
+    *,
+    following_view_confirmed: bool = False,
+) -> list[str]:
+    """Extract handles only from the authenticated owner's confirmed Following view."""
+    parsed_page = urlparse(page_url)
+    page_host = (parsed_page.hostname or "").lower().removeprefix("www.")
+    page_parts = [part for part in parsed_page.path.split("/") if part]
+    owner = str(owner_username or "").strip().lstrip("@").lower()
+    owner_profile_page = len(page_parts) == 1 and page_parts[0].lower() == owner
+    following_tab_page = (
+        len(page_parts) == 2
+        and page_parts[0].lower() == owner
+        and page_parts[1].lower() == "_following"
+    )
+    if (
+        parsed_page.scheme != "https"
+        or page_host != "pinterest.com"
+        or not (following_tab_page or (owner_profile_page and following_view_confirmed))
+        or not re.fullmatch(r"[a-z0-9._-]{1,100}", owner)
+    ):
+        return []
+
+    handles: list[str] = []
+    seen: set[str] = set()
+    for link in profile_links[:1000]:
+        if not isinstance(link, dict) or link.get("is_following") is not True:
+            continue
+        if any(
+            _explicitly_verified_capture(link.get(key))
+            for key in ("profile_is_verified", "is_verified", "verified")
+        ):
+            continue
+        parsed_link = urlparse(str(link.get("href") or ""))
+        link_host = (parsed_link.hostname or "").lower().removeprefix("www.")
+        parts = [part for part in parsed_link.path.split("/") if part]
+        if (
+            parsed_link.scheme != "https"
+            or link_host != "pinterest.com"
+            or len(parts) != 1
+            or not re.fullmatch(r"[A-Za-z0-9._-]{1,100}", parts[0])
+            or parts[0].lower() == owner
+            or parts[0].lower() in _BOARD_EXCLUDED
+        ):
+            continue
+        normalized = parts[0].lower()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        handles.append(parts[0])
+    return handles
+
+
 def _external_pin_destination(value: Any) -> str | None:
     """Keep only explicit HTTPS destinations linked from the same pin card."""
     try:
@@ -389,6 +453,326 @@ async def _fetch_pinterest_html(
 class PinterestCollector(ProfileOnlyCollector):
     SOURCE_NAME = "pinterest"
     PROFILE_TABLE = "pinterest_profiles"
+
+    async def _read_own_following_roster(
+        self,
+        storage_state: dict[str, Any],
+    ) -> tuple[str, list[str], int, bool]:
+        'Read followed accounts from the authenticated profile Following dialog.'
+        from playwright.async_api import async_playwright
+
+        playwright = await async_playwright().start()
+        browser = None
+        context = None
+        rate_limit_responses: list[tuple[int, int | None]] = []
+        try:
+            browser = await playwright.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--no-zygote",
+                ],
+            )
+            context = await browser.new_context(
+                locale="en-US", storage_state=storage_state,
+                service_workers="block",
+            )
+            page = await context.new_page()
+
+            def note_rate_limit(response: Any) -> None:
+                parsed = urlparse(response.url)
+                host = (parsed.hostname or "").lower().removeprefix("www.")
+                if host != "pinterest.com" or response.status not in {403, 429}:
+                    return
+                rate_limit_responses.append((
+                    int(response.status),
+                    _retry_after_seconds(response.headers.get("retry-after")),
+                ))
+
+            page.on("response", note_rate_limit)
+            home_response = await page.goto(
+                "https://www.pinterest.com/",
+                wait_until="domcontentloaded",
+                timeout=20_000,
+            )
+            if home_response is None:
+                raise RuntimeError("following_owner_unconfirmed")
+            if home_response.status >= 400:
+                raise _PinterestPublicHttpError(
+                    home_response.status,
+                    _retry_after_seconds(home_response.headers.get("retry-after")),
+                )
+            own_profile_links = await page.evaluate(
+                r'''() => [...document.querySelectorAll('a[href]')].flatMap((anchor) => {
+                  const url = new URL(anchor.href, location.href);
+                  const parts = url.pathname.split('/').filter(Boolean);
+                  const labels = [anchor.getAttribute('aria-label'), anchor.title,
+                    ...Array.from(anchor.querySelectorAll('img')).map((image) => image.alt)]
+                    .filter(Boolean);
+                  return url.protocol === 'https:'
+                    && url.hostname.replace(/^www\./, '') === 'pinterest.com'
+                    && parts.length === 1
+                    && labels.some((label) => /^your profile$/i.test(label.trim()))
+                    ? [parts[0]] : [];
+                })'''
+            )
+            owner_handles = {
+                str(handle).strip().lstrip("@").lower(): str(handle).strip().lstrip("@")
+                for handle in own_profile_links
+                if re.fullmatch(
+                    r"[A-Za-z0-9._-]{1,100}",
+                    str(handle).strip().lstrip("@"),
+                )
+            }
+            if len(owner_handles) != 1:
+                raise RuntimeError("following_owner_unconfirmed")
+            owner = next(iter(owner_handles.values()))
+
+            profile_response = await page.goto(
+                f"https://www.pinterest.com/{owner}/",
+                wait_until="domcontentloaded",
+                timeout=20_000,
+            )
+            if profile_response is None:
+                raise RuntimeError("following_page_unavailable")
+            if profile_response.status >= 400:
+                raise _PinterestPublicHttpError(
+                    profile_response.status,
+                    _retry_after_seconds(profile_response.headers.get("retry-after")),
+                )
+            await page.wait_for_timeout(3_000)
+            profile_state = await page.evaluate(
+                r'''(expectedOwner) => {
+                  const text = document.body?.innerText || '';
+                  const path = location.pathname.split('/').filter(Boolean);
+                  const control = document.querySelector('[data-test-id="profile-following-count"]');
+                  const countMatch = (control?.innerText || '').match(/[0-9][0-9,.]*\s*[KMB]?/i);
+                  return {
+                    pageMatches: location.protocol === 'https:'
+                      && location.hostname.replace(/^www\./, '') === 'pinterest.com'
+                      && path.length === 1 && path[0].toLowerCase() === expectedOwner.toLowerCase(),
+                    loginPrompt: /log in|sign up/i.test(text),
+                    controlVisible: !!control && !!control.getClientRects().length,
+                    followingCount: countMatch ? countMatch[0].replace(/\s+/g, '') : null,
+                  };
+                }''',
+                owner,
+            )
+            if rate_limit_responses:
+                status, retry_after = rate_limit_responses[0]
+                raise _PinterestPublicHttpError(status, retry_after)
+            if not profile_state.get("pageMatches"):
+                raise RuntimeError("following_page_unavailable")
+            if profile_state.get("loginPrompt"):
+                raise RuntimeError("following_auth_required")
+            if not profile_state.get("controlVisible"):
+                raise RuntimeError("following_roster_unconfirmed")
+            expected_count = _compact_count(profile_state.get("followingCount"))
+
+            following_control = page.locator('[data-test-id="profile-following-count"]').first
+            await following_control.click(timeout=5_000)
+            try:
+                await page.wait_for_selector('[role="dialog"]', state="visible", timeout=10_000)
+            except Exception as exc:
+                raise RuntimeError("following_roster_unconfirmed") from exc
+            if expected_count and expected_count <= _PINTEREST_FOLLOWING_HANDLE_CAP:
+                try:
+                    await page.wait_for_function(
+                        r'''(expected) => {
+                          const dialog = document.querySelector('[role="dialog"]');
+                          return !!dialog
+                            && dialog.querySelectorAll('[data-test-id="profile-following"]').length >= expected;
+                        }''',
+                        arg=expected_count,
+                        timeout=10_000,
+                    )
+                except Exception:
+                    pass
+
+            handles: dict[str, str] = {}
+            verified_handles: set[str] = set()
+            last_height = -1
+            last_count = -1
+            stable_rounds = 0
+            complete = False
+            for _ in range(25):
+                dialog_state = await page.evaluate(
+                    r'''() => {
+                      const dialog = [...document.querySelectorAll('[role="dialog"]')]
+                        .find((candidate) => candidate.getClientRects().length);
+                      if (!dialog) return {visible: false, links: [], rowCount: 0, panelHeight: 0,
+                        followingText: false, emptyRoster: false};
+                      const hasVerifiedBadge = (node) => {
+                        if (!node) return false;
+                        const candidates = [node, ...Array.from(node.querySelectorAll('[aria-label],[title]'))];
+                        return candidates.some((element) => [
+                          element.getAttribute('aria-label') || '',
+                          element.getAttribute('title') || '',
+                        ].some((label) => /\bverified\b/i.test(label)
+                          && !/\bnot\s+verified\b/i.test(label)));
+                      };
+                      const rows = Array.from(dialog.querySelectorAll('[data-test-id="profile-following"]'));
+                      const links = rows.flatMap((row) => {
+                        const isFollowing = Array.from(row.querySelectorAll('button,[role="button"]')).some((control) => {
+                          const label = `${control.innerText || ''} ${control.getAttribute('aria-label') || ''} ${control.title || ''}`;
+                          return /\b(unfollow|following)\b/i.test(label);
+                        });
+                        if (!isFollowing) return [];
+                        return Array.from(row.querySelectorAll('a[href]'))
+                          .filter((anchor) => anchor.getClientRects().length)
+                          .map((anchor) => ({href: anchor.href, is_following: true,
+                            profile_is_verified: hasVerifiedBadge(row)}));
+                      }).slice(0, 1000);
+                      const panel = dialog.querySelector('[data-test-id="modal-with-tabs-panel"]') || dialog;
+                      const text = dialog.innerText || '';
+                      return {visible: true, links, rowCount: rows.length,
+                        panelHeight: panel.scrollHeight || 0,
+                        followingText: /following/i.test(text),
+                        emptyRoster: /no results|not following anyone|following no one/i.test(text)};
+                    }'''
+                )
+                if not dialog_state.get("visible"):
+                    raise RuntimeError("following_roster_unconfirmed")
+                if not dialog_state.get("followingText") and not (
+                    expected_count == 0 and dialog_state.get("emptyRoster")
+                ):
+                    raise RuntimeError("following_roster_unconfirmed")
+
+                link_rows = dialog_state.get("links") or []
+                for link in link_rows:
+                    if not isinstance(link, dict) or not _explicitly_verified_capture(
+                        link.get("profile_is_verified")
+                    ):
+                        continue
+                    parsed_link = urlparse(str(link.get("href") or ""))
+                    link_host = (parsed_link.hostname or "").lower().removeprefix("www.")
+                    parts = [part for part in parsed_link.path.split("/") if part]
+                    if (
+                        link.get("is_following") is True
+                        and parsed_link.scheme == "https"
+                        and link_host == "pinterest.com"
+                        and len(parts) == 1
+                        and parts[0].lower() != owner.lower()
+                        and re.fullmatch(r"[A-Za-z0-9._-]{1,100}", parts[0])
+                    ):
+                        verified_handles.add(parts[0].lower())
+                        handles.pop(parts[0].lower(), None)
+                candidate_handles = _pinterest_following_handles(
+                    page.url, owner, link_rows, following_view_confirmed=True,
+                )
+                for handle in candidate_handles:
+                    if len(handles) + len(verified_handles) >= _PINTEREST_FOLLOWING_HANDLE_CAP:
+                        break
+                    if handle.lower() not in verified_handles:
+                        handles.setdefault(handle.lower(), handle)
+
+                observed_count = len(handles) + len(verified_handles)
+                panel_height = int(dialog_state.get("panelHeight") or 0)
+                if expected_count is not None and observed_count == expected_count:
+                    complete = True
+                    break
+                if expected_count is not None and observed_count > expected_count:
+                    break
+                if observed_count >= _PINTEREST_FOLLOWING_HANDLE_CAP:
+                    break
+                if observed_count == last_count and panel_height == last_height:
+                    stable_rounds += 1
+                else:
+                    stable_rounds = 0
+                if stable_rounds >= 2:
+                    complete = expected_count is not None and observed_count == expected_count
+                    break
+                last_count = observed_count
+                last_height = panel_height
+                await page.evaluate(
+                    r'''() => {
+                      const dialog = document.querySelector('[role="dialog"]');
+                      const panel = dialog?.querySelector('[data-test-id="modal-with-tabs-panel"]') || dialog;
+                      if (panel) panel.scrollTop = panel.scrollHeight;
+                    }'''
+                )
+                await page.wait_for_timeout(1_000)
+                if rate_limit_responses:
+                    status, retry_after = rate_limit_responses[0]
+                    raise _PinterestPublicHttpError(status, retry_after)
+
+            if not (handles or verified_handles or expected_count == 0):
+                raise RuntimeError("following_roster_unconfirmed")
+            return owner, list(handles.values()), len(verified_handles), complete
+        finally:
+            try:
+                if context is not None:
+                    await context.close()
+            finally:
+                try:
+                    if browser is not None:
+                        await browser.close()
+                finally:
+                    await playwright.stop()
+
+    async def _refresh_own_following_edges(self) -> int:
+        """Refresh Pinterest-owned follow edges before seeding native targets."""
+        if self.pool is None:
+            return 0
+        now = time.monotonic()
+        if now < getattr(self, "_pinterest_following_next_refresh_at", 0.0):
+            return 0
+        self._pinterest_following_next_refresh_at = (
+            now + _PINTEREST_FOLLOWING_REFRESH_SECONDS
+        )
+        storage_state = _load_pinterest_storage_state()
+        if not storage_state:
+            self._pinterest_following_next_refresh_at = (
+                now + _PINTEREST_FOLLOWING_FAILURE_RETRY_SECONDS
+            )
+            return 0
+        try:
+            owner, handles, verified_count, complete = await self._read_own_following_roster(
+                storage_state,
+            )
+            async with self.pool.acquire() as conn:
+                async with conn.transaction():
+                    if complete:
+                        await conn.execute(
+                            """
+                            DELETE FROM follow_edges
+                             WHERE platform='pinterest' AND owner_account=$1
+                               AND direction='following'
+                            """,
+                            owner,
+                        )
+                    if handles:
+                        await conn.executemany(
+                            """
+                            INSERT INTO follow_edges
+                                (platform, owner_account, target_uid, direction,
+                                 target_username, first_seen, last_seen)
+                            VALUES ('pinterest', $1, $2, 'following', $3, now(), now())
+                            ON CONFLICT (platform, owner_account, target_uid, direction)
+                            DO UPDATE SET last_seen=now(), target_username=EXCLUDED.target_username
+                            """,
+                            [(owner, handle.lower(), handle) for handle in handles],
+                        )
+        except Exception as exc:
+            retry_seconds = _PINTEREST_FOLLOWING_FAILURE_RETRY_SECONDS
+            if isinstance(exc, _PinterestPublicHttpError):
+                if exc.status_code == 429:
+                    retry_seconds = max(retry_seconds, exc.retry_after_seconds or 0)
+                elif exc.status_code == 403:
+                    retry_seconds = _PINTEREST_FOLLOWING_REFRESH_SECONDS
+            self._pinterest_following_next_refresh_at = time.monotonic() + retry_seconds
+            logger.warning(
+                "Pinterest own-following refresh deferred: %s",
+                _pinterest_native_error_code(exc),
+            )
+            return 0
+        logger.info(
+            "Pinterest own-following graph refreshed: handles=%d verified_skipped=%d complete=%s",
+            len(handles), verified_count, complete,
+        )
+        return len(handles)
 
     async def probe_profile(self, username: str) -> ProfileResult:
         url = f"https://www.pinterest.com/{username}/"
@@ -972,6 +1356,7 @@ class PinterestCollector(ProfileOnlyCollector):
             summary["skipped"] = "no_pool"
             return summary
 
+        summary["followed_handles"] = await self._refresh_own_following_edges()
         await seed_native_targets(self.pool, self.SOURCE_NAME)
         target = await claim_native_target(self.pool, self.SOURCE_NAME)
         if target is None:

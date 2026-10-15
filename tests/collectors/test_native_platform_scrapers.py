@@ -370,6 +370,154 @@ def test_pinterest_profile_redirect_stays_with_same_owner():
     )
 
 
+def test_pinterest_following_roster_only_accepts_same_site_accounts_and_skips_verified():
+    links = [
+        {"href": "https://www.pinterest.com/alice/", "is_following": True},
+        {"href": "https://www.pinterest.com/owner/", "is_following": True},
+        {"href": "https://www.pinterest.com/alice/", "is_following": True},
+        {
+            "href": "https://www.pinterest.com/official/",
+            "is_following": True,
+            "profile_is_verified": True,
+        },
+        {"href": "https://example.com/outside/", "is_following": True},
+        {"href": "https://www.pinterest.com/alice/travel/", "is_following": True},
+        {"href": "https://www.pinterest.com/unknown/", "is_following": True},
+        {"href": "https://www.pinterest.com/suggested/", "is_following": False},
+    ]
+
+    assert pinterest_mod._pinterest_following_handles(
+        "https://www.pinterest.com/owner/", "owner", links,
+        following_view_confirmed=True,
+    ) == ["alice", "unknown"]
+
+
+def test_pinterest_following_roster_rejects_redirected_or_wrong_owner_page():
+    links = [{"href": "https://www.pinterest.com/alice/", "is_following": True}]
+
+    assert pinterest_mod._pinterest_following_handles(
+        "https://www.pinterest.com/owner/", "owner", links,
+    ) == []
+    assert pinterest_mod._pinterest_following_handles(
+        "https://www.pinterest.com/other/", "owner", links,
+        following_view_confirmed=True,
+    ) == []
+
+
+@pytest.mark.asyncio
+async def test_pinterest_following_refresh_replaces_only_a_complete_owner_snapshot(monkeypatch):
+    class Transaction:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class Connection:
+        def __init__(self):
+            self.statements = []
+
+        def transaction(self):
+            return Transaction()
+
+        async def execute(self, sql, *args):
+            self.statements.append(("execute", " ".join(sql.split()), args))
+
+        async def executemany(self, sql, args):
+            self.statements.append(("executemany", " ".join(sql.split()), args))
+
+    class Acquire:
+        def __init__(self, connection):
+            self.connection = connection
+
+        async def __aenter__(self):
+            return self.connection
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class Pool:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def acquire(self):
+            return Acquire(self.connection)
+
+    connection = Connection()
+    collector = object.__new__(PinterestCollector)
+    collector.pool = Pool(connection)
+    roster_calls = 0
+
+    async def read_roster(_storage_state):
+        nonlocal roster_calls
+        roster_calls += 1
+        return "owner", ["alice"], 1, True
+
+    monkeypatch.setattr(pinterest_mod, "_load_pinterest_storage_state", lambda: {"cookies": []})
+    collector._read_own_following_roster = read_roster
+
+    assert await collector._refresh_own_following_edges() == 1
+    assert "DELETE FROM follow_edges" in connection.statements[0][1]
+    assert connection.statements[1][0] == "executemany"
+    assert connection.statements[1][2] == [("owner", "alice", "alice")]
+    assert await collector._refresh_own_following_edges() == 0
+    assert roster_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_pinterest_following_refresh_does_not_delete_edges_for_partial_snapshot(monkeypatch):
+    class Transaction:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class Connection:
+        def __init__(self):
+            self.statements = []
+
+        def transaction(self):
+            return Transaction()
+
+        async def execute(self, sql, *args):
+            self.statements.append(("execute", " ".join(sql.split()), args))
+
+        async def executemany(self, sql, args):
+            self.statements.append(("executemany", " ".join(sql.split()), args))
+
+    class Acquire:
+        def __init__(self, connection):
+            self.connection = connection
+
+        async def __aenter__(self):
+            return self.connection
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class Pool:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def acquire(self):
+            return Acquire(self.connection)
+
+    connection = Connection()
+    collector = object.__new__(PinterestCollector)
+    collector.pool = Pool(connection)
+
+    async def read_partial_roster(_storage_state):
+        return "owner", ["alice"], 0, False
+
+    monkeypatch.setattr(pinterest_mod, "_load_pinterest_storage_state", lambda: {"cookies": []})
+    collector._read_own_following_roster = read_partial_roster
+
+    assert await collector._refresh_own_following_edges() == 1
+    assert not any("DELETE FROM follow_edges" in statement[1] for statement in connection.statements)
+    assert connection.statements[0][0] == "executemany"
+
+
 @pytest.mark.asyncio
 async def test_pinterest_followed_handle_navigates_with_cookie_context(monkeypatch):
     import sys
