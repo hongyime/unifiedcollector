@@ -339,13 +339,13 @@ def test_pinterest_profile_redirect_stays_with_same_owner():
 
 
 @pytest.mark.asyncio
-async def test_pinterest_followed_handle_reads_cookie_context_before_anonymous_context(monkeypatch):
+async def test_pinterest_followed_handle_navigates_with_cookie_context(monkeypatch):
     import sys
     from types import ModuleType
 
     storage_state = {"cookies": [{"name": "session", "value": "test-cookie"}]}
-    fetch_states = []
     context_states = []
+    read_calls = []
 
     class Context:
         async def close(self):
@@ -380,14 +380,14 @@ async def test_pinterest_followed_handle_reads_cookie_context_before_anonymous_c
     monkeypatch.setitem(sys.modules, "playwright.async_api", async_api_module)
     monkeypatch.setattr(pinterest_mod, "_load_pinterest_storage_state", lambda: storage_state)
 
-    async def fetch(_url, _target_kind, current_storage_state):
-        fetch_states.append(current_storage_state)
-        return "https://www.pinterest.com/alice/", "<html></html>"
+    async def fetch(*_args, **_kwargs):
+        raise AssertionError("authenticated followed targets must navigate in Playwright")
 
     monkeypatch.setattr(pinterest_mod, "_fetch_pinterest_html", fetch)
     collector = object.__new__(PinterestCollector)
 
-    async def read(_context, url, _target_kind, _html, **_kwargs):
+    async def read(_context, url, _target_kind, html, **kwargs):
+        read_calls.append((url, html, kwargs))
         return {
             "url": url,
             "profile_identity_verified": True,
@@ -405,9 +405,101 @@ async def test_pinterest_followed_handle_reads_cookie_context_before_anonymous_c
         target_source="followed_handle_candidate",
     )
 
-    assert fetch_states == [storage_state]
     assert context_states == [storage_state]
+    assert read_calls[0][0] == "https://www.pinterest.com/alice/"
+    assert read_calls[0][1] is None
+    assert read_calls[0][2]["direct_navigation"] is True
     assert pins[0]["owner_verified"] is True
+
+
+@pytest.mark.asyncio
+async def test_pinterest_authenticated_navigation_keeps_redirects_within_same_owner():
+    class Response:
+        status = 200
+
+    class Request:
+        def __init__(self, page, url):
+            self.frame = page.main_frame
+            self.url = url
+
+        @staticmethod
+        def is_navigation_request():
+            return True
+
+    class Route:
+        def __init__(self, request):
+            self.request = request
+            self.action = None
+
+        async def continue_(self):
+            self.action = "continue"
+
+        async def abort(self):
+            self.action = "abort"
+
+        async def fulfill(self, **_kwargs):
+            self.action = "fulfill"
+
+    class Page:
+        def __init__(self, urls):
+            self.urls = urls
+            self.main_frame = object()
+            self.actions = []
+
+        async def route(self, _pattern, handler):
+            self.handler = handler
+
+        async def goto(self, _url, **_kwargs):
+            for url in self.urls:
+                route = Route(Request(self, url))
+                await self.handler(route)
+                self.actions.append(route.action)
+                if route.action == "abort":
+                    raise RuntimeError("navigation aborted")
+            return Response()
+
+        async def wait_for_timeout(self, _milliseconds):
+            return None
+
+        async def evaluate(self, _script, _argument=None):
+            if _argument is None:
+                return None
+            return {
+                "url": self.urls[-1],
+                "profile_identity_verified": True,
+                "profile_is_verified": False,
+                "body_text": "",
+            }
+
+    class Context:
+        def __init__(self, page):
+            self.page = page
+
+        async def new_page(self):
+            return self.page
+
+    collector = object.__new__(PinterestCollector)
+    target = "https://www.pinterest.com/alice/"
+    same_owner_page = Page([
+        target,
+        "https://www.pinterest.com/alice/_created/",
+    ])
+    await collector._read_public_page(
+        Context(same_owner_page), target, ("profile", "alice", None), None,
+        direct_navigation=True,
+    )
+    assert same_owner_page.actions == ["continue", "continue"]
+
+    cross_owner_page = Page([
+        target,
+        "https://www.pinterest.com/other/",
+    ])
+    with pytest.raises(RuntimeError, match="public_redirect_rejected"):
+        await collector._read_public_page(
+            Context(cross_owner_page), target, ("profile", "alice", None), None,
+            direct_navigation=True,
+        )
+    assert cross_owner_page.actions == ["continue", "abort"]
 
 
 def test_pinterest_retry_after_supports_delta_and_http_date():

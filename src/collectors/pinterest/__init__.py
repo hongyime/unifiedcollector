@@ -490,12 +490,10 @@ class PinterestCollector(ProfileOnlyCollector):
                     logger.warning("Pinterest authenticated context unavailable; falling back to public page")
                 else:
                     contexts.append(authenticated_context)
-                    authenticated_url, authenticated_html = await _fetch_pinterest_html(
-                        target_url, target_kind, storage_state,
-                    )
                     authenticated_data = await self._read_public_page(
-                        authenticated_context, authenticated_url, target_kind,
-                        authenticated_html, allow_authenticated_private=True,
+                        authenticated_context, target_url, target_kind, None,
+                        allow_authenticated_private=True,
+                        direct_navigation=True,
                     )
                     if authenticated_data.get("profile_is_verified") is True:
                         raise RuntimeError("verified_account_excluded")
@@ -566,23 +564,33 @@ class PinterestCollector(ProfileOnlyCollector):
         context: Any,
         target_url: str,
         target_kind: tuple[str, str | None, str | None],
-        page_html: str,
+        page_html: str | None,
         *,
         allow_authenticated_private: bool = False,
+        direct_navigation: bool = False,
     ) -> dict[str, Any]:
         page = await context.new_page()
         first_navigation = True
+        rejected_navigation = False
 
         async def guard_navigation(route: Any) -> None:
-            nonlocal first_navigation
+            nonlocal first_navigation, rejected_navigation
             request = route.request
             if request.is_navigation_request() and request.frame == page.main_frame:
-                if first_navigation and _same_pinterest_page_kind(request.url, target_kind):
+                if not _same_pinterest_page_kind(request.url, target_kind):
+                    rejected_navigation = True
+                    await route.abort()
+                    return
+                if direct_navigation:
+                    first_navigation = False
+                    await route.continue_()
+                    return
+                if first_navigation:
                     first_navigation = False
                     await route.fulfill(
                         status=200,
                         headers={"content-type": "text/html; charset=utf-8"},
-                        body=page_html,
+                        body=page_html or "",
                     )
                     return
                 await route.abort()
@@ -590,11 +598,16 @@ class PinterestCollector(ProfileOnlyCollector):
             await route.continue_()
 
         await page.route("**/*", guard_navigation)
-        response = await page.goto(
-            target_url,
-            wait_until="domcontentloaded",
-            timeout=30_000,
-        )
+        try:
+            response = await page.goto(
+                target_url,
+                wait_until="domcontentloaded",
+                timeout=30_000,
+            )
+        except Exception as exc:
+            if rejected_navigation:
+                raise RuntimeError("public_redirect_rejected") from exc
+            raise
         if response is None or response.status >= 400:
             status = response.status if response is not None else 0
             raise RuntimeError(f"public_http_{status}")
@@ -730,7 +743,41 @@ class PinterestCollector(ProfileOnlyCollector):
             }""",
             {"expectedUsername": target_kind[1], "expectedPageKind": target_kind[0]},
         )
-        if not _same_pinterest_page_kind(str(data.get("url") or ""), target_kind):
+        final_url = str(data.get("url") or "")
+        if not _same_pinterest_page_kind(final_url, target_kind):
+            parsed_final = urlparse(final_url)
+            final_host = (parsed_final.hostname or "").lower().removeprefix("www.")
+            final_parts = [part for part in parsed_final.path.split("/") if part]
+            final_first = final_parts[0].lower() if final_parts else ""
+            target_owner_matches = bool(
+                final_first
+                and final_first == str(target_kind[1] or "").lower()
+            )
+            body_text = str(data.get("body_text") or "")
+            login_prompt_visible = bool(
+                re.search(r"\b(log\s*in|sign\s*in|join pinterest)\b", body_text, re.IGNORECASE)
+            )
+            pin_card_count = len(data.get("pin_cards") or [])
+            if final_host != "pinterest.com":
+                redirect_class = "offsite"
+            elif not final_parts:
+                redirect_class = "pinterest_root"
+            elif final_first in {"login", "session", "auth", "challenge", "_login", "_auth"}:
+                redirect_class = "authentication_route"
+            elif target_owner_matches:
+                redirect_class = "same_owner_noncanonical_route"
+            else:
+                redirect_class = "other_pinterest_route"
+            logger.warning(
+                "Pinterest final page mismatch: class=%s host_is_pinterest=%s "
+                "target_owner_matches=%s path_depth=%d login_prompt=%s pin_cards=%d",
+                redirect_class,
+                final_host == "pinterest.com",
+                target_owner_matches,
+                len(final_parts),
+                login_prompt_visible,
+                pin_card_count,
+            )
             raise RuntimeError("public_target_redirected")
         if not allow_authenticated_private and _contains_private_marker(data):
             raise RuntimeError("private_content_rejected")
