@@ -1104,6 +1104,49 @@ async def test_discussion_join_budget_refusal_does_not_record_visit(monkeypatch)
     )
 
 
+@pytest.mark.asyncio
+async def test_discussion_visit_joins_scrapes_leaves_and_records_visit(monkeypatch):
+    coll = _make_collector(monkeypatch)
+    coll._discussion_dwell_min = 0
+    coll._discussion_dwell_max = 0
+    coll._discussion_message_limit = 2
+    coll._admin_log_enabled = False
+    coll.pool.conn.fetchval = AsyncMock(return_value=None)
+    discussion = SimpleNamespace(id=902, title="Discussion", username=None)
+    coll._resolve_linked_discussion_entity = AsyncMock(return_value=(902, discussion))
+    coll._upsert_chat = AsyncMock()
+    coll._consume_join_budget = AsyncMock(return_value=True)
+    coll.collect_chat_members = AsyncMock(return_value=2)
+    coll._upsert_message = AsyncMock()
+    coll._enqueue_forward_edges = AsyncMock()
+    coll._download_any_message_media = AsyncMock()
+    worker = SimpleNamespace(
+        worker_id=0,
+        account=SimpleNamespace(name="acct1"),
+        client=AsyncMock(),
+    )
+    worker.client.get_me = AsyncMock(return_value=SimpleNamespace(id=77))
+    worker.client.get_permissions = AsyncMock(return_value=SimpleNamespace(left=True))
+    worker.client.iter_messages = MagicMock(return_value=_aiter([
+        SimpleNamespace(id=1, sender_id=None),
+        SimpleNamespace(id=2, sender_id=None),
+    ]))
+
+    await coll._spider_discussion_group(worker, SimpleNamespace(id=901), "901")
+
+    request_names = [type(call.args[0]).__name__ for call in worker.client.await_args_list]
+    assert request_names == ["JoinChannelRequest", "LeaveChannelRequest"]
+    coll.collect_chat_members.assert_awaited_once_with(902, worker=worker)
+    assert coll._upsert_message.await_count == 2
+    visit_call = next(
+        call for call in coll.pool.conn.execute.await_args_list
+        if "INSERT INTO telegram_discussion_visits" in call.args[0]
+    )
+    assert visit_call.args[3] == "acct1"
+    assert visit_call.args[4] is not None
+    assert visit_call.args[5:8] == (2, 2, None)
+
+
 def test_message_membership_event_specs_normalize_join_and_leave(monkeypatch):
     coll = _make_collector(monkeypatch)
     add_action = type("MessageActionChatAddUser", (), {"users": [101, 102]})()
