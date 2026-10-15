@@ -3886,7 +3886,12 @@ def _strava_stream_response_status(result: dict, *, http_event_recorded: bool = 
 
 
 async def _browser_content_recovery_hint(pool, platform: str) -> dict:
-    if not pool or not platform or platform == "bridge":
+    if (
+        not pool
+        or not platform
+        or platform == "bridge"
+        or platform in BROWSER_HEARTBEAT_ONLY_PLATFORMS
+    ):
         return {}
     now = time.monotonic()
     cached = _BROWSER_CONTENT_HINT_CACHE.get(platform)

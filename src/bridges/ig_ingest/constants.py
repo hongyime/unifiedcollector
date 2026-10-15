@@ -210,7 +210,8 @@ _THREADS_SYNTHETIC_MEDIA_ID = re.compile(r"^(?:img|vid)_[a-z0-9]+$", re.IGNORECA
 # Only instagram currently spiders (followers/following graph); the others scrape
 # whatever the open page exposes, so they have no spider table.
 KNOWN_PLATFORMS = {"instagram", "tiktok", "lemon8", "x", "threads", "facebook", "strava"}
-BROWSER_DIAGNOSTIC_PLATFORMS = {"bridge"}
+BROWSER_HEARTBEAT_ONLY_PLATFORMS = {"pinterest", "snapchat", "airbnb"}
+BROWSER_DIAGNOSTIC_PLATFORMS = {"bridge", *BROWSER_HEARTBEAT_ONLY_PLATFORMS}
 _BROWSER_CONTENT_HINT_FAIL_ACTIVE_PLATFORMS = {"x", "facebook", "tiktok", "lemon8", "threads"}
 
 # 2-hop spider (instagram only): the extension scrapes a target's media AND, when
