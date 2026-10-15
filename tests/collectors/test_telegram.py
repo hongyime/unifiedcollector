@@ -759,6 +759,40 @@ async def test_process_spider_queue_skips_when_worker_account_cooling_down(monke
 
 
 @pytest.mark.asyncio
+async def test_process_spider_queue_does_not_retry_deferred_chat_within_cycle(monkeypatch):
+    coll = _make_collector(monkeypatch)
+    worker = _make_worker(coll)
+    monkeypatch.setenv("TELEGRAM_SPIDER_MAX_PER_CYCLE", "2")
+    claim_count = 0
+
+    async def fetch_claim(sql, *args):
+        nonlocal claim_count
+        assert "WITH ranked AS" in sql
+        claim_count += 1
+        if args and args[0]:
+            return None
+        if claim_count <= 3:
+            return {"platform_chat_id": "123", "title": "Deferred"}
+        return None
+
+    coll.pool.conn.fetchrow.side_effect = fetch_claim
+    coll._collect_chat = AsyncMock(
+        side_effect=EntityResolveDeferred("account unavailable or in cooldown")
+    )
+
+    await coll._process_spider_queue(worker)
+
+    coll._collect_chat.assert_awaited_once_with(worker, "123")
+    claim_calls = [
+        call for call in coll.pool.conn.fetchrow.await_args_list
+        if "WITH ranked AS" in call.args[0]
+    ]
+    assert len(claim_calls) == 2
+    assert claim_calls[0].args[1] == []
+    assert claim_calls[1].args[1] == ["123"]
+
+
+@pytest.mark.asyncio
 async def test_process_spider_queue_marks_failed_on_exception(monkeypatch):
     coll = _make_collector(monkeypatch)
     worker = _make_worker(coll)

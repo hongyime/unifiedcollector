@@ -1082,7 +1082,9 @@ class TelegramCollector(
             return 0
         await refresh_account_proximity_cache(self.pool)
         processed = 0
-        while not self._stop.is_set() and processed < max_per_cycle:
+        attempted_chat_ids: set[str] = set()
+        attempted = 0
+        while not self._stop.is_set() and attempted < max_per_cycle:
             async with self.pool.acquire() as conn:
                 row = await conn.fetchrow("""
                     WITH ranked AS (
@@ -1102,6 +1104,7 @@ class TelegramCollector(
                             WHERE c.platform_chat_id = q.platform_chat_id
                         ) prox ON TRUE
                         WHERE q.status = 'pending'
+                          AND q.platform_chat_id <> ALL($1::text[])
                         ORDER BY
                             CASE
                                 WHEN prox.proximity_tier IN (1, 2) THEN 2
@@ -1133,15 +1136,19 @@ class TelegramCollector(
                     WHERE id = (SELECT id FROM candidate)
                       AND status = 'pending'
                     RETURNING platform_chat_id, title
-                """)
+                """,
+                    list(attempted_chat_ids),
+                )
             if not row:
                 break
             chat_id = row['platform_chat_id']
+            attempted_chat_ids.add(str(chat_id))
+            attempted += 1
             title = row['title'] or chat_id
             try:
                 logger.info(
-                    "[spider w=%d] processing chat %s (%s) [%d/%d]",
-                    worker.worker_id, chat_id, title, processed + 1, max_per_cycle,
+                    "[spider w=%d] processing chat %s (%s) [attempt %d/%d]",
+                    worker.worker_id, chat_id, title, attempted, max_per_cycle,
                 )
                 await self._collect_chat(worker, chat_id)
                 async with self.pool.acquire() as conn:
@@ -1180,7 +1187,12 @@ class TelegramCollector(
                 # Transient (disconnect/timeout) or unknown — retry up to a cap so a
                 # blip doesn't permanently kill a recoverable chat; then give up.
                 await self._retry_or_fail_spider(chat_id, exc, worker.worker_id)
-        logger.info("[spider w=%d] finished: processed %d chats", worker.worker_id, processed)
+        logger.info(
+            "[spider w=%d] finished: processed %d chats in %d attempts",
+            worker.worker_id,
+            processed,
+            attempted,
+        )
 
     async def _mark_spider_status(self, chat_id: str, status: str, err: str):
         async with self.pool.acquire() as conn:
