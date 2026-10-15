@@ -340,6 +340,31 @@ def test_airbnb_pdp_parser_extracts_public_listing_and_host_fields():
     assert result["host_profile_url"] == "https://www.airbnb.com/users/show/5821"
 
 
+def test_airbnb_pdp_parser_falls_back_to_public_localized_location():
+    payload = {
+        "data": {
+            "node": {
+                "pdpPresentation": {
+                    "localizedLocation": "Public display area",
+                },
+            },
+            "presentation": {
+                "stayProductDetailPage": {
+                    "sections": [
+                        {"sectionId": "TITLE_DEFAULT", "section": {"title": "Harbor Loft"}},
+                        {"sectionId": "LOCATION_DEFAULT", "section": {"subtitle": ""}},
+                    ],
+                },
+            },
+        },
+    }
+
+    result = airbnb_mod._parse_airbnb_listing(payload, "123456")
+
+    assert result is not None
+    assert result["location"] == "Public display area"
+
+
 def test_airbnb_pdp_parser_extracts_description_photos_amenities_and_host_bio():
     payload = {
         "data": {

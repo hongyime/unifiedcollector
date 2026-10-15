@@ -481,6 +481,10 @@ def _parse_airbnb_listing(payload: dict[str, Any], listing_id: str) -> dict[str,
     passport_data = passport_data if isinstance(passport_data, dict) else {}
     title = _text_value(_find_scalar(title_section, ("title", "listingTitle", "headline", "name")))
     location = _text_value(_find_scalar(location_section, ("subtitle", "location", "city", "address")))
+    if location is None and isinstance(pdp_presentation, dict):
+        # Current PDP payloads can omit LOCATION_DEFAULT while retaining the
+        # public display location on the presentation node.
+        location = _text_value(pdp_presentation.get("localizedLocation"))
     rating = _number_value(_find_scalar(reviews_section, ("overallRating", "averageRating", "rating")))
     reviews_count = _number_value(
         _find_scalar(reviews_section, ("reviewsCount", "reviewCount", "reviews_count")), integer=True,
