@@ -217,6 +217,48 @@ def _expand_dynamic_dorks(term: str) -> list[str]:
         *(template.format(q=term) for template in _DYNAMIC_PERSON_DOCUMENT_DORKS),
     ]
 
+_EXPLICIT_BADGE_JSON_FLAGS = (
+    "author_is_verified",
+    "channel_is_verified",
+    "profile_is_verified",
+    "is_verified",
+    "verified",
+    "isVerified",
+    "is_blue_verified",
+    "isBlueVerified",
+    "blue_verified",
+    "blueVerified",
+    "verified_badge",
+)
+_DYNAMIC_TERM_REFRESH_CURSOR = "search_dynamic_terms_v2"
+_DYNAMIC_TERM_BADGE_SCRUB_CURSOR = "search_verified_terms_scrub_v1"
+
+
+def _explicit_badge_json_exclusion(json_expr: str) -> str:
+    """Keep unknown verification signals and exclude explicit true badges."""
+    return " AND ".join(
+        f"{json_expr}->>'{flag}' IS DISTINCT FROM 'true'"
+        for flag in _EXPLICIT_BADGE_JSON_FLAGS
+    )
+
+
+def _youtube_channel_badge_exclusion(channel_alias: str) -> str:
+    """Exclude channels explicitly marked verified in stored channel content."""
+    return f"""
+        {channel_alias}.last_skip_reason IS DISTINCT FROM 'verified_account'
+        AND NOT EXISTS (
+            SELECT 1 FROM youtube_videos guard_video
+             WHERE guard_video.channel_id={channel_alias}.id
+               AND NOT ({_explicit_badge_json_exclusion('guard_video.metadata')})
+        )
+        AND NOT EXISTS (
+            SELECT 1 FROM youtube_community_posts guard_post
+             WHERE guard_post.channel_id={channel_alias}.platform_channel_id
+               AND NOT ({_explicit_badge_json_exclusion('guard_post.metadata')})
+        )
+    """.strip()
+
+
 _DYNAMIC_TERM_SOURCE_QUERIES = (
     ("instagram_profiles", """
         SELECT 'instagram' AS platform, id::text AS source_reference,
@@ -244,24 +286,21 @@ _DYNAMIC_TERM_SOURCE_QUERIES = (
            AND (username IS NOT NULL OR nickname IS NOT NULL OR bio IS NOT NULL)
          ORDER BY updated_at DESC LIMIT $1
     """),
-    ("pinterest_profiles", """
+    ("pinterest_profiles", f"""
         SELECT 'pinterest' AS platform, username AS source_reference,
                username, display_name AS full_name, bio AS text_blob, ARRAY[]::text[] AS hashtags
           FROM pinterest_profiles
          WHERE probed_at >= now() - interval '90 days'
-           AND raw_payload->>'profile_is_verified' IS DISTINCT FROM 'true'
+           AND {_explicit_badge_json_exclusion('raw_payload')}
            AND (username IS NOT NULL OR display_name IS NOT NULL OR bio IS NOT NULL)
          ORDER BY probed_at DESC LIMIT $1
     """),
-    ("snapchat_profiles", """
+    ("snapchat_profiles", f"""
         SELECT 'snapchat' AS platform, username AS source_reference,
                username, display_name AS full_name, display_name AS text_blob, ARRAY[]::text[] AS hashtags
           FROM snapchat_profiles
          WHERE probed_at >= now() - interval '90 days'
-           AND raw_payload->>'is_verified' IS DISTINCT FROM 'true'
-           AND raw_payload->>'verified' IS DISTINCT FROM 'true'
-           AND raw_payload->>'isVerified' IS DISTINCT FROM 'true'
-           AND raw_payload->>'is_blue_verified' IS DISTINCT FROM 'true'
+           AND {_explicit_badge_json_exclusion('raw_payload')}
            AND (username IS NOT NULL OR display_name IS NOT NULL)
          ORDER BY probed_at DESC LIMIT $1
     """),
@@ -290,37 +329,34 @@ _DYNAMIC_TERM_SOURCE_QUERIES = (
            AND (username IS NOT NULL OR display_name IS NOT NULL OR bio IS NOT NULL)
          ORDER BY probed_at DESC LIMIT $1
     """),
-    ("youtube_channels", """
-        SELECT 'youtube' AS platform, id::text AS source_reference,
-               custom_url AS username, title AS full_name, description AS text_blob, keywords AS hashtags
-          FROM youtube_channels
-         WHERE updated_at >= now() - interval '90 days'
-           AND (custom_url IS NOT NULL OR title IS NOT NULL OR description IS NOT NULL OR keywords IS NOT NULL)
-         ORDER BY updated_at DESC LIMIT $1
+    ("youtube_channels", f"""
+        SELECT 'youtube' AS platform, c.id::text AS source_reference,
+               c.custom_url AS username, c.title AS full_name, c.description AS text_blob, c.keywords AS hashtags
+          FROM youtube_channels c
+         WHERE c.updated_at >= now() - interval '90 days'
+           AND {_youtube_channel_badge_exclusion('c')}
+           AND (c.custom_url IS NOT NULL OR c.title IS NOT NULL OR c.description IS NOT NULL OR c.keywords IS NOT NULL)
+         ORDER BY c.updated_at DESC LIMIT $1
     """),
-    ("instagram_posts", """
+    ("instagram_posts", f"""
         SELECT 'instagram' AS platform, p.id::text AS source_reference,
                u.username, p.caption AS text_blob, p.hashtags
           FROM instagram_posts p
           LEFT JOIN instagram_profiles u ON u.id = p.profile_id
          WHERE p.collected_at >= now() - interval '90 days'
            AND u.is_verified IS NOT TRUE
-           AND p.metadata->>'author_is_verified' IS DISTINCT FROM 'true'
-           AND p.metadata->>'is_verified' IS DISTINCT FROM 'true'
-           AND p.metadata->>'verified' IS DISTINCT FROM 'true'
+           AND {_explicit_badge_json_exclusion('p.metadata')}
            AND (p.caption IS NOT NULL OR p.hashtags IS NOT NULL)
          ORDER BY p.collected_at DESC LIMIT $1
     """),
-    ("tiktok_posts", """
+    ("tiktok_posts", f"""
         SELECT 'tiktok' AS platform, p.id::text AS source_reference,
                u.username, concat_ws(' ', p.title, p.description) AS text_blob, p.hashtags
           FROM tiktok_posts p
           LEFT JOIN tiktok_profiles u ON u.id = p.profile_id
          WHERE p.collected_at >= now() - interval '90 days'
            AND u.is_verified IS NOT TRUE
-           AND p.metadata->>'author_is_verified' IS DISTINCT FROM 'true'
-           AND p.metadata->>'is_verified' IS DISTINCT FROM 'true'
-           AND p.metadata->>'verified' IS DISTINCT FROM 'true'
+           AND {_explicit_badge_json_exclusion('p.metadata')}
            AND (p.title IS NOT NULL OR p.description IS NOT NULL OR p.hashtags IS NOT NULL)
          ORDER BY p.collected_at DESC LIMIT $1
     """),
@@ -332,14 +368,12 @@ _DYNAMIC_TERM_SOURCE_QUERIES = (
            AND (title IS NOT NULL OR description IS NOT NULL OR hashtags IS NOT NULL)
          ORDER BY collected_at DESC LIMIT $1
     """),
-    ("threads_posts", """
+    ("threads_posts", f"""
         SELECT 'threads' AS platform, id::text AS source_reference,
                author_username AS username, caption AS text_blob, hashtags
           FROM threads_posts
          WHERE collected_at >= now() - interval '90 days'
-           AND metadata->>'author_is_verified' IS DISTINCT FROM 'true'
-           AND metadata->>'is_verified' IS DISTINCT FROM 'true'
-           AND metadata->>'verified' IS DISTINCT FROM 'true'
+           AND {_explicit_badge_json_exclusion('metadata')}
            AND (caption IS NOT NULL OR hashtags IS NOT NULL)
          ORDER BY collected_at DESC LIMIT $1
     """),
@@ -351,36 +385,30 @@ _DYNAMIC_TERM_SOURCE_QUERIES = (
            AND (caption IS NOT NULL OR hashtags IS NOT NULL)
          ORDER BY collected_at DESC LIMIT $1
     """),
-    ("x_posts", """
+    ("x_posts", f"""
         SELECT 'x' AS platform, p.id::text AS source_reference,
                p.author_username AS username, p.caption AS text_blob, p.hashtags
           FROM x_posts p
           LEFT JOIN x_profiles u ON LOWER(u.username)=LOWER(p.author_username)
          WHERE p.collected_at >= now() - interval '90 days'
            AND u.is_verified IS NOT TRUE
-           AND p.metadata->>'author_is_verified' IS DISTINCT FROM 'true'
-           AND p.metadata->>'is_verified' IS DISTINCT FROM 'true'
-           AND p.metadata->>'verified' IS DISTINCT FROM 'true'
+           AND {_explicit_badge_json_exclusion('p.metadata')}
            AND (p.caption IS NOT NULL OR p.hashtags IS NOT NULL)
          ORDER BY p.collected_at DESC LIMIT $1
     """),
-    ("pinterest_pins", """
+    ("pinterest_pins", f"""
         SELECT 'pinterest' AS platform, p.pin_id AS source_reference,
                p.username, concat_ws(' ', p.title, p.description) AS text_blob,
                ARRAY[]::text[] AS hashtags
           FROM pinterest_pins p
           LEFT JOIN pinterest_profiles profile ON LOWER(profile.username)=LOWER(p.username)
          WHERE p.collected_at >= now() - interval '90 days'
-           AND profile.raw_payload->>'profile_is_verified' IS DISTINCT FROM 'true'
-           AND profile.raw_payload->>'is_verified' IS DISTINCT FROM 'true'
-           AND profile.raw_payload->>'verified' IS DISTINCT FROM 'true'
-           AND p.metadata->>'author_is_verified' IS DISTINCT FROM 'true'
-           AND p.metadata->>'is_verified' IS DISTINCT FROM 'true'
-           AND p.metadata->>'verified' IS DISTINCT FROM 'true'
+           AND {_explicit_badge_json_exclusion('profile.raw_payload')}
+           AND {_explicit_badge_json_exclusion('p.metadata')}
            AND (p.title IS NOT NULL OR p.description IS NOT NULL OR p.username IS NOT NULL)
          ORDER BY p.collected_at DESC LIMIT $1
     """),
-    ("pinterest_boards", """
+    ("pinterest_boards", f"""
         SELECT 'pinterest' AS platform, b.board_id AS source_reference,
                b.username, NULL::text AS full_name,
                concat_ws(' ', b.name, b.description) AS text_blob,
@@ -388,33 +416,31 @@ _DYNAMIC_TERM_SOURCE_QUERIES = (
           FROM pinterest_boards b
           LEFT JOIN pinterest_profiles profile ON LOWER(profile.username)=LOWER(b.username)
          WHERE b.collected_at >= now() - interval '90 days'
-           AND profile.raw_payload->>'profile_is_verified' IS DISTINCT FROM 'true'
-           AND profile.raw_payload->>'is_verified' IS DISTINCT FROM 'true'
-           AND profile.raw_payload->>'verified' IS DISTINCT FROM 'true'
+           AND {_explicit_badge_json_exclusion('profile.raw_payload')}
            AND (b.username IS NOT NULL OR b.name IS NOT NULL OR b.description IS NOT NULL)
          ORDER BY b.collected_at DESC LIMIT $1
     """),
-    ("youtube_videos", """
+    ("youtube_videos", f"""
         SELECT 'youtube' AS platform, v.id::text AS source_reference,
                c.custom_url AS username, concat_ws(' ', v.title, v.description) AS text_blob,
                v.tags AS hashtags
           FROM youtube_videos v
           LEFT JOIN youtube_channels c ON c.id = v.channel_id
          WHERE v.collected_at >= now() - interval '90 days'
-           AND v.metadata->>'channel_is_verified' IS DISTINCT FROM 'true'
-           AND v.metadata->>'is_verified' IS DISTINCT FROM 'true'
+           AND {_explicit_badge_json_exclusion('v.metadata')}
+           AND {_youtube_channel_badge_exclusion('c')}
            AND (v.title IS NOT NULL OR v.description IS NOT NULL OR v.tags IS NOT NULL)
          ORDER BY v.collected_at DESC LIMIT $1
     """),
-    ("youtube_community_posts", """
+    ("youtube_community_posts", f"""
         SELECT 'youtube' AS platform, p.id::text AS source_reference,
                c.custom_url AS username, p.text AS text_blob,
                ARRAY[]::text[] AS hashtags
           FROM youtube_community_posts p
           LEFT JOIN youtube_channels c ON c.platform_channel_id = p.channel_id
          WHERE p.collected_at >= now() - interval '90 days'
-           AND p.metadata->>'channel_is_verified' IS DISTINCT FROM 'true'
-           AND p.metadata->>'is_verified' IS DISTINCT FROM 'true'
+           AND {_explicit_badge_json_exclusion('p.metadata')}
+           AND {_youtube_channel_badge_exclusion('c')}
            AND (p.text IS NOT NULL OR c.custom_url IS NOT NULL)
          ORDER BY p.collected_at DESC LIMIT $1
     """),
@@ -493,57 +519,39 @@ _DYNAMIC_TERM_SOURCE_QUERIES = (
          WHERE collected_at >= now() - interval '90 days' AND comments IS NOT NULL
          ORDER BY collected_at DESC LIMIT $1
     """),
-    ("snapchat_stories", """
+    ("snapchat_stories", f"""
         SELECT 'snapchat' AS platform, s.story_id AS source_reference,
                s.username, NULL::text AS full_name, s.title AS text_blob,
                ARRAY[]::text[] AS hashtags
           FROM snapchat_stories s
           LEFT JOIN snapchat_profiles profile ON LOWER(profile.username)=LOWER(s.username)
          WHERE s.collected_at >= now() - interval '90 days'
-           AND profile.raw_payload->>'is_verified' IS DISTINCT FROM 'true'
-           AND profile.raw_payload->>'verified' IS DISTINCT FROM 'true'
-           AND profile.raw_payload->>'isVerified' IS DISTINCT FROM 'true'
-           AND profile.raw_payload->>'is_blue_verified' IS DISTINCT FROM 'true'
-           AND s.metadata->>'author_is_verified' IS DISTINCT FROM 'true'
-           AND s.metadata->>'is_verified' IS DISTINCT FROM 'true'
-           AND s.metadata->>'verified' IS DISTINCT FROM 'true'
-           AND s.metadata->>'is_blue_verified' IS DISTINCT FROM 'true'
+           AND {_explicit_badge_json_exclusion('profile.raw_payload')}
+           AND {_explicit_badge_json_exclusion('s.metadata')}
            AND (s.username IS NOT NULL OR s.title IS NOT NULL)
          ORDER BY s.collected_at DESC LIMIT $1
     """),
-    ("snapchat_spotlights", """
+    ("snapchat_spotlights", f"""
         SELECT 'snapchat' AS platform, s.spotlight_id AS source_reference,
                s.username, NULL::text AS full_name, s.title AS text_blob,
                ARRAY[]::text[] AS hashtags
           FROM snapchat_spotlights s
           LEFT JOIN snapchat_profiles profile ON LOWER(profile.username)=LOWER(s.username)
          WHERE s.collected_at >= now() - interval '90 days'
-           AND profile.raw_payload->>'is_verified' IS DISTINCT FROM 'true'
-           AND profile.raw_payload->>'verified' IS DISTINCT FROM 'true'
-           AND profile.raw_payload->>'isVerified' IS DISTINCT FROM 'true'
-           AND profile.raw_payload->>'is_blue_verified' IS DISTINCT FROM 'true'
-           AND s.metadata->>'author_is_verified' IS DISTINCT FROM 'true'
-           AND s.metadata->>'is_verified' IS DISTINCT FROM 'true'
-           AND s.metadata->>'verified' IS DISTINCT FROM 'true'
-           AND s.metadata->>'is_blue_verified' IS DISTINCT FROM 'true'
+           AND {_explicit_badge_json_exclusion('profile.raw_payload')}
+           AND {_explicit_badge_json_exclusion('s.metadata')}
            AND (s.username IS NOT NULL OR s.title IS NOT NULL)
          ORDER BY s.collected_at DESC LIMIT $1
     """),
-    ("snapchat_highlights", """
+    ("snapchat_highlights", f"""
         SELECT 'snapchat' AS platform, s.highlight_id AS source_reference,
                s.username, NULL::text AS full_name, s.title AS text_blob,
                ARRAY[]::text[] AS hashtags
           FROM snapchat_highlights s
           LEFT JOIN snapchat_profiles profile ON LOWER(profile.username)=LOWER(s.username)
          WHERE s.collected_at >= now() - interval '90 days'
-           AND profile.raw_payload->>'is_verified' IS DISTINCT FROM 'true'
-           AND profile.raw_payload->>'verified' IS DISTINCT FROM 'true'
-           AND profile.raw_payload->>'isVerified' IS DISTINCT FROM 'true'
-           AND profile.raw_payload->>'is_blue_verified' IS DISTINCT FROM 'true'
-           AND s.metadata->>'author_is_verified' IS DISTINCT FROM 'true'
-           AND s.metadata->>'is_verified' IS DISTINCT FROM 'true'
-           AND s.metadata->>'verified' IS DISTINCT FROM 'true'
-           AND s.metadata->>'is_blue_verified' IS DISTINCT FROM 'true'
+           AND {_explicit_badge_json_exclusion('profile.raw_payload')}
+           AND {_explicit_badge_json_exclusion('s.metadata')}
            AND (s.username IS NOT NULL OR s.title IS NOT NULL)
          ORDER BY s.collected_at DESC LIMIT $1
     """),
@@ -1180,19 +1188,51 @@ class SearchCollector(BaseCollector):
             for kind, term in unique_selected[: max(0, limit)]
         ]
 
+    async def _scrub_unsearched_legacy_verified_terms(self, conn) -> bool:
+        """Drop old, unsearched terms from badge-filtered sources once."""
+        async with conn.transaction():
+            marker = await conn.fetchval(
+                """
+                INSERT INTO service_cursors (service, last_processed_at, status)
+                VALUES ($1, now(), 'idle')
+                ON CONFLICT (service) DO NOTHING
+                RETURNING service
+                """,
+                _DYNAMIC_TERM_BADGE_SCRUB_CURSOR,
+            )
+            if marker is None:
+                return False
+            result = await conn.execute(
+                """
+                DELETE FROM search_dynamic_terms
+                 WHERE last_searched_at IS NULL
+                   AND source_platform = ANY($1::text[])
+                """,
+                ["instagram", "x", "threads", "tiktok", "snapchat", "pinterest", "youtube"],
+            )
+        removed = int(str(result).rsplit(" ", 1)[-1])
+        if removed:
+            logger.info(
+                "Removed %d unsearched legacy terms from badge-filtered sources",
+                removed,
+            )
+        return True
+
     async def _refresh_dynamic_search_terms(self, conn) -> None:
+        legacy_terms_scrubbed = await self._scrub_unsearched_legacy_verified_terms(conn)
         if self._dynamic_refresh_hours > 0:
             refresh_due = await conn.fetchval(
                 """
                 SELECT NOT EXISTS (
                     SELECT 1 FROM service_cursors
-                     WHERE service = 'search_dynamic_terms_v1'
+                     WHERE service = $2
                        AND last_processed_at > now() - ($1 * interval '1 hour')
                 )
                 """,
                 self._dynamic_refresh_hours,
+                _DYNAMIC_TERM_REFRESH_CURSOR,
             )
-            if not refresh_due:
+            if not refresh_due and not legacy_terms_scrubbed:
                 return
 
         source_rows = []
@@ -1252,10 +1292,11 @@ class SearchCollector(BaseCollector):
         await conn.execute(
             """
             INSERT INTO service_cursors (service, last_processed_at, status)
-            VALUES ('search_dynamic_terms_v1', now(), 'idle')
+            VALUES ($1, now(), 'idle')
             ON CONFLICT (service) DO UPDATE SET
                 last_processed_at = now(), status = 'idle'
-            """
+            """,
+            _DYNAMIC_TERM_REFRESH_CURSOR,
         )
         logger.info("Refreshed %d dynamic search terms from %d recent source rows", len(candidates), len(source_rows))
 
