@@ -694,6 +694,12 @@ async function attemptRecoverablePageInteraction(platformId, shell) {
     location.href = "https://x.com/home?uc_recover=" + Math.floor(Date.now() / 1000);
     return true;
   }
+  if (platformId === "x" && shell.reason === "try_again_empty_state") {
+    // X's native retry can detach its form during the click's default action,
+    // producing "Form submission canceled because the form is not connected".
+    // Use the existing paced route recovery and never click that shell button.
+    return switchXHostForRecoverableShell(shell);
+  }
   const key = `uc_recover_click_${platformId}_${shell.reason || "shell"}`;
   const last = lsNum(key);
   if (platformId === "x") {

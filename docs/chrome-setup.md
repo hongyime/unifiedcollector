@@ -29,7 +29,7 @@ which contains `manifest.json` and the built scripts under `dist/`:
 2. Enable Developer mode.
 3. Select **Load unpacked** and choose `extension/`.
 
-The tracked manifest currently declares extension version `1.23.117`.
+The tracked manifest currently declares extension version `1.23.119`.
 
 ## Verification and recovery
 

@@ -346,6 +346,13 @@ def test_recoverable_page_shells_recover_without_waiting_on_x_native_retry():
     assert 'if (!button2.isConnected || button2.closest && button2.closest("form") || button2.form)' in recover_block
     assert "switchXHostForRecoverableShell(shell)" in recover_block
 
+    x_retry_shell = recover_block.split(
+        'if (platformId === "x" && shell.reason === "try_again_empty_state")',
+        1,
+    )[1].split("const key = `uc_recover_click_", 1)[0]
+    assert "switchXHostForRecoverableShell(shell)" in x_retry_shell
+    assert "button2.click()" not in x_retry_shell
+
 
 def test_tiktok_zero_progress_reports_probe_and_page_recovery():
     content = _read("extension/content.js")
