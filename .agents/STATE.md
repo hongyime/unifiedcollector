@@ -1,5 +1,5 @@
 # Agent State
-Current task: Complete the UnifiedCollector Full Plan (2026-10-14), including the user's follow-first, verified-account, one-tab, and Telegram account/group decisions. Last reconciled: 2026-10-15 04:52 UTC.
+Current task: Complete the UnifiedCollector Full Plan (2026-10-14), including the user's follow-first, verified-account, one-tab, and Telegram account/group decisions. Last reconciled: 2026-10-15 04:54 UTC; checklist status surfaced to the user.
 
 ## Agreed scope and rules
 
@@ -18,7 +18,7 @@ Current task: Complete the UnifiedCollector Full Plan (2026-10-14), including th
 - [~] **Phase 2c — Pinterest, Snapchat, Airbnb:** Snapchat follow probes are advancing: 26 found, 106 unavailable, 8 pending from the GitHub-follow batch; 9 followed-native targets remain pending. Queue code blocks generic discovery while followed targets remain. Pinterest has 10 followed-native targets pending and no cookie path configured. Airbnb has 4 listings, 6 hosts, 14 reviews, and no followed-linked listing URL; host retries next become due at 05:50. Native detail coverage remains open.
 - [~] **Phase 3 — Telegram advanced features:** Four accounts are active and all four are currently cooling down until 06:21:41 UTC. At 04:50, discussion visits and poll-voter rows were both 0/12h; 10 discussion-recheck targets are pending. Member rows refreshed in the 12h window; join/leave event rows remain 0/12h. Recheck visits, non-anonymous poll votes, roster fields, and join/leave events after cooldown.
 - [~] **Phase 4 — Search:** Badge-filtered dynamic sources and profile sources are committed. The v2 refresh ran at 04:37:56; all 10 terms are due and never searched (3 Instagram, 3 TikTok, 1 YouTube, 1 Airbnb, 1 GitHub, 1 WhatsApp). Search has 599 pending targets and waits on Exposure's provider lock; its worker cursor is stale at 2026-10-14 00:59. Shared `search_queries/results` activity is not proof of Search work because Exposure uses the same tables. Verify Search's own paced queries and document index after the mutex releases naturally.
-- [~] **Verified-account exclusion + extension:** Explicit metadata guards are implemented; Search changes are pushed as `95bff26c`. A live verified-account skip has not yet been exercised. Repo extension is v1.23.110; latest ingest evidence was v1.23.108. CUA returned no browser surfaces at 04:40, so login, reload, capture, and one-tab-per-social counts are unverified.
+- [~] **Verified-account exclusion + extension:** Explicit metadata guards are implemented; Search changes are pushed as `95bff26c`. A live verified-account skip has not yet been exercised. Repo extension is v1.23.110; latest ingest evidence was v1.23.108. User reports logging in/reloading the extension; CUA returned no browser surfaces at 04:54, so active version/session, capture, and one-tab-per-social counts remain unverified.
 - [ ] **Final gate:** After phase gates pass, run a fresh 15-minute soak, refresh per-container rolling 12-hour evidence, and write `/tmp/unifiedcollector-plan-complete-20261014.md`.
 
 ## Ordered next actions
@@ -27,7 +27,7 @@ Current task: Complete the UnifiedCollector Full Plan (2026-10-14), including th
 2. Let Lemon8 finish its current collection call. Only at an idle/safe boundary recreate just `collector_lemon8` to load detail cap 4; verify API volume, extension capture, and URL/content-hash dedupe.
 3. Continue Snapchat's followed-profile/native targets; leave generic profile discovery parked while preferred targets remain. Pinterest needs the authenticated cookie path and browser surface. Recheck Airbnb host retry at 05:50 and its linked-listing queue.
 4. After Telegram cooldowns expire at 06:21:41, verify discussion visits and non-anonymous poll voters across all four accounts and eligible groups; inspect roster fields and join/leave events.
-5. When the managed browser surface returns, verify extension v1.23.110, sign-ins, capture, and no more than one managed tab per social.
+5. When the managed browser surface returns, audit existing tabs first (do not open duplicates), then verify the reported reload, active extension version/session, capture, and at most one managed tab per social.
 6. After all acceptance gates pass, perform the soak, refresh container-level 12-hour evidence, and write the completion report.
 
 ## Latest evidence snapshot — 2026-10-15 04:52 UTC
@@ -37,7 +37,7 @@ Current task: Complete the UnifiedCollector Full Plan (2026-10-14), including th
 - Lemon8's cursor is still `running` at 02:22, health last advanced 04:37:59, and there are no active collection-target claims or Lemon8 advisory locks. The worker process remains live; cursor state does not show an idle boundary. Runtime cap is 2; Compose is 4.
 - Native queue audit confirmed `profile_only_runner` polls every 60s and calls native cycles independently of generic collection targets. Followed-first gates are implemented across both queues. Snapchat follow probes advanced to 26 found/106 unavailable/8 pending; no generic expansion while preferred native/profile work remains. Airbnb has 3 host failures due after 05:50; Pinterest cookies remain unset.
 - Telegram account state shows 4/4 active accounts cooling down through 06:21:41. Discussion visits and poll-voter rows are 0/12h; 10 discussion-recheck targets remain pending. Member rows were refreshed; no join/leave rows appeared in the 12h window.
-- CUA returned `apps=[]`, `browsers=[]` at 04:40. No browser tabs were opened or changed; login and tab counts remain unknown.
+- CUA returned `apps=[]`, `browsers=[]` at 04:40 and again at 04:54 after the user reported a reload. No browser tabs were opened or changed; active extension/session and tab counts remain unknown.
 
 ## Current handoff
 
