@@ -4337,8 +4337,11 @@
       } else {
         const nextResponse2 = await send({ type: "getNativeScrapeTarget", platform }, { retries: 1, timeoutMs: 12e3 }).catch(() => null);
         const target = nextResponse2 && nextResponse2.target ? nextResponse2.target : null;
-        const items = extractNativePageItems(platform, document, location.href);
-        if (target && target.target_url && nativePageMatchesTarget(platform, location.href, String(target.target_url))) {
+        if (!target || !target.target_url) {
+          return { targets, saved, discovered: 0 };
+        }
+        if (nativePageMatchesTarget(platform, location.href, String(target.target_url))) {
+          const items = extractNativePageItems(platform, document, location.href);
           const result = await send({
             type: "nativeScrape",
             platform,
@@ -4354,26 +4357,9 @@
             saved += Object.values(result.accepted || {}).reduce((sum, count) => sum + Number(count || 0), 0);
           }
         } else {
-          if (items.length) {
-            const result = await send({
-              type: "nativeScrape",
-              platform,
-              target_id: null,
-              page_url: location.href,
-              username: nativePageUsername(platform, location.href),
-              status: "success",
-              items
-            }, { retries: 1, timeoutMs: 3e4 }).catch(() => null);
-            if (result && result.ok) {
-              targets += items.length;
-              saved += Object.values(result.accepted || {}).reduce((sum, count) => sum + Number(count || 0), 0);
-            }
-          }
-          if (target && target.target_url) {
-            await hsleep(2500);
-            location.href = String(target.target_url);
-            return { targets: targets + 1, saved, discovered: 0 };
-          }
+          await hsleep(2500);
+          location.href = String(target.target_url);
+          return { targets: targets + 1, saved, discovered: 0 };
         }
       }
       const nextResponse = await send({ type: "getNativeScrapeTarget", platform }, { retries: 1, timeoutMs: 12e3 }).catch(() => null);
