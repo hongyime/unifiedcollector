@@ -637,7 +637,7 @@ services:
       LEMON8_SPIDER_QUEUE_PER_CYCLE: "8"
       LEMON8_FEED_PAGES_PER_CYCLE: "5"
       LEMON8_FEED_MEDIA_PER_CYCLE: "120"
-      LEMON8_FYP_DETAIL_PER_CYCLE: "2"
+      LEMON8_FYP_DETAIL_PER_CYCLE: "4"
     extra_hosts:
       - "host.docker.internal:172.20.0.1"
     cap_add:
