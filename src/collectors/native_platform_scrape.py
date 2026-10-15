@@ -865,7 +865,14 @@ async def claim_native_target(pool: Any, platform: str) -> dict[str, Any] | None
                                AND active.status='claimed'
                                AND active.claim_expires_at > now()
                        )
-                     ORDER BY due.priority DESC, due.next_visit_at, due.id
+                     -- Give never-tried pending identities a first pass before
+                     -- due retries, so repeated failures cannot starve a
+                     -- followed-identity candidate.
+                     ORDER BY due.priority DESC,
+                              CASE WHEN due.status='pending' THEN 0 ELSE 1 END,
+                              due.attempts,
+                              due.next_visit_at,
+                              due.id
                      LIMIT 1
                      FOR UPDATE SKIP LOCKED
                  )
