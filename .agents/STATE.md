@@ -1,32 +1,44 @@
 # Agent State
-Current task: Complete the UnifiedCollector Full Plan (2026-10-14), one phase/commit at a time, including the later verified-account, follow-priority, and one-tab requirements.
-Status (2026-10-15 23:54 UTC): Phase 1 and Beeper history verification pass. Social preference work (explicit badge filtering, followed-target priority, and one-tab cleanup) is committed and pushed as `e1c72014`; source/runtime validation remains. Search, Telegram discussion visits, Lemon8 extension capture, Pinterest pin detail coverage, Snapchat highlights, and live reload/queue checks remain open. Extension v1.23.110 is built but live heartbeats still show v1.23.108.
+Current task: Complete the UnifiedCollector Full Plan (2026-10-14), including the user's later verified-account, follow-priority, one-tab, and Phase 2 native-collector clarifications.
+Status: Phase 1 and Phase 2a are verified. The user's badge/follow/tab preferences are committed and pushed (`e1c72014`); live rollout is not yet confirmed. The newest live evidence recorded in JOURNAL is from the last 15-minute soak/report, before that preference commit. Treat the checklist below as current scope and the recorded counts as the last measured snapshot, not a fresh audit.
 
 ## Agreed operating rules
 
 - Telegram may use every configured account across all eligible groups; the allowlist is empty. Current FloodWait cooldowns cover all 4 configured accounts until 2026-10-15 06:01–06:21 UTC. Ten `discussion_recheck` jobs remain pending.
+- Per the user's clarification, Pinterest, Snapchat, and Airbnb remain WIP under Phase 2; their detailed acceptance criteria are the original plan's Phase 5a–5c.
 - Pinterest and Snapchat start from available follow-graph targets and widen only when capacity remains. Airbnb uses explicit listing links associated with followed identities, then broadens only with spare capacity.
 - Exclude accounts only when a platform supplies an explicit verification/badge signal on Instagram, Snapchat, Pinterest, X, Threads, TikTok, or YouTube. Unknown stays eligible; do not infer from names/popularity.
-- Keep one extension tab per social platform. v1.23.110 clears expanded-tab mode and deduplicates on startup; manual reload and tab audit remain.
+- Keep at most one extension-managed tab per social platform. Snapchat Requests and Airbnb GraphQL do not need extension tabs; Pinterest's Playwright context is separate from an extension tab. Extension v1.23.110 clears expanded-tab mode and deduplicates on startup.
 - Do not touch Spider/SpiderFoot files, print credentials, exceed provider backoffs, or release Exposure's idle advisory lock.
+
+Checklist key: `[x]` verified, `[~]` in progress or awaiting live evidence, `[ ]` not complete.
 
 ## Active checklist
 
-- [x] Phase 1: split Exposure/Lemon8 and Search/Strava; rename `instagram_ingest` to `browser_ingest`. Changes are pushed; all 30 Compose services are currently running.
-- [x] Phase 2a Beeper: live DB gained 436 messages in 15 minutes; latest cycle logged 293 messages and 0 errors.
-- [~] Phase 2b Lemon8 API + extension: 28 posts in the last 12 hours (target 50+). Recent extension media events (191) all reported 0 observed/stored items; no fresh browser media candidates. Current heartbeat is v1.23.108; latest local build v1.23.110 is not loaded. A populated-feed browser check is still required.
-- [~] Phase 3 Telegram: poll votes (262 total), chat members (223,864 total; 615 refreshed in 12 hours), and join/leave events (1 total and recent) have rows. Discussion visits are 0; all 4 accounts are in FloodWait until the deadlines above, and 10 rechecks are pending. Verify rechecks after cooldown.
-- [~] Phase 4 Search: 10 active dynamic terms are all due and unsearched; no `search_queries` rows were created in 12 hours, though 7,401 existing search results and 28 indexed documents are recent. Exposure holds the shared advisory lock idle; do not interrupt it. Diagnose a non-invasive way to resume term searches.
-- [~] Phase 5a Pinterest: 432 boards and 137 pins. 136 pins have titles, 1 has a description, and none have destination links or repin/comment counts. Implement/verify the missing pin detail fields.
-- [~] Phase 5b Snapchat: 2,205 profiles, 9 stories, and 24 Spotlights; `snapchat_highlights` has 0 rows. Verify whether public highlights are discoverable and persist them when available.
-- [~] Phase 5c Airbnb: 4 listings, 6 hosts, and 14 reviews; listing descriptions/photos/amenities and review text are present on most rows. Confirm the direct GraphQL path and finish field/live verification.
-- [~] Later user requirements: explicit badge filters and followed-target priority are committed/pushed in `e1c72014`, statically validated, and not yet live-confirmed. Verify queue order and fresh captures after rollout; retain historical rows.
-- [~] One tab per platform: source/build includes normalized `www`/bare matching, expanded-tab reset, and duplicate cleanup. Live version is still v1.23.108; reload v1.23.110 and audit tab counts.
-- [ ] After all phase gates clear, run a fresh clean 15-minute soak and refresh the per-container rolling 12-hour report; write `/tmp/unifiedcollector-plan-complete-20261014.md`.
+- [x] Phase 1: split Exposure/Lemon8 and Search/Strava; rename `instagram_ingest` to `browser_ingest`. Changes are pushed.
+- [x] Phase 2a Beeper: last recorded live check added 436 messages in 15 minutes; latest cycle logged 293 messages and 0 errors. Recheck in the final soak.
+- [~] Phase 2b Lemon8 API + extension: last recorded 12-hour total was 25 posts (target 50+); extension produced 0 browser candidates. User says the extension was reloaded, but latest server heartbeats still identify v1.23.108 while local build is v1.23.110. Diagnose the loaded browser/profile and capture from a populated feed.
+- [~] Phase 2c native collectors (original Phase 5): Pinterest, Snapchat, and Airbnb remain WIP as requested. Track acceptance details below; do not move them out of Phase 2.
+- [~] Phase 3 Telegram: poll votes, member roster, and join/leave tables have rows; discussion visits remain 0 and 10 `discussion_recheck` jobs are pending. All configured accounts/groups are eligible. Four account FloodWait deadlines were recorded; recheck queue progress after they expire without hammering.
+- [~] Phase 4 Search: code now refreshes up to 10 profile/post-derived terms per cycle, rotates approved dorks, expires zero-result terms after 7 days, and indexes local documents (28 recorded). The first live refresh populated 10 terms, then provider search waited on Exposure's shared advisory lock; 0 provider queries were made. Do not interrupt Exposure or release its lock; resume after its owner releases it.
+- [~] Phase 2c / 5a Pinterest: latest public-board run stored 0 pins; the current public DOM had no safe pin-card identifiers, so unrelated images were not turned into pins. Authenticated Playwright/cookie capture and pin captions, destination links, repin/comment counts remain unverified.
+- [~] Phase 2c / 5b Snapchat: 9 stories and 24 Spotlights were recorded; highlights remain 0. Parser supports public curated highlights. Verify whether current followed/public targets expose any, then confirm follow-first target order and explicit-badge exclusion.
+- [~] Phase 2c / 5c Airbnb: direct public GraphQL path is implemented (no paid Apify). Last recorded totals: 4 listings, 6 hosts, 14 reviews; a requeued listing returned description, 60 photos, price, 14 amenities, 365 availability days, reviews, and host data. Anonymous host bio was unavailable. Verify followed-identity link priority and the preference filters live.
+- [~] Preference rollout: explicit platform badge filtering and follow-priority code are committed/pushed in `e1c72014`; unknown verification status stays eligible. Verify fresh captures/queue order after the correct extension build is loaded; retain historical rows.
+- [~] Extension tab budget: v1.23.110 normalizes host matching, clears expanded-tab mode, and deduplicates on startup. User reports a reload, but server heartbeats still show v1.23.108 and the UI shows Strava active while Pinterest/Snapchat/Airbnb have no extension tab. Inspect which browser profile/build is connected. Keep one tab max for extension-managed sites; native collectors do not require extension tabs.
+- [ ] Final gate: after live rollout and remaining phase checks, run a fresh 15-minute soak, refresh each container's rolling 12-hour report, and write `/tmp/unifiedcollector-plan-complete-20261014.md`.
+
+## Next actions
+
+1. Inspect the live browser/extension connection and version to explain the v1.23.108 heartbeat after the user's reload; audit extension-managed tab counts without opening duplicates. Treat Pinterest Playwright, Snapchat Requests, and Airbnb GraphQL as native workers, not missing extension tabs.
+2. Recheck native queue priority and live writes (Pinterest authenticated pin details, Snapchat highlight availability, Airbnb followed-link targets) without exceeding provider backoffs.
+3. After Telegram cooldowns, inspect the 10 rechecks across all eligible configured accounts/groups and confirm discussion visits are written.
+4. Let Exposure's advisory-lock owner release it naturally, then verify Search provider queries and stored/indexed results.
+5. Once those gates pass, run the final soak/report and update this checklist before marking the goal complete.
 
 ## Current handoff
 
-See `.agents/handoffs/20261015-2350-utc-full-plan.md` for the current live snapshot, uncommitted files, and ordered next steps. The prior clean soak passed 22:47:49–23:02:49 UTC, but later code/runtime changes require another soak.
+See `.agents/handoffs/20261015-2350-utc-full-plan.md` for the earlier checkpoint. Its state predates later native-collector work and the preference commit; the checklist above and newer JOURNAL entries take precedence. The recorded clean soak passed before the preference commit, so another soak is required.
 
 ## Prior handoff history
 
