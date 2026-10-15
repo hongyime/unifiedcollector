@@ -870,10 +870,57 @@ async def test_collect_runs_dynamic_dork_queries_before_static_targets(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_collect_advances_dynamic_terms_before_result_postprocessing(monkeypatch):
+    _set_clean_env(monkeypatch)
+    monkeypatch.setenv("SEARCH_QUERY_DELAY_SECONDS", "0")
+    coll = SearchCollector()
+    events = []
+    item = {
+        "term": "alice",
+        "query": 'site:s3.amazonaws.com alice',
+        "next_template_cursor": 1,
+    }
+    item2 = {
+        "term": "bob",
+        "query": 'site:s3.amazonaws.com bob',
+        "next_template_cursor": 1,
+    }
+    hits = [{"url": "https://example.org/"}]
+
+    async def search(_query, *, postprocess=True):
+        events.append(("search", postprocess))
+        return hits
+
+    async def mark(_item, *, result_count, completed):
+        events.append(("mark", result_count, completed))
+
+    async def postprocess(_query, _hits):
+        events.append(("postprocess",))
+
+    coll.search_query = AsyncMock(side_effect=search)
+    coll._prepare_dynamic_search_queries = AsyncMock(return_value=[item, item2])
+    coll._mark_dynamic_search_query = AsyncMock(side_effect=mark)
+    coll._postprocess_query_results = AsyncMock(side_effect=postprocess)
+    coll.checkpoint.save_progress = AsyncMock()
+    coll.heartbeat_source_health = AsyncMock()
+
+    await coll.collect([])
+
+    assert events == [
+        ("search", False),
+        ("mark", 1, True),
+        ("search", False),
+        ("mark", 1, True),
+        ("postprocess",),
+        ("postprocess",),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_collect_retries_dynamic_query_after_rate_limit(monkeypatch):
     _set_clean_env(monkeypatch)
     coll = SearchCollector()
-    async def rate_limited(_query):
+    async def rate_limited(_query, *, postprocess=True):
         coll._last_search_query_rate_limited = True
         return []
 
@@ -962,31 +1009,52 @@ async def test_dynamic_query_result_update_tracks_zero_results(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_search_query_holds_shared_mutex_for_one_query(monkeypatch):
+async def test_search_query_releases_shared_mutex_before_finalisation(monkeypatch):
     _set_clean_env(monkeypatch)
     coll = SearchCollector()
     events = []
+    lock_held = False
 
     async def acquire(source):
+        nonlocal lock_held
+        lock_held = True
         events.append(("acquire", source))
         return "lock-handle"
 
     async def release(handle):
+        nonlocal lock_held
+        lock_held = False
         events.append(("release", handle))
+
+    async def search(_query, **_kwargs):
+        events.append(("search", lock_held))
+        return [{"url": "https://example.org/"}]
+
+    async def finalise(_query, hits, *, postprocess=True):
+        events.append(("finalise", lock_held))
+        return hits
 
     coll._collect_mutex_acquire = acquire
     coll._collect_mutex_release = release
     coll._DDGS = None
     coll._BS = None
     coll._serper_api_key = ""
-    coll._finalise_query = AsyncMock(return_value=[{"url": "https://example.org/"}])
-    coll._search_query_unlocked = AsyncMock(return_value=[{"url": "https://example.org/"}])
+    coll._finalise_query = AsyncMock(side_effect=finalise)
+    coll._search_query_unlocked = AsyncMock(side_effect=search)
 
     result = await coll.search_query("public term")
 
     assert result == [{"url": "https://example.org/"}]
-    assert events == [("acquire", "search"), ("release", "lock-handle")]
+    assert events == [
+        ("acquire", "search"),
+        ("search", True),
+        ("release", "lock-handle"),
+        ("finalise", False),
+    ]
     coll._search_query_unlocked.assert_awaited_once()
+    coll._finalise_query.assert_awaited_once_with(
+        "public term", [{"url": "https://example.org/"}], postprocess=True,
+    )
 
 
 def test_document_text_extraction_handles_text_rtf_and_docx():

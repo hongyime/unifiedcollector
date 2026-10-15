@@ -1423,24 +1423,13 @@ class SearchCollector(BaseCollector):
         direct = [t for t in targets if t.startswith(("http://", "https://"))]
         static_queries = [t for t in targets if not t.startswith(("http://", "https://"))]
         queries = list(dict.fromkeys([*(item["query"] for item in dynamic_items), *static_queries]))
-        if direct:
-            logger.info("Crawling %d direct seed URL(s) (open dir / bucket)", len(direct))
-            async with self._shared_search_engine_mutex() as acquired:
-                if not acquired:
-                    return
-                try:
-                    await self.expand_paste_sites(direct)
-                    for u in direct:
-                        await self.checkpoint.save_progress(u)
-                    await self.heartbeat_source_health()
-                except Exception as e:
-                    logger.exception("direct seed crawl failed: %s", e)
+        pending_postprocessing: list[tuple[str, list[dict]]] = []
         for query in queries:
             if self._stop.is_set():
                 break
             logger.info("Collecting search/%s", query)
             try:
-                results = await self.search_query(query)
+                results = await self.search_query(query, postprocess=False)
                 if self._last_search_query_lock_skipped:
                     break
                 if query in dynamic_by_query:
@@ -1449,6 +1438,8 @@ class SearchCollector(BaseCollector):
                         result_count=len(results),
                         completed=not self._last_search_query_rate_limited,
                     )
+                if results:
+                    pending_postprocessing.append((query, results))
                 await self.checkpoint.save_progress(query)
                 await self.heartbeat_source_health()
             except Exception as e:
@@ -1461,6 +1452,26 @@ class SearchCollector(BaseCollector):
             if query_delay > 0 and not self._stop.is_set():
                 await asyncio.sleep(query_delay)
 
+        # Search provider calls and dynamic-term scheduling finish before any
+        # result crawling or asset downloads. Those follow-up requests can be
+        # slow, but must not hold the shared search-engine mutex or delay the
+        # remaining dork queries in this batch.
+        for query, results in pending_postprocessing:
+            try:
+                await self._postprocess_query_results(query, results)
+            except Exception:
+                logger.exception("Search result post-processing failed for %r", query)
+
+        if direct:
+            logger.info("Crawling %d direct seed URL(s) (open dir / bucket)", len(direct))
+            try:
+                await self.expand_paste_sites(direct)
+                for url in direct:
+                    await self.checkpoint.save_progress(url)
+                await self.heartbeat_source_health()
+            except Exception:
+                logger.exception("direct seed crawl failed")
+
     # ------------------------------------------------------------------ #
     # Public entry points (search_query / expand_paste_sites)
     # ------------------------------------------------------------------ #
@@ -1469,24 +1480,27 @@ class SearchCollector(BaseCollector):
         self,
         query: str,
         engines: Optional[Iterable[str]] = None,
+        *,
+        postprocess: bool = True,
     ) -> list[dict]:
         self._last_search_query_lock_skipped = False
         async with self._shared_search_engine_mutex() as acquired:
             if not acquired:
                 self._last_search_query_lock_skipped = True
                 return []
-            return await self._search_query_unlocked(query, engines=engines)
+            hits = await self._search_query_unlocked(query, engines=engines)
+        return await self._finalise_query(query, hits, postprocess=postprocess)
 
     async def _search_query_unlocked(
         self,
         query: str,
         engines: Optional[Iterable[str]] = None,
     ) -> list[dict]:
-        """Run a multi-engine search waterfall and persist results.
+        """Run the multi-engine search waterfall and return its hits.
 
         Mirrors ``searchtoolkit.app.get_search_results`` but emits structured
         result dicts ``{url, title, snippet, rank, engine, domain}`` and
-        persists them to ``search_results``.
+        returns them for persistence after the shared provider mutex is released.
         """
         engines = tuple(engines) if engines else self.DEFAULT_ENGINES
         self._last_search_query_rate_limited = not any((
@@ -1508,7 +1522,7 @@ class SearchCollector(BaseCollector):
                 hit["rank"] = rank_counter
                 all_results[url] = hit
             if len(all_results) >= self._max_results:
-                return await self._finalise_query(query, list(all_results.values()))
+                return list(all_results.values())
 
         # --- 2) Bing -----------------------------------------------------
         if "bing" in engines and self._BS is not None:
@@ -1521,7 +1535,7 @@ class SearchCollector(BaseCollector):
                 hit["rank"] = rank_counter
                 all_results[url] = hit
             if len(all_results) >= self._max_results:
-                return await self._finalise_query(query, list(all_results.values()))
+                return list(all_results.values())
 
         # --- 3) Serper (Google) — only when DDG+Bing came up dry --------
         if (
@@ -1554,7 +1568,7 @@ class SearchCollector(BaseCollector):
                 )
                 logger.warning("Serper quota exhausted; skipping for query=%r", query)
 
-        return await self._finalise_query(query, list(all_results.values()))
+        return list(all_results.values())
 
     async def expand_paste_sites(self, seed_urls: list[str]) -> list[dict]:
         """Spider each seed URL and return discovered image/PDF asset URLs.
@@ -2069,7 +2083,13 @@ class SearchCollector(BaseCollector):
     # Persistence + post-processing
     # ------------------------------------------------------------------ #
 
-    async def _finalise_query(self, query: str, hits: list[dict]) -> list[dict]:
+    async def _finalise_query(
+        self,
+        query: str,
+        hits: list[dict],
+        *,
+        postprocess: bool = True,
+    ) -> list[dict]:
         """Persist the query+hits then optionally fetch their assets."""
         if not hits:
             return []
@@ -2081,6 +2101,16 @@ class SearchCollector(BaseCollector):
         except Exception as e:
             logger.warning("DB persist failed for %r: %s", query, e)
 
+        if postprocess:
+            await self._postprocess_query_results(query, hits)
+
+        logger.info("Search %r: %d results persisted (tor=%s)", query, len(hits), os.getenv("TOR_PROXY_ENABLED") == "1")
+        return hits
+
+    async def _postprocess_query_results(self, query: str, hits: list[dict]) -> None:
+        """Fetch result assets and optionally crawl result pages."""
+        if not hits:
+            return
         if self._download_images:
             tasks = []
             for hit in hits:
@@ -2090,9 +2120,6 @@ class SearchCollector(BaseCollector):
 
         if self._spider_pages:
             await self.expand_paste_sites([h["url"] for h in hits if h.get("url")])
-
-        logger.info("Search %r: %d results persisted (tor=%s)", query, len(hits), os.getenv("TOR_PROXY_ENABLED") == "1")
-        return hits
 
     async def _upsert_query(self, query: str) -> None:
         if self.pool is None:
