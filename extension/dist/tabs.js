@@ -102,7 +102,7 @@
     list.innerHTML = platforms.map((p) => {
       const login = p.noLogin ? badge("login", "idle", "no login needed") : p.loggedIn === true ? badge("login", "ok", "logged in") : p.loggedIn === false ? badge("login", "bad", "not logged in") : badge("login", "idle", "login unknown");
       const tab = p.tabOpen ? badge("tab", "ok", "tab open") : badge("tab", "idle", "no tab");
-      const scr = p.scraper ? `<span class="pill active">scraper active</span>` : `<span class="pill">login-ready</span>`;
+      const scr = p.scraper ? `<span class="pill active">scraper available</span>` : `<span class="pill">login-ready</span>`;
       return `
         <div class="card">
           <div>

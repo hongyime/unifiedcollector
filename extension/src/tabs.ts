@@ -118,7 +118,7 @@ async function render() {
         : badge("login", "idle", "login unknown");
       const tab = p.tabOpen ? badge("tab", "ok", "tab open") : badge("tab", "idle", "no tab");
       const scr = p.scraper
-        ? `<span class="pill active">scraper active</span>`
+        ? `<span class="pill active">scraper available</span>`
         : `<span class="pill">login-ready</span>`;
       return `
         <div class="card">
