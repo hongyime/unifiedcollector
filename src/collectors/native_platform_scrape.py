@@ -30,7 +30,7 @@ _FOLLOWED_HANDLE_SEED_SQL = """
                    f.last_seen
               FROM follow_edges f
              WHERE f.direction='following'
-               AND f.platform IN ('instagram','x','tiktok','threads','pinterest','snapchat')
+               AND f.platform IN ('instagram','x','tiktok','threads','pinterest','snapchat','youtube')
                AND BTRIM(COALESCE(f.target_username,'')) ~ '^[A-Za-z0-9._-]{1,100}$'
                AND NOT EXISTS (
                     SELECT 1 FROM instagram_profiles p
@@ -90,6 +90,29 @@ _FOLLOWED_HANDLE_SEED_SQL = """
                             OR p.raw_payload->>'blue_verified'='true'
                             OR p.raw_payload->>'blueVerified'='true'
                             OR p.raw_payload->>'verified_badge'='true')
+               )
+               AND NOT EXISTS (
+                    SELECT 1 FROM youtube_channels channel
+                     WHERE f.platform='youtube'
+                       AND (channel.platform_channel_id=f.target_uid
+                            OR LOWER(channel.custom_url)=LOWER(BTRIM(f.target_username)))
+                       AND (
+                            channel.last_skip_reason='verified_account'
+                            OR EXISTS (
+                                SELECT 1 FROM youtube_videos video
+                                 WHERE video.channel_id=channel.id
+                                   AND (video.metadata->>'channel_is_verified'='true'
+                                        OR video.metadata->>'is_verified'='true'
+                                        OR video.metadata->>'verified'='true')
+                            )
+                            OR EXISTS (
+                                SELECT 1 FROM youtube_community_posts post
+                                 WHERE post.channel_id=channel.platform_channel_id
+                                   AND (post.metadata->>'channel_is_verified'='true'
+                                        OR post.metadata->>'is_verified'='true'
+                                        OR post.metadata->>'verified'='true')
+                            )
+                       )
                )
              ORDER BY LOWER(BTRIM(f.target_username)),
                       f.last_seen DESC NULLS LAST

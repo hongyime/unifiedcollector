@@ -69,6 +69,30 @@ class _PinterestPublicHttpError(RuntimeError):
         super().__init__(f"public_http_{self.status_code}")
 
 
+_PINTEREST_NATIVE_ERROR_CODES = frozenset({
+    "unsupported_public_page",
+    "public_redirect_rejected",
+    "public_redirect_limit",
+    "public_redirect_missing_location",
+    "public_page_too_large",
+    "verified_account_excluded",
+    "public_profile_identity_unconfirmed",
+    "public_visibility_unconfirmed",
+    "public_target_redirected",
+    "private_content_rejected",
+    "empty_public_page",
+})
+
+
+def _pinterest_native_error_code(exc: Exception) -> str:
+    if isinstance(exc, _PinterestPublicHttpError):
+        return f"public_http_{exc.status_code}"
+    message = str(exc)
+    if message in _PINTEREST_NATIVE_ERROR_CODES:
+        return message
+    return type(exc).__name__.lower()
+
+
 def _retry_after_seconds(value: Any, *, now: datetime | None = None) -> int | None:
     text = str(value or "").strip()
     if not text:
@@ -855,13 +879,14 @@ class PinterestCollector(ProfileOnlyCollector):
                 retry_after_seconds = 24 * 60 * 60
             elif retry_after_seconds is None:
                 retry_after_seconds = max(exponential_retry, 2 * 60 * 60)
+            error_code = _pinterest_native_error_code(exc)
             await finish_native_target(
                 self.pool, self.SOURCE_NAME, int(target["id"]), success=False,
-                error=str(exc) if str(exc).startswith("public_http_") else type(exc).__name__.lower(),
+                error=error_code,
                 retry_after_seconds=retry_after_seconds,
             )
-            logger.warning("Pinterest native scrape failed: %s", type(exc).__name__)
-            summary["error"] = type(exc).__name__
+            logger.warning("Pinterest native scrape failed: %s", error_code)
+            summary["error"] = error_code
         return summary
 
     async def _upsert_profile(self, username: str, result: ProfileResult) -> None:
