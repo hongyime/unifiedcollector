@@ -18,7 +18,12 @@ from src.collectors.pinterest import (
 )
 from src.collectors import pinterest as pinterest_mod
 from src.collectors import snapchat as snapchat_mod
-from src.collectors.native_platform_scrape import _SEED_QUERIES, retarget_snapchat_profile_targets
+from src.collectors.native_platform_scrape import (
+    _FOLLOWED_HANDLE_SEED_SQL,
+    _SEED_QUERIES,
+    quarantine_unfollowed_handle_candidates,
+    retarget_snapchat_profile_targets,
+)
 from src.collectors.snapchat import (
     _PublicPageHttpError,
     _allowed_public_page,
@@ -39,6 +44,36 @@ def test_pinterest_cookie_snapshot_filters_to_pinterest_domain(tmp_path):
 
     assert result is not None
     assert [cookie["name"] for cookie in result["cookies"]] == ["session"]
+
+
+def test_followed_handle_seeder_is_scoped_to_its_own_platform():
+    assert "AND f.platform=$1" in _FOLLOWED_HANDLE_SEED_SQL
+    assert "f.platform IN (" not in _FOLLOWED_HANDLE_SEED_SQL
+
+
+@pytest.mark.asyncio
+async def test_unfollowed_handle_quarantine_exhausts_only_stale_guesses():
+    class Connection:
+        def __init__(self):
+            self.calls = []
+
+        async def execute(self, query, *args):
+            self.calls.append((query, args))
+
+    connection = Connection()
+
+    await quarantine_unfollowed_handle_candidates(connection, "snapchat")
+
+    assert len(connection.calls) == 1
+    query, args = connection.calls[0]
+    assert args == ("snapchat", 8)
+    assert "q.status IN ('pending','failed')" in query
+    assert "q.status='claimed' AND q.claim_expires_at <= now()" in query
+    assert "f.platform=$1 AND f.direction='following'" in query
+    assert "LOWER(BTRIM(f.target_username))=LOWER(BTRIM(q.username))" in query
+
+    await quarantine_unfollowed_handle_candidates(connection, "airbnb")
+    assert len(connection.calls) == 1
 
 
 def test_pinterest_cookie_loader_uses_newest_platform_snapshot(tmp_path, monkeypatch):

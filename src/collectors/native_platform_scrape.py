@@ -30,7 +30,7 @@ _FOLLOWED_HANDLE_SEED_SQL = """
                    f.last_seen
               FROM follow_edges f
              WHERE f.direction='following'
-               AND f.platform IN ('github','instagram','x','tiktok','threads','pinterest','snapchat','youtube')
+               AND f.platform=$1
                AND BTRIM(COALESCE(f.target_username,'')) ~ '^[A-Za-z0-9._-]{1,100}$'
                AND NOT EXISTS (
                     SELECT 1 FROM instagram_profiles p
@@ -764,6 +764,8 @@ async def seed_native_targets(pool: Any, platform: str) -> None:
                 "SELECT pg_advisory_xact_lock(hashtext($1))",
                 f"browser-native-scrape:{platform}",
             )
+            if platform in {"pinterest", "snapchat"}:
+                await quarantine_unfollowed_handle_candidates(conn, platform)
             if platform == "snapchat":
                 await retarget_snapchat_profile_targets(conn)
 
@@ -821,6 +823,36 @@ async def seed_native_targets(pool: Any, platform: str) -> None:
                     await conn.execute(query, remaining)
                 else:
                     await conn.execute(query)
+
+
+async def quarantine_unfollowed_handle_candidates(conn: Any, platform: str) -> None:
+    """Exhaust stale guessed handles that are absent from the platform's own follow graph."""
+    if platform not in {"pinterest", "snapchat"}:
+        return
+    await conn.execute(
+        """
+        UPDATE browser_native_scrape_queue q
+           SET status='failed', attempts=GREATEST(q.attempts, $2),
+               last_error='follow_edge_missing', updated_at=now()
+         WHERE q.platform=$1 AND q.source='followed_handle_candidate'
+           AND (
+                q.status IN ('pending','failed')
+                OR (q.status='claimed' AND q.claim_expires_at <= now())
+           )
+           AND (
+                q.status <> 'failed'
+                OR q.attempts < $2
+                OR q.last_error IS DISTINCT FROM 'follow_edge_missing'
+           )
+           AND NOT EXISTS (
+                SELECT 1 FROM follow_edges f
+                 WHERE f.platform=$1 AND f.direction='following'
+                   AND LOWER(BTRIM(f.target_username))=LOWER(BTRIM(q.username))
+           )
+        """,
+        platform,
+        _MAX_ATTEMPTS,
+    )
 
 
 async def claim_native_target(pool: Any, platform: str) -> dict[str, Any] | None:
