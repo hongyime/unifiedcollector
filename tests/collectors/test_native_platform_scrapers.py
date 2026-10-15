@@ -20,6 +20,7 @@ from src.collectors import pinterest as pinterest_mod
 from src.collectors import snapchat as snapchat_mod
 from src.collectors.native_platform_scrape import (
     _FOLLOWED_HANDLE_SEED_SQL,
+    _PINTEREST_PIN_DETAIL_SEED_SQL,
     _SEED_QUERIES,
     quarantine_unfollowed_handle_candidates,
     retarget_snapchat_profile_targets,
@@ -187,6 +188,136 @@ def test_pinterest_parser_skips_explicit_verified_pin_authors_but_keeps_unknown_
     )
 
     assert {pin["id"] for pin in pins} == {"333", "444"}
+
+
+def test_pinterest_pin_detail_parser_extracts_only_the_requested_pin_fields():
+    target = "https://www.pinterest.com/pin/12345/"
+    boards, pins = PinterestCollector._parse_native_page(
+        target,
+        {
+            "title": "Mountain route photo",
+            "description": "A complete caption for this pin.",
+            "pin_detail": {
+                "id": "12345",
+                "title": "Mountain route photo",
+                "description": "A complete caption for this pin.",
+                "destination_url": "https://example.org/trail",
+                "card_text": "1.2K repins 24 comments",
+                "author_is_verified": False,
+            },
+            "pin_cards": [
+                {
+                    "href": target,
+                    "pin_id": "12345",
+                    "image_url": "https://i.pinimg.com/mountain.jpg",
+                    "destination_url": "https://example.org/trail",
+                    "card_text": "1.2K repins 24 comments",
+                    "author_is_verified": False,
+                },
+                {
+                    "href": "https://www.pinterest.com/pin/99999/",
+                    "pin_id": "99999",
+                    "description": "A recommended pin",
+                },
+            ],
+        },
+    )
+
+    assert boards == []
+    assert [pin["id"] for pin in pins] == ["12345"]
+    pin = pins[0]
+    assert pin["description"] == "A complete caption for this pin."
+    assert pin["destination_url"] == "https://example.org/trail"
+    assert pin["repin_count"] == 1200
+    assert pin["comment_count"] == 24
+    assert pin["image_url"] == "https://i.pinimg.com/mountain.jpg"
+    assert pin["username"] is None
+    assert pin["owner_verified"] is False
+    assert PinterestCollector._has_public_content(
+        ("pin", "12345", None), boards, pins,
+    )
+
+
+def test_pinterest_pin_route_without_rendered_fields_is_not_public_content():
+    target = "https://www.pinterest.com/pin/12345/"
+    boards, pins = PinterestCollector._parse_native_page(
+        target,
+        {"title": "Pinterest", "pin_detail": {
+            "id": "12345", "pin_id": "12345", "title": "Pinterest",
+            "href": target,
+        }},
+    )
+
+    assert boards == []
+    assert len(pins) == 1
+    assert not PinterestCollector._has_public_content(
+        ("pin", "12345", None), boards, pins,
+    )
+
+
+def test_pinterest_pin_detail_parser_skips_an_explicitly_verified_author():
+    _boards, pins = PinterestCollector._parse_native_page(
+        "https://www.pinterest.com/pin/12345/",
+        {
+            "pin_detail": {"id": "12345", "author_is_verified": True},
+            "pin_cards": [{
+                "href": "https://www.pinterest.com/pin/12345/",
+                "pin_id": "12345",
+                "author_is_verified": True,
+            }],
+        },
+    )
+
+    assert pins == []
+
+
+def test_pinterest_pin_detail_seed_uses_only_followed_verified_ownership_and_is_capped():
+    sql = _PINTEREST_PIN_DETAIL_SEED_SQL
+
+    assert "JOIN follow_edges f" in sql
+    assert "f.platform='pinterest' AND f.direction='following'" in sql
+    assert "p.metadata->>'owner_verified'='true'" in sql
+    assert "p.description IS NULL" in sql
+    assert "p.destination_url IS NULL" in sql
+    assert "p.repin_count IS NULL" in sql
+    assert "p.comment_count IS NULL" in sql
+    assert "pinterest_pin_details" in sql
+    assert "LIMIT GREATEST(0, 10 - (" in sql
+
+
+def test_pinterest_authenticated_details_enrich_only_matching_public_pin_ids():
+    public_pins = [{
+        "id": "123",
+        "username": "alice",
+        "owner_verified": True,
+        "description": None,
+        "destination_url": None,
+        "repin_count": None,
+        "comment_count": None,
+    }]
+    authenticated_pins = [
+        {
+            "id": "123",
+            "description": "Publicly matched caption",
+            "destination_url": "https://example.org/public",
+            "repin_count": 10,
+            "comment_count": 2,
+        },
+        {"id": "999", "description": "Private-only pin"},
+    ]
+
+    _boards, pins = PinterestCollector._intersect_public_content(
+        [], public_pins, [], authenticated_pins,
+    )
+
+    assert len(pins) == 1
+    assert pins[0]["id"] == "123"
+    assert pins[0]["username"] == "alice"
+    assert pins[0]["owner_verified"] is True
+    assert pins[0]["description"] == "Publicly matched caption"
+    assert pins[0]["destination_url"] == "https://example.org/public"
+    assert pins[0]["repin_count"] == 10
+    assert pins[0]["comment_count"] == 2
 
 
 @pytest.mark.asyncio
@@ -383,6 +514,8 @@ def test_pinterest_upsert_preserves_verified_board_link_without_new_board_contex
 
 def test_pinterest_target_validation_rejects_nonpublic_routes():
     assert _pinterest_page_kind("https://www.pinterest.com/alice/travel/") == ("board", "alice", "travel")
+    assert _pinterest_page_kind("https://www.pinterest.com/pin/12345/") == ("pin", "12345", None)
+    assert _pinterest_page_kind("https://www.pinterest.com/pin/not-a-number/") is None
     assert _pinterest_page_kind("https://www.pinterest.com/alice/_saved/") is None
     assert _pinterest_page_kind("http://www.pinterest.com/alice/") is None
     assert _pinterest_page_kind("https://evil.example/alice/") is None
@@ -399,6 +532,12 @@ def test_pinterest_profile_redirect_stays_with_same_owner():
     )
     assert _same_pinterest_page_kind(
         "https://www.pinterest.com/ALICE/Travel/", target,
+    )
+    assert _same_pinterest_page_kind(
+        "https://www.pinterest.com/pin/12345/", ("pin", "12345", None),
+    )
+    assert not _same_pinterest_page_kind(
+        "https://www.pinterest.com/pin/99999/", ("pin", "12345", None),
     )
     assert not _same_pinterest_page_kind(
         "https://www.pinterest.com/other/_created/", target,

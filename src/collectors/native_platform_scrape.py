@@ -530,6 +530,49 @@ async def retarget_snapchat_profile_targets(conn: Any) -> None:
     )
 
 
+_PINTEREST_PIN_DETAIL_SEED_SQL = r"""
+INSERT INTO browser_native_scrape_queue
+    (platform, target_url, username, source, priority)
+SELECT 'pinterest', p.pin_url, p.username, 'pinterest_pin_details', 20
+  FROM pinterest_pins p
+  JOIN follow_edges f
+    ON f.platform='pinterest' AND f.direction='following'
+   AND LOWER(BTRIM(f.target_username))=LOWER(BTRIM(p.username))
+ WHERE p.pin_id ~ '^[0-9]+$'
+   AND p.pin_url ~* '^https://(www\.)?pinterest\.com/pin/[0-9]+/?$'
+   AND p.metadata->>'owner_verified'='true'
+   AND COALESCE(LOWER(p.metadata->>'author_is_verified'),'') NOT IN ('true','1','yes')
+   AND (p.description IS NULL OR p.destination_url IS NULL
+        OR p.repin_count IS NULL OR p.comment_count IS NULL)
+   AND NOT EXISTS (
+        SELECT 1 FROM pinterest_profiles profile
+         WHERE LOWER(profile.username)=LOWER(p.username)
+           AND (
+                COALESCE(LOWER(profile.raw_payload->>'profile_is_verified'),'') IN ('true','1','yes')
+                OR COALESCE(LOWER(profile.raw_payload->>'is_verified'),'') IN ('true','1','yes')
+                OR COALESCE(LOWER(profile.raw_payload->>'verified'),'') IN ('true','1','yes')
+                OR COALESCE(LOWER(profile.raw_payload->>'isVerified'),'') IN ('true','1','yes')
+                OR COALESCE(LOWER(profile.raw_payload->>'is_blue_verified'),'') IN ('true','1','yes')
+                OR COALESCE(LOWER(profile.raw_payload->>'isBlueVerified'),'') IN ('true','1','yes')
+                OR COALESCE(LOWER(profile.raw_payload->>'blue_verified'),'') IN ('true','1','yes')
+                OR COALESCE(LOWER(profile.raw_payload->>'blueVerified'),'') IN ('true','1','yes')
+                OR COALESCE(LOWER(profile.raw_payload->>'verified_badge'),'') IN ('true','1','yes')
+           )
+   )
+   AND NOT EXISTS (
+        SELECT 1 FROM browser_native_scrape_queue q
+         WHERE q.platform='pinterest' AND q.target_url=p.pin_url
+   )
+ ORDER BY p.collected_at DESC NULLS LAST, p.pin_id
+ LIMIT GREATEST(0, 10 - (
+     SELECT count(*) FROM browser_native_scrape_queue
+      WHERE platform='pinterest' AND source='pinterest_pin_details'
+        AND status IN ('pending','claimed')
+ ))
+ON CONFLICT (platform, target_url) DO NOTHING
+"""
+
+
 _SEED_QUERIES: dict[str, tuple[str, ...]] = {
     "pinterest": (
         """
@@ -578,6 +621,7 @@ _SEED_QUERIES: dict[str, tuple[str, ...]] = {
          ))
         ON CONFLICT (platform, target_url) DO NOTHING
         """,
+        _PINTEREST_PIN_DETAIL_SEED_SQL,
     ),
     "snapchat": (
         """

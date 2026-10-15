@@ -220,6 +220,12 @@ def _pinterest_page_kind(url: str) -> tuple[str, str | None, str | None] | None:
     if parsed.scheme != "https" or host != "pinterest.com":
         return None
     parts = [part for part in parsed.path.split("/") if part]
+    if (
+        len(parts) == 2
+        and parts[0].lower() == "pin"
+        and re.fullmatch(r"[0-9]{1,32}", parts[1])
+    ):
+        return "pin", parts[1], None
     if not 1 <= len(parts) <= 2 or any(part.lower() in _BOARD_EXCLUDED for part in parts):
         return None
     username = parts[0]
@@ -238,6 +244,25 @@ def _explicitly_verified_capture(value: Any) -> bool:
     if value is True or (isinstance(value, int) and not isinstance(value, bool) and value == 1):
         return True
     return isinstance(value, str) and value.strip().lower() in {"true", "1", "yes"}
+
+
+def _pinterest_pin_author_is_verified(data: dict[str, Any], pin_id: str) -> bool:
+    candidates = [data.get("pin_detail"), *(data.get("pin_cards") or [])]
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        href = urlparse(str(candidate.get("href") or "")).path
+        href_match = _PIN_PATH_RE.match(href)
+        candidate_id = str(
+            candidate.get("pin_id") or candidate.get("id")
+            or (href_match.group(1) if href_match else "")
+        )
+        if (
+            candidate_id == pin_id
+            and _explicitly_verified_capture(candidate.get("author_is_verified"))
+        ):
+            return True
+    return False
 
 
 def _contains_private_marker(data: dict[str, Any]) -> bool:
@@ -888,6 +913,13 @@ class PinterestCollector(ProfileOnlyCollector):
                         allow_authenticated_private=True,
                         direct_navigation=True,
                     )
+                    if (
+                        target_kind[0] == "pin"
+                        and _pinterest_pin_author_is_verified(
+                            authenticated_data, str(target_kind[1] or ""),
+                        )
+                    ):
+                        raise RuntimeError("verified_account_excluded")
                     if authenticated_data.get("profile_is_verified") is True:
                         raise RuntimeError("verified_account_excluded")
                     if target_kind[0] == "profile" and not authenticated_data.get("profile_identity_verified"):
@@ -907,6 +939,13 @@ class PinterestCollector(ProfileOnlyCollector):
             anonymous_data = await self._read_public_page(
                 anonymous_context, anonymous_url, target_kind, anonymous_html,
             )
+            if (
+                target_kind[0] == "pin"
+                and _pinterest_pin_author_is_verified(
+                    anonymous_data, str(target_kind[1] or ""),
+                )
+            ):
+                raise RuntimeError("verified_account_excluded")
             if anonymous_data.get("profile_is_verified") is True:
                 raise RuntimeError("verified_account_excluded")
             if target_kind[0] == "profile" and not anonymous_data.get("profile_identity_verified"):
@@ -933,6 +972,13 @@ class PinterestCollector(ProfileOnlyCollector):
             authenticated_data = await self._read_public_page(
                 authenticated_context, authenticated_url, target_kind, authenticated_html,
             )
+            if (
+                target_kind[0] == "pin"
+                and _pinterest_pin_author_is_verified(
+                    authenticated_data, str(target_kind[1] or ""),
+                )
+            ):
+                raise RuntimeError("verified_account_excluded")
             if authenticated_data.get("profile_is_verified") is True:
                 raise RuntimeError("verified_account_excluded")
             if target_kind[0] == "profile" and not authenticated_data.get("profile_identity_verified"):
@@ -1119,6 +1165,28 @@ class PinterestCollector(ProfileOnlyCollector):
               const profileIdentityVerified = identityByUrl || identityByLink
                 || identityTokens.includes('@' + expectedHandle);
               const profileIsVerified = hasExplicitVerifiedBadge(identityRegion);
+              const pinDetailCard = expectedPageKind === 'pin'
+                ? pinCards.find((card) => String(card.pin_id || '') === String(expectedUsername || ''))
+                : null;
+              const pinDetailAuthor = document.querySelector(
+                '[data-test-id*="creator" i], [data-test-id*="author" i]'
+              );
+              const pinDetail = expectedPageKind === 'pin' ? {
+                id: String(expectedUsername || ''),
+                pin_id: String(expectedUsername || ''),
+                href: `https://www.pinterest.com/pin/${String(expectedUsername || '')}/`,
+                title: text(document.querySelector('meta[property="og:title"]')?.content
+                  || heading?.innerText || document.title),
+                description: fullText(document.querySelector('meta[property="og:description"]')?.content
+                  || document.querySelector('meta[name="description"]')?.content).slice(0, 4000),
+                image_url: document.querySelector('meta[property="og:image"]')?.content
+                  || pinDetailCard?.image_url || null,
+                destination_url: pinDetailCard?.destination_url || null,
+                card_text: pinDetailCard?.card_text || '',
+                control_labels: pinDetailCard?.control_labels || '',
+                author_is_verified: Boolean(pinDetailCard?.author_is_verified
+                  || hasExplicitVerifiedBadge(pinDetailAuthor)),
+              } : null;
               return {
                 url: location.href,
                 title: text(heading?.innerText || document.title),
@@ -1126,12 +1194,14 @@ class PinterestCollector(ProfileOnlyCollector):
                 board_header_text: fullText(boardHeader?.innerText).slice(0, 2000),
                 profile_identity_verified: profileIdentityVerified,
                 profile_is_verified: profileIsVerified,
-                description: text(document.querySelector('meta[name="description"]')?.content),
+                description: text(document.querySelector('meta[property="og:description"]')?.content
+                  || document.querySelector('meta[name="description"]')?.content),
                 body_text: fullText(document.body?.innerText).slice(0, 12000),
                 serialized_state: Array.from(document.scripts)
                   .map((script) => script.textContent || '').join(' ').slice(0, 2000000),
                 anchors,
                 pin_cards: pinCards,
+                pin_detail: pinDetail,
               };
             }""",
             {"expectedUsername": target_kind[1], "expectedPageKind": target_kind[0]},
@@ -1191,6 +1261,17 @@ class PinterestCollector(ProfileOnlyCollector):
                 and board.get("pin_count") is not None
                 for board in boards
             )
+        if target_kind[0] == "pin":
+            # The requested numeric ID and canonical URL alone are not
+            # evidence that Pinterest exposed the pin. Login/removed pages
+            # can still retain that route, so require a rendered pin field.
+            return any(
+                any(pin.get(field) is not None for field in (
+                    "description", "image_url", "destination_url",
+                    "repin_count", "comment_count",
+                ))
+                for pin in pins
+            )
         return bool(boards or pins)
 
     @staticmethod
@@ -1203,8 +1284,25 @@ class PinterestCollector(ProfileOnlyCollector):
         authenticated_board_ids = {str(board["id"]) for board in authenticated_boards}
         public_pin_ids = {str(pin["id"]) for pin in public_pins}
         boards = [board for board in public_boards if str(board["id"]) in authenticated_board_ids]
-        authenticated_pin_ids = {str(pin["id"]) for pin in authenticated_pins}
-        pins = [pin for pin in public_pins if str(pin["id"]) in authenticated_pin_ids]
+        authenticated_by_id = {
+            str(pin["id"]): pin
+            for pin in authenticated_pins
+            if str(pin.get("id")) in public_pin_ids
+        }
+        pins = []
+        enrichment_fields = (
+            "title", "description", "image_url", "destination_url",
+            "repin_count", "comment_count",
+        )
+        for public_pin in public_pins:
+            authenticated_pin = authenticated_by_id.get(str(public_pin["id"]))
+            if authenticated_pin is None:
+                continue
+            merged = dict(public_pin)
+            for field in enrichment_fields:
+                if merged.get(field) is None and authenticated_pin.get(field) is not None:
+                    merged[field] = authenticated_pin[field]
+            pins.append(merged)
         return boards or public_boards, pins or public_pins
 
     @staticmethod
@@ -1224,6 +1322,9 @@ class PinterestCollector(ProfileOnlyCollector):
         profile_identity_verified = data.get("profile_identity_verified") is True or (
             profile_page_url_verified
         )
+        pin_detail = data.get("pin_detail") if kind == "pin" else None
+        if not isinstance(pin_detail, dict):
+            pin_detail = {}
         title = str(data.get("title") or "").strip()[:500] or None
         body_text = str(data.get("body_text") or "")[:12_000]
         board_header_text = str(data.get("board_header_text") or "")[:2_000]
@@ -1257,6 +1358,8 @@ class PinterestCollector(ProfileOnlyCollector):
             *data.get("anchors", [])[:1200],
             *data.get("pin_cards", [])[:1200],
         ]
+        if pin_detail:
+            candidates.append(pin_detail)
         verified_pin_ids: set[str] = set()
         for candidate in candidates:
             if not isinstance(candidate, dict) or not _explicitly_verified_capture(
@@ -1282,6 +1385,7 @@ class PinterestCollector(ProfileOnlyCollector):
             pin_id = pin_match.group(1) if pin_match else (raw_id if raw_id.isdigit() else "")
             if (
                 not pin_id
+                or (kind == "pin" and pin_id != str(username or ""))
                 or pin_id in verified_pin_ids
                 or _explicitly_verified_capture(anchor.get("author_is_verified"))
             ):
@@ -1306,20 +1410,47 @@ class PinterestCollector(ProfileOnlyCollector):
                 str(anchor.get("card_text") or ""),
                 str(anchor.get("control_labels") or ""),
             ))[:3000]
-            pins[pin_id] = {
+            if kind == "pin":
+                card_text = " ".join((
+                    card_text,
+                    str(pin_detail.get("card_text") or ""),
+                    str(pin_detail.get("control_labels") or ""),
+                ))[:3000]
+            repin_count = _labeled_count(card_text, r"re-?pins?")
+            comment_count = _labeled_count(card_text, r"comments?")
+            parsed_pin = {
                 "id": pin_id,
                 "username": username if ownership_verified else None,
                 "board_id": f"{username}/{board_slug}".lower() if ownership_verified and board_slug else None,
                 "board_url": f"https://www.pinterest.com/{username}/{board_slug}/" if ownership_verified and board_slug else None,
                 "owner_verified": ownership_verified,
-                "title": str(anchor.get("image_alt") or anchor.get("text") or "").strip()[:500] or None,
-                "description": str(anchor.get("text") or "").strip()[:4000] or None,
-                "image_url": str(anchor.get("image_url") or "")[:2000] or None,
-                "repin_count": _labeled_count(card_text, r"re-?pins?"),
-                "comment_count": _labeled_count(card_text, r"comments?"),
-                "destination_url": _external_pin_destination(anchor.get("destination_url")),
+                "title": str(
+                    anchor.get("image_alt") or anchor.get("text")
+                    or (pin_detail.get("title") if kind == "pin" else "") or ""
+                ).strip()[:500] or None,
+                "description": str(
+                    (pin_detail.get("description") if kind == "pin" else None)
+                    or anchor.get("description") or anchor.get("text") or ""
+                ).strip()[:4000] or None,
+                "image_url": str(
+                    anchor.get("image_url")
+                    or (pin_detail.get("image_url") if kind == "pin" else "") or ""
+                )[:2000] or None,
+                "repin_count": repin_count if repin_count is not None else pin_detail.get("repin_count"),
+                "comment_count": comment_count if comment_count is not None else pin_detail.get("comment_count"),
+                "destination_url": _external_pin_destination(
+                    anchor.get("destination_url")
+                    or (pin_detail.get("destination_url") if kind == "pin" else None)
+                ),
                 "url": pin_url,
             }
+            existing = pins.get(pin_id)
+            if existing:
+                parsed_pin = {
+                    key: value if value is not None else existing.get(key)
+                    for key, value in parsed_pin.items()
+                }
+            pins[pin_id] = parsed_pin
 
         if kind == "profile":
             for anchor in data.get("anchors", [])[:1200]:
