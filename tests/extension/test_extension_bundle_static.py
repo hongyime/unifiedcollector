@@ -339,9 +339,11 @@ def test_recoverable_page_shells_recover_without_waiting_on_x_native_retry():
     )[0]
     assert 'platformId !== "x"' in safety_block
     assert 'el.matches("a[href]")' in safety_block
+    assert 'el.closest && el.closest("form") || el.form' in safety_block
     assert "recoverablePageActionIsSafe(platformId, el)" in find_button_block
     assert "platformId === \"x\"" in recover_block
     assert "Date.now() - last < 15000" in recover_block
+    assert 'if (!button2.isConnected || button2.closest && button2.closest("form") || button2.form)' in recover_block
     assert "switchXHostForRecoverableShell(shell)" in recover_block
 
 
