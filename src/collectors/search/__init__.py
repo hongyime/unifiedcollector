@@ -548,6 +548,30 @@ _DYNAMIC_TERM_SOURCE_QUERIES = (
            AND (username IS NOT NULL OR title IS NOT NULL OR description IS NOT NULL)
          ORDER BY updated_at DESC LIMIT $1
     """),
+    # Messaging identities contribute profile fields only; never search phone
+    # numbers, chat messages, or WhatsApp status updates as dynamic terms.
+    ("telegram_users", """
+        SELECT 'telegram' AS platform, id::text AS source_reference,
+               username, concat_ws(' ', first_name, last_name) AS full_name,
+               bio AS text_blob, ARRAY[]::text[] AS hashtags
+          FROM telegram_users
+         WHERE updated_at >= now() - interval '90 days'
+           AND is_deleted IS NOT TRUE
+           AND is_bot IS NOT TRUE
+           AND (username IS NOT NULL OR first_name IS NOT NULL
+                OR last_name IS NOT NULL OR bio IS NOT NULL)
+         ORDER BY updated_at DESC LIMIT $1
+    """),
+    ("whatsapp_users", """
+        SELECT 'whatsapp' AS platform, id::text AS source_reference,
+               NULL::text AS username,
+               COALESCE(NULLIF(name, ''), NULLIF(pushname, '')) AS full_name,
+               about AS text_blob, ARRAY[]::text[] AS hashtags
+          FROM whatsapp_users
+         WHERE updated_at >= now() - interval '90 days'
+           AND (name IS NOT NULL OR pushname IS NOT NULL OR about IS NOT NULL)
+         ORDER BY updated_at DESC LIMIT $1
+    """),
     ("paypal_profiles", """
         SELECT 'paypal' AS platform, username AS source_reference,
                username, display_name AS full_name, NULL::text AS text_blob,
