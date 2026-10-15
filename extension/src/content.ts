@@ -2501,7 +2501,11 @@ function threadsVerifiedBadge(root) {
   return elements.some((element) => [
     element.getAttribute && element.getAttribute("aria-label"),
     element.getAttribute && element.getAttribute("title"),
-  ].some((label) => String(label || "").toLowerCase().includes("verified")));
+  ].some((label) => {
+    const normalized = String(label || "").normalize("NFKC").trim().toLowerCase();
+    if (/\bnot\b.{0,16}\bverified\b|\b(?:un|non)[\s-]*verified\b/.test(normalized)) return false;
+    return /\bverified\b/.test(normalized);
+  }));
 }
 
 function xTweetRoots() {
