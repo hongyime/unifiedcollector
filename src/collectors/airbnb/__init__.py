@@ -652,6 +652,36 @@ def _parse_airbnb_host_profile(payload: dict[str, Any], host_id: str) -> dict[st
     }
 
 
+def _parse_airbnb_host_profile_page(html: str, host_id: str) -> dict[str, Any] | None:
+    """Read host fields from the public page's deferred GraphQL JSON island."""
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+        state_node = soup.select_one("#data-deferred-state-0")
+        if state_node is None:
+            return None
+        state = json.loads(state_node.get_text())
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+    candidates: list[dict[str, Any]] = []
+    if isinstance(state, dict):
+        rows = state.get("niobeClientData")
+        if isinstance(rows, list):
+            candidates.extend(
+                row[1] for row in rows
+                if isinstance(row, list) and len(row) > 1 and isinstance(row[1], dict)
+            )
+        candidates.append(state)
+    for payload in candidates:
+        profile = _parse_airbnb_host_profile(payload, host_id)
+        if any(profile.get(key) for key in (
+            "display_name", "avatar_url", "rating", "reviews_count",
+            "host_since", "bio", "response_rate",
+        )):
+            return profile
+    return None
+
+
 def _stays_detail_variables(
     listing_id: str,
     check_in: date | None = None,
@@ -919,6 +949,27 @@ class AirbnbCollector(ProfileOnlyCollector):
         html = r.text
         first_m = _DISPLAY_RE.search(html)
         if not first_m:
+            profile = _parse_airbnb_host_profile_page(html, username)
+            if profile:
+                host_since = profile.get("host_since")
+                try:
+                    host_since = date.fromisoformat(host_since[:10]) if isinstance(host_since, str) else host_since
+                except ValueError:
+                    pass
+                return ProfileResult(
+                    exists=True,
+                    username=username,
+                    fields={
+                        "display_name": profile.get("display_name"),
+                        "avatar_url": profile.get("avatar_url"),
+                        "host_since": host_since,
+                        "superhost": None,
+                        "location_city": None,
+                        "properties_count": None,
+                        "reviews_count": profile.get("reviews_count"),
+                        "bio": profile.get("bio"),
+                    },
+                )
             # Airbnb can return a successful app shell or challenge page without
             # profile data. Do not mark that response as a confirmed 404.
             return ProfileResult(
@@ -1068,18 +1119,74 @@ class AirbnbCollector(ProfileOnlyCollector):
             api_key, base_url = await _resolve_public_api_key(client)
             client.headers["X-Airbnb-API-Key"] = api_key
             encoded_user_id = base64.b64encode(f"User:{host_id}".encode()).decode()
-            payload = await self._graphql(
-                client,
-                "GetUserProfile",
-                _USER_PROFILE_HASH,
-                {
-                    "userId": encoded_user_id,
-                    "isPassportStampsEnabled": True,
-                    "mockIdentifier": None,
-                    "fetchCombinedSportsAndInterests": True,
-                },
-                base_url=base_url,
-            )
+            try:
+                payload = await self._graphql(
+                    client,
+                    "GetUserProfile",
+                    _USER_PROFILE_HASH,
+                    {
+                        "userId": encoded_user_id,
+                        "isPassportStampsEnabled": True,
+                        "mockIdentifier": None,
+                        "fetchCombinedSportsAndInterests": True,
+                    },
+                    base_url=base_url,
+                )
+            except RuntimeError as graphql_error:
+                # Airbnb sometimes serves the public host page even when its
+                # persisted GraphQL operation returns an application error.
+                # Reuse the existing public profile parser as a bounded
+                # fallback; HTTP 403/429 still preserve their retry windows.
+                if str(graphql_error) not in {
+                    "graphql_query_failed",
+                    "graphql_payload_unavailable",
+                }:
+                    raise
+                logger.info(
+                    "Airbnb host GraphQL returned %s; trying public profile page",
+                    str(graphql_error),
+                )
+                probed = await self.probe_profile(host_id)
+                if not probed.exists:
+                    logger.info(
+                        "Airbnb public host-profile fallback unavailable (%s)",
+                        probed.error or "profile_payload_unavailable",
+                    )
+                    status = re.fullmatch(
+                        r"http:(\d{3})(?::retry_after:(\d+))?",
+                        probed.error or "",
+                    )
+                    if status and int(status.group(1)) in {403, 429}:
+                        raise _AirbnbPublicHttpError(
+                            int(status.group(1)),
+                            int(status.group(2)) if status.group(2) else None,
+                        ) from graphql_error
+                    raise graphql_error
+                fields = probed.fields
+                host_since = fields.get("host_since")
+                fallback_profile = {
+                    "host_id": host_id,
+                    "display_name": fields.get("display_name"),
+                    "profile_url": profile_url,
+                    "avatar_url": _https_value(fields.get("avatar_url")),
+                    "rating": None,
+                    "reviews_count": _number_value(
+                        fields.get("reviews_count"), integer=True,
+                    ),
+                    "host_since": (
+                        host_since.isoformat()
+                        if hasattr(host_since, "isoformat")
+                        else host_since
+                    ),
+                    "bio": _airbnb_text(fields.get("bio")),
+                    "response_rate": None,
+                }
+                if not any(fallback_profile.get(key) for key in (
+                    "display_name", "avatar_url", "rating", "reviews_count",
+                    "host_since", "bio", "response_rate",
+                )):
+                    raise graphql_error
+                return fallback_profile
         profile = _parse_airbnb_host_profile(payload, host_id)
         profile["profile_url"] = profile_url
         if not any(profile.get(key) for key in (

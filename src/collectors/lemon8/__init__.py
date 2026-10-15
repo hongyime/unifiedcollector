@@ -1261,13 +1261,24 @@ class Lemon8Collector(BaseCollector):
         pages = max(1, self._feed_pages_per_cycle)
         result: dict[str, Any] = {}
 
-        # 1) Optional pylemon8 path
-        if PYLEMON8_AVAILABLE:
-            try:
-                result = await self._scrape_feed_with_api("foryou", pages)
-            except Exception as e:
-                logger.info("pylemon8 feed failed, falling back to web: %s", _safe_log_text(e))
-                result = {}
+        # 1) API feed path. Prefer pylemon8 when installed; otherwise use its
+        # public Remix data route through the shared async client.
+        try:
+            result = await self._scrape_feed_with_api(
+                "foryou", pages, client=client,
+            )
+        except Exception as e:
+            await self._record_http_status_event(
+                e,
+                scope="feed_fetch",
+                subject="api_feed",
+                url=f"{LEMON8_BASE_URL}/feed/foryou",
+            )
+            if await self._cooldown_active_for_scope("feed_fetch"):
+                logger.warning("Lemon8 API feed is cooling down; skipping web fallback")
+                return
+            logger.info("Lemon8 API feed failed, falling back to web: %s", _safe_log_text(e))
+            result = {}
 
         # 2) Web fallback
         if not result or not result.get("media_items"):
@@ -1312,6 +1323,7 @@ class Lemon8Collector(BaseCollector):
         max_media = self._feed_media_per_cycle or min(120, max(50, pages * 30))
         detail_enabled = os.getenv("LEMON8_FYP_DETAIL_FETCH", "false").lower() == "true"
         detail_seen: set[str] = set()
+        post_fields_upserted: set[str] = set()
         detail_fetches = 0
         for item in media_items[: max_media]:
             if self._stop.is_set(): break
@@ -1349,6 +1361,25 @@ class Lemon8Collector(BaseCollector):
                     )
                 except Exception as e:
                     logger.debug("lemon8 media-link failed for note %s: %s", note_id, e)
+
+                title = item.get("title")
+                description = item.get("description")
+                if (
+                    note_id not in post_fields_upserted
+                    and (isinstance(title, str) and title.strip()
+                         or isinstance(description, str) and description.strip())
+                ):
+                    post_fields_upserted.add(note_id)
+                    await self._upsert_post(
+                        entity_id,
+                        {
+                            "id": note_id,
+                            "title": title or "",
+                            "description": description or "",
+                            "stats": item.get("stats") if isinstance(item.get("stats"), dict) else {},
+                        },
+                        collection_surface="for_you",
+                    )
 
                 # Optional deep detail fetch (title/desc/stats). Bound and dedupe
                 # this lane so one Lemon8 FYP pass cannot monopolize ByteDance IO.
@@ -1463,27 +1494,92 @@ class Lemon8Collector(BaseCollector):
     # ──────────────────────────────────────────────────────────────────────
     # FYP / feed scraping (ported from old toolkit)
     # ──────────────────────────────────────────────────────────────────────
-    async def _scrape_feed_with_api(self, category: str = "foryou", pages: int = 1) -> dict[str, Any]:
-        """pylemon8 API feed fetch. Optional — only runs if pylemon8 is importable."""
-        if not PYLEMON8_AVAILABLE or _PyLemon8 is None:
-            raise RuntimeError("pylemon8 not available")
+    async def _scrape_feed_with_api(
+        self,
+        category: str = "foryou",
+        pages: int = 1,
+        *,
+        client: httpx.AsyncClient | None = None,
+    ) -> dict[str, Any]:
+        """Fetch the public Lemon8 feed data route, with optional pylemon8 support."""
+        all_media: list[dict] = []
+        users: set[str] = set()
+        tag_ids: set[str] = set()
 
-        loop = asyncio.get_event_loop()
+        if PYLEMON8_AVAILABLE and _PyLemon8 is not None:
+            loop = asyncio.get_running_loop()
 
-        def _sync_fetch():
-            api = _PyLemon8()
-            feed_obj = api.feed(category)
-            all_media: list[dict] = []
-            users: set[str] = set()
-            tag_ids: set[str] = set()
-            for _ in range(pages):
-                items = feed_obj.get_items() or []
-                all_media.extend(self._extract_media_items_from_pylemon8_items(items, include_profile_images=self._profile_photos))
+            def _sync_fetch():
+                api = _PyLemon8()
+                feed_obj = api.feed(category)
+                media: list[dict] = []
+                found_users: set[str] = set()
+                found_tags: set[str] = set()
+                for _ in range(pages):
+                    items = feed_obj.get_items() or []
+                    media.extend(self._extract_media_items_from_pylemon8_items(
+                        items, include_profile_images=self._profile_photos,
+                    ))
+                    found_users.update(self._extract_users_from_pylemon8_items(items))
+                return media, found_users, found_tags
+
+            await self.rate_limiter.async_wait(
+                "lemon8-app.com",
+                OperationType.FEED_FETCH if hasattr(OperationType, "FEED_FETCH") else OperationType.PROFILE_VIEW,
+            )
+            all_media, users, tag_ids = await loop.run_in_executor(None, _sync_fetch)
+        else:
+            if client is None:
+                raise RuntimeError("lemon8_api_client_unavailable")
+            feed_url = f"{LEMON8_BASE_URL}/feed/{category}"
+            region = os.getenv("LEMON8_REGION", "sg").strip().lower()
+            if not re.fullmatch(r"[a-z]{2}", region):
+                region = "sg"
+            cursor = ""
+            for _ in range(max(1, pages)):
+                params = {
+                    "method": "stream-loadmore",
+                    "_data": "routes/feed.$category_name",
+                    "region": region,
+                    "_version": "1",
+                }
+                if cursor:
+                    params["cursor"] = cursor
+                await self.rate_limiter.async_wait(
+                    "lemon8-app.com",
+                    OperationType.FEED_FETCH if hasattr(OperationType, "FEED_FETCH") else OperationType.PROFILE_VIEW,
+                )
+                response = await client.get(
+                    feed_url,
+                    params=params,
+                    headers={**self._headers(), "Referer": FEED_URL},
+                )
+                response.raise_for_status()
+                payload = response.json()
+                feed_key = f"$FeedDateLoadmore+{category}"
+                feed_payload = payload.get(feed_key) if isinstance(payload, dict) else None
+                items = feed_payload.get("items") if isinstance(feed_payload, dict) else None
+                if not isinstance(items, list):
+                    item_lists = self._find_item_lists_in_json(payload)
+                    items = max(item_lists, key=len) if item_lists else []
+                if not items:
+                    break
+                all_media.extend(self._extract_media_items_from_pylemon8_items(
+                    items, include_profile_images=self._profile_photos,
+                ))
                 users.update(self._extract_users_from_pylemon8_items(items))
-            return all_media, users, tag_ids
+                if isinstance(feed_payload, dict):
+                    next_cursor = next((
+                        str(feed_payload.get(key) or "")
+                        for key in ("cursor", "max_cursor", "next_cursor", "nextCursor")
+                        if feed_payload.get(key) not in (None, "")
+                    ), "")
+                else:
+                    next_cursor = ""
+                if not next_cursor or next_cursor == cursor:
+                    break
+                cursor = next_cursor
 
-        await self.rate_limiter.async_wait("lemon8-app.com", OperationType.FEED_FETCH if hasattr(OperationType, "FEED_FETCH") else OperationType.PROFILE_VIEW)
-        all_media, users, tag_ids = await loop.run_in_executor(None, _sync_fetch)
         unique_items = self._deduplicate_media_items(all_media)
         return {
             "feed_type": category,
@@ -1494,7 +1590,7 @@ class Lemon8Collector(BaseCollector):
             "discovered_tags": list(tag_ids),
             "scrape_timestamp": datetime.now(timezone.utc).isoformat(),
             "total_media": len(unique_items),
-            "method": "pylemon8_api",
+            "method": "lemon8_api",
         }
 
     async def _scrape_feed_with_web(self, client: httpx.AsyncClient, pages: int = 1) -> dict[str, Any]:
@@ -1802,6 +1898,9 @@ class Lemon8Collector(BaseCollector):
                 existing["is_profile_photo"] = True
             if existing.get("media_type") != "video" and item.get("media_type") == "video":
                 existing["media_type"] = "video"
+            for key in ("note_id", "href", "title", "description", "stats"):
+                if not existing.get(key) and item.get(key):
+                    existing[key] = item[key]
         return list(out.values())
 
     def _add_cursor_to_url(self, base_url: str, cursor: str) -> str:
@@ -1926,6 +2025,24 @@ class Lemon8Collector(BaseCollector):
                     continue
                 author = item.get("authorInfo") or item.get("author") or item.get("user") or {}
                 username = self._extract_username_from_item(item)
+                post_id = next((
+                    str(item.get(key)) for key in (
+                        "itemId", "item_id", "id", "note_id", "postId", "aweme_id",
+                    ) if item.get(key) not in (None, "")
+                ), "")
+                title = item.get("title")
+                description = item.get("shortContent") or item.get("desc") or item.get("description")
+                like_count = item.get("digg_count") or item.get("diggCount") or item.get("likeCount") or 0
+                comment_count = item.get("comment_count") or item.get("commentCount") or 0
+                try:
+                    like_count = int(like_count)
+                except (TypeError, ValueError, OverflowError):
+                    like_count = 0
+                try:
+                    comment_count = int(comment_count)
+                except (TypeError, ValueError, OverflowError):
+                    comment_count = 0
+                post_media_start = len(out)
                 added = False
 
                 for vk in ["videoResource", "video", "videoList", "videoUrl", "playAddr"]:
@@ -1968,6 +2085,18 @@ class Lemon8Collector(BaseCollector):
                             if mi:
                                 out.append(mi); added = True
                             break
+
+                for media_item in out[post_media_start:]:
+                    if post_id:
+                        media_item["note_id"] = post_id
+                    if isinstance(title, str) and title.strip():
+                        media_item["title"] = title.strip()
+                    if isinstance(description, str) and description.strip():
+                        media_item["description"] = description.strip()
+                    media_item["stats"] = {
+                        "likeCount": like_count,
+                        "commentCount": comment_count,
+                    }
 
                 if include_profile_images and self._profile_photos:
                     for au in self._extract_profile_photo_urls_from_author(author):
