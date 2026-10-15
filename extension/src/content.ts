@@ -624,8 +624,10 @@ async function reportRecoverablePageShell(p, shell) {
 
 function recoverablePageActionIsSafe(platformId, el) {
   if (platformId !== "x") return true;
-  if (!el || !el.matches || !el.matches("a[href]")) return true;
-  return false;
+  if (!el || !el.matches) return false;
+  if (el.matches("a[href]")) return false;
+  if ((el.closest && el.closest("form")) || el.form) return false;
+  return true;
 }
 
 function findRecoverablePageActionButton(platformId) {
@@ -706,6 +708,10 @@ async function attemptRecoverablePageInteraction(platformId, shell) {
         button.scrollIntoView({ block: "center", inline: "center" });
       } catch (e) {}
       await sleep(jitter(700));
+      if (!button.isConnected || (button.closest && button.closest("form")) || button.form) {
+        if (switchXHostForRecoverableShell(shell)) return true;
+        return false;
+      }
       try {
         button.click();
         clog("warn", `x page shell action clicked (${shell.reason || "recoverable"})`, "x");

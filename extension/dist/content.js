@@ -1060,8 +1060,10 @@
     }
     function recoverablePageActionIsSafe(platformId, el) {
       if (platformId !== "x") return true;
-      if (!el || !el.matches || !el.matches("a[href]")) return true;
-      return false;
+      if (!el || !el.matches) return false;
+      if (el.matches("a[href]")) return false;
+      if (el.closest && el.closest("form") || el.form) return false;
+      return true;
     }
     function findRecoverablePageActionButton(platformId) {
       const candidates = [
@@ -1136,6 +1138,10 @@
           } catch (e) {
           }
           await sleep(jitter(700));
+          if (!button2.isConnected || button2.closest && button2.closest("form") || button2.form) {
+            if (switchXHostForRecoverableShell(shell)) return true;
+            return false;
+          }
           try {
             button2.click();
             clog("warn", `x page shell action clicked (${shell.reason || "recoverable"})`, "x");
