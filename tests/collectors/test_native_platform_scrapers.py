@@ -158,6 +158,7 @@ def test_pinterest_parser_skips_explicit_verified_pin_authors_but_keeps_unknown_
 async def test_pinterest_profile_probe_extracts_following_and_monthly_views(monkeypatch):
     response = type("Response", (), {
         "status_code": 200,
+        "url": "https://www.pinterest.com/alice/",
         "text": (
             '{"full_name":"Alice","follower_count":10,"pin_count":20,"board_count":3}'
             "<main>1.2M monthly views · 35 following</main>"
@@ -191,6 +192,7 @@ async def test_pinterest_profile_probe_extracts_following_and_monthly_views(monk
 async def test_pinterest_profile_probe_parses_compact_serialized_counts(monkeypatch):
     response = type("Response", (), {
         "status_code": 200,
+        "url": "https://www.pinterest.com/alice/",
         "text": (
             '{"full_name":"Alice","following_count":"1.4K",'
             '"monthly_views":"2.3B"}'
@@ -215,6 +217,36 @@ async def test_pinterest_profile_probe_parses_compact_serialized_counts(monkeypa
 
     assert result.fields["following_count"] == 1_400
     assert result.fields["monthly_views"] == 2_300_000_000
+
+
+@pytest.mark.asyncio
+async def test_pinterest_profile_probe_rejects_homepage_redirect(monkeypatch):
+    response = type("Response", (), {
+        "status_code": 200,
+        "url": "https://www.pinterest.com/",
+        "text": '{"full_name":"Pinterest Home","follower_count":999}',
+    })()
+
+    class Client:
+        async def get(self, *_args, **_kwargs):
+            return response
+
+    class AsyncClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return Client()
+
+        async def __aexit__(self, *_args):
+            return None
+
+    monkeypatch.setattr(pinterest_mod.httpx, "AsyncClient", AsyncClient)
+    result = await PinterestCollector().probe_profile("alice")
+
+    assert result.exists is False
+    assert result.fields == {}
+    assert result.error == "redirect:unexpected_target"
 
 
 def test_pinterest_pin_ownership_requires_exact_visible_membership():

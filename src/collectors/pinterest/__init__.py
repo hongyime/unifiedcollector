@@ -410,6 +410,15 @@ class PinterestCollector(ProfileOnlyCollector):
             return ProfileResult(exists=False, username=username, fields={},
                                  error=f"http:{r.status_code}")
 
+        expected_kind = _pinterest_page_kind(url)
+        if expected_kind is None or not _same_pinterest_page_kind(
+            str(r.url), expected_kind,
+        ):
+            return ProfileResult(
+                exists=False, username=username, fields={},
+                error="redirect:unexpected_target",
+            )
+
         html = r.text
         if self._page_has_explicit_verified_badge(html):
             return ProfileResult(
