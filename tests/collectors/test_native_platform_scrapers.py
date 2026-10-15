@@ -39,6 +39,24 @@ def test_pinterest_cookie_snapshot_filters_to_pinterest_domain(tmp_path):
     assert [cookie["name"] for cookie in result["cookies"]] == ["session"]
 
 
+def test_pinterest_cookie_loader_uses_newest_platform_snapshot(tmp_path, monkeypatch):
+    (tmp_path / "latest.json").write_text(json.dumps({"cookies": [
+        {"name": "session", "value": "effective-old", "domain": ".pinterest.com", "path": "/"},
+    ]}), encoding="utf-8")
+    (tmp_path / "snapshot_20261015T100000Z.json").write_text(json.dumps({"cookies": [
+        {"name": "session", "value": "newer-pinterest", "domain": ".pinterest.com", "path": "/"},
+    ]}), encoding="utf-8")
+    (tmp_path / "snapshot_20261015T100500Z.json").write_text(json.dumps({"cookies": [
+        {"name": "session", "value": "lemon8-only", "domain": ".lemon8-app.com", "path": "/"},
+    ]}), encoding="utf-8")
+    monkeypatch.setenv("BROWSER_COOKIE_VAULT_DIR", str(tmp_path))
+
+    result = _load_pinterest_storage_state()
+
+    assert result is not None
+    assert [cookie["value"] for cookie in result["cookies"]] == ["newer-pinterest"]
+
+
 def test_pinterest_public_page_parser_extracts_board_and_pin_cards():
     boards, pins = PinterestCollector._parse_native_page(
         "https://www.pinterest.com/alice/travel/",

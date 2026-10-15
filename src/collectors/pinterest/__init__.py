@@ -145,48 +145,61 @@ def _labeled_count(text: str, label_pattern: str) -> int | None:
 
 
 def _load_pinterest_storage_state(path: Path | None = None) -> dict | None:
-    """Load only Pinterest cookies from the shared browser-cookie snapshot."""
+    """Load Pinterest cookies from the newest vault snapshot containing them.
+
+    The vault may preserve ``latest.json`` when the current browser has fewer
+    recognized auth cookies. Timestamped snapshots still contain that newer
+    browser jar, so prefer the newest Pinterest-bearing one before falling
+    back to the preserved global snapshot.
+    """
     if path is None:
         root = Path(os.getenv("BROWSER_COOKIE_VAULT_DIR", "credentials/browser_cookies"))
-        path = root / "latest.json"
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
-        return None
-    raw_cookies = payload if isinstance(payload, list) else payload.get("cookies", [])
-    if not isinstance(raw_cookies, list):
-        return None
+        paths = sorted(root.glob("snapshot_*.json"), key=lambda item: item.name, reverse=True)
+        paths.append(root / "latest.json")
+    else:
+        paths = [path]
 
-    cookies = []
-    for raw in raw_cookies:
-        if not isinstance(raw, dict):
+    for snapshot_path in paths:
+        try:
+            payload = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
             continue
-        domain = str(raw.get("domain") or "").lstrip(".").lower()
-        name = str(raw.get("name") or "")
-        value = str(raw.get("value") or "")
-        if not name or not value or not (domain == "pinterest.com" or domain.endswith(".pinterest.com")):
+        raw_cookies = payload if isinstance(payload, list) else payload.get("cookies", [])
+        if not isinstance(raw_cookies, list):
             continue
-        cookie = {
-            "name": name,
-            "value": value,
-            "domain": str(raw.get("domain") or ".pinterest.com"),
-            "path": str(raw.get("path") or "/"),
-            "httpOnly": bool(raw.get("httpOnly", False)),
-            "secure": bool(raw.get("secure", True)),
-        }
-        expires = raw.get("expires", raw.get("expirationDate"))
-        if expires not in (None, "", -1, "-1"):
-            try:
-                expiry = int(float(expires))
-            except (TypeError, ValueError, OverflowError):
-                expiry = 0
-            if expiry > 0:
-                cookie["expires"] = expiry
-        same_site = str(raw.get("sameSite") or "").lower()
-        if same_site in {"strict", "lax", "none"}:
-            cookie["sameSite"] = same_site.title()
-        cookies.append(cookie)
-    return {"cookies": cookies, "origins": []} if cookies else None
+
+        cookies = []
+        for raw in raw_cookies:
+            if not isinstance(raw, dict):
+                continue
+            domain = str(raw.get("domain") or "").lstrip(".").lower()
+            name = str(raw.get("name") or "")
+            value = str(raw.get("value") or "")
+            if not name or not value or not (domain == "pinterest.com" or domain.endswith(".pinterest.com")):
+                continue
+            cookie = {
+                "name": name,
+                "value": value,
+                "domain": str(raw.get("domain") or ".pinterest.com"),
+                "path": str(raw.get("path") or "/"),
+                "httpOnly": bool(raw.get("httpOnly", False)),
+                "secure": bool(raw.get("secure", True)),
+            }
+            expires = raw.get("expires", raw.get("expirationDate"))
+            if expires not in (None, "", -1, "-1"):
+                try:
+                    expiry = int(float(expires))
+                except (TypeError, ValueError, OverflowError):
+                    expiry = 0
+                if expiry > 0:
+                    cookie["expires"] = expiry
+            same_site = str(raw.get("sameSite") or "").lower()
+            if same_site in {"strict", "lax", "none"}:
+                cookie["sameSite"] = same_site.title()
+            cookies.append(cookie)
+        if cookies:
+            return {"cookies": cookies, "origins": []}
+    return None
 
 
 def _pinterest_page_kind(url: str) -> tuple[str, str | None, str | None] | None:
