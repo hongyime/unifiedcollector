@@ -748,6 +748,7 @@ services:
       # Per-message identity enumeration caps for public reactions/polls.
       TELEGRAM_REACTION_USER_CAP: "500"
       TELEGRAM_POLL_VOTE_USER_CAP: "500"
+      TELEGRAM_POLL_VOTE_UPDATE_COOLDOWN_SECONDS: "1800"
       TELEGRAM_ADMIN_LOG_ENABLED: "true"
       TELEGRAM_ADMIN_LOG_LIMIT: "1000"
       TELEGRAM_JOIN_LINKS_MAX_PER_CYCLE: "10"

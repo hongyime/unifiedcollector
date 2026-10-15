@@ -263,6 +263,11 @@ class TelegramCollector(
         # Reaction-list per-message cap (Q2 decision: per-emoji per-message).
         self._reaction_user_cap = int(os.getenv("TELEGRAM_REACTION_USER_CAP", "500"))
         self._poll_vote_user_cap = int(os.getenv("TELEGRAM_POLL_VOTE_USER_CAP", "500"))
+        self._poll_vote_update_cooldown = max(
+            60.0,
+            float(os.getenv("TELEGRAM_POLL_VOTE_UPDATE_COOLDOWN_SECONDS", "1800")),
+        )
+        self._poll_vote_update_last_seen: dict[str, float] = {}
         self._mention_backfill_batch = int(os.getenv("TELEGRAM_MENTION_BACKFILL_BATCH", "2000"))
         self._mention_backfill_interval = float(os.getenv("TELEGRAM_MENTION_BACKFILL_INTERVAL", "60"))
         self._mention_backfill_task: asyncio.Task | None = None

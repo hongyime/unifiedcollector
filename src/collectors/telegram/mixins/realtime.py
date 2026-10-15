@@ -14,10 +14,12 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 from src.collectors.telegram.helpers import (
     _format_exception,
+    _is_flood_wait,
     _is_transient_realtime_write_error,
     _telethon_payload,
     _tg_json,
@@ -121,6 +123,19 @@ class RealtimeMixin:
                 "Reaction event registration failed (older Telethon?): %s",
                 exc,
             )
+
+        # Poll result changes arrive as UpdateMessagePoll, not as a new message.
+        # Subscribe on every connected account so public-voter polls continue to
+        # refresh after the original message has already been stored.
+        try:
+            from telethon.tl.types import UpdateMessagePoll
+
+            client.add_event_handler(
+                lambda e, w=worker: self._on_raw_poll_update(w, e),
+                events_module.Raw(types=[UpdateMessagePoll]),
+            )
+        except Exception as exc:
+            logger.warning("Poll update event registration failed: %s", exc)
 
         self._realtime_handler_clients.add(client_key)
         logger.info(
@@ -602,6 +617,147 @@ class RealtimeMixin:
                 )
         except Exception as exc:
             logger.debug("_on_raw_reactions failed: %s", exc)
+
+    async def _on_raw_poll_update(self, worker: "TelegramWorker", update):
+        """Refresh stored voter evidence when Telegram reports changed poll results.
+
+        Telegram only exposes voter identities for public (non-anonymous) polls.
+        A per-poll cooldown prevents one update per vote from causing repeated
+        GetPollVotes requests during an active poll.
+        """
+        poll_id = getattr(update, "poll_id", None)
+        if poll_id is None or self.pool is None:
+            return
+
+        key = str(poll_id)
+        now = asyncio.get_running_loop().time()
+        last_seen = self._poll_vote_update_last_seen.get(key)
+        if last_seen is not None and now - last_seen < self._poll_vote_update_cooldown:
+            return
+        # Set before awaiting the DB so concurrent update callbacks for the same
+        # poll are coalesced into one refresh attempt.
+        self._poll_vote_update_last_seen[key] = now
+        if len(self._poll_vote_update_last_seen) > 2048:
+            cutoff = now - max(self._poll_vote_update_cooldown * 4, 3600.0)
+            self._poll_vote_update_last_seen = {
+                poll_key: seen_at
+                for poll_key, seen_at in self._poll_vote_update_last_seen.items()
+                if seen_at >= cutoff
+            }
+
+        try:
+            async with self.pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """
+                    SELECT p.message_id, p.is_anonymous, p.is_closed,
+                           p.question, p.options, p.allows_multiple,
+                           m.chat_id, m.platform_message_id,
+                           c.platform_chat_id
+                    FROM telegram_polls p
+                    JOIN telegram_messages m ON m.id = p.message_id
+                    LEFT JOIN telegram_chats c ON c.id = m.chat_id
+                    WHERE p.poll_id = $1
+                    ORDER BY p.refreshed_at DESC
+                    LIMIT 1
+                    """,
+                    key,
+                )
+            if row is None:
+                return
+
+            poll = getattr(update, "poll", None)
+            if poll is not None and not bool(getattr(poll, "public_voters", False)):
+                return
+            if poll is None and row["is_anonymous"] is not False:
+                return
+
+            platform_message_id = str(row["platform_message_id"] or "")
+            chat_platform_id = str(row["platform_chat_id"] or "")
+            stored_chat_id, separator, stored_message_id = platform_message_id.rpartition(":")
+            if not chat_platform_id and separator:
+                chat_platform_id = stored_chat_id
+            update_peer = getattr(update, "peer", None)
+            update_message_id = getattr(update, "msg_id", None)
+
+            # Telegram may omit peer/msg_id when the poll itself is already
+            # cached by this client. Fall back to the stored message key and
+            # resolve the chat through any of the connected accounts.
+            if update_peer is None or update_message_id is None:
+                if not separator or not stored_message_id.isdigit():
+                    return
+                owner = worker
+                try:
+                    owner, entity = await self._resolve_entity_any_worker(
+                        worker, chat_platform_id
+                    )
+                    await self.wait_rate_limit("telegram.org")
+                    message = await owner.client.get_messages(
+                        entity,
+                        ids=int(stored_message_id),
+                    )
+                except Exception as exc:
+                    if _is_flood_wait(exc):
+                        await self._handle_flood_wait(owner, exc, sleep=False)
+                    logger.debug(
+                        "telegram poll message lookup failed (%s)",
+                        type(exc).__name__,
+                    )
+                    return
+                if message is None:
+                    return
+                worker = owner
+                update_peer = getattr(message, "peer_id", None)
+                update_message_id = getattr(message, "id", None)
+                if update_peer is None or update_message_id is None:
+                    return
+
+            if poll is None:
+                options = row["options"] or []
+                if isinstance(options, str):
+                    options = json.loads(options)
+                answers = []
+                for option in options:
+                    data = (option or {}).get("data")
+                    try:
+                        option_bytes = bytes.fromhex(str(data)) if data else None
+                    except ValueError:
+                        option_bytes = None
+                    answers.append(SimpleNamespace(
+                        text=(option or {}).get("text"),
+                        option=option_bytes,
+                    ))
+                poll = SimpleNamespace(
+                    id=int(key) if key.isdigit() else key,
+                    question=row["question"],
+                    answers=answers,
+                    closed=bool(row["is_closed"]),
+                    public_voters=True,
+                    multiple_choice=bool(row["allows_multiple"]),
+                )
+
+            poll_message = SimpleNamespace(
+                id=int(update_message_id),
+                peer_id=update_peer,
+                poll=SimpleNamespace(poll=poll, results=getattr(update, "results", None)),
+            )
+            async with self.pool.acquire() as conn:
+                await self._capture_poll(conn, row["message_id"], poll_message)
+            users_seen = await self._enumerate_poll_votes_and_enqueue(
+                worker,
+                poll_message,
+                chat_platform_id,
+                row["message_id"],
+                chat_uuid=row["chat_id"],
+            )
+            logger.debug(
+                "telegram public poll update refreshed voter rows: %d",
+                users_seen,
+            )
+        except Exception as exc:
+            logger.debug(
+                "telegram poll update handler failed (%s)",
+                _format_exception(exc),
+            )
 
     async def _write_realtime_message(
         self,

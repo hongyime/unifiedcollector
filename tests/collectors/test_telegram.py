@@ -1293,6 +1293,141 @@ async def test_on_message_deleted_retries_transient_db_timeout(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_on_raw_poll_update_refreshes_public_voters_without_poll_payload(monkeypatch):
+    coll = _make_collector(monkeypatch)
+    worker = _make_worker(coll)
+    message_uuid = "poll-message-uuid"
+    chat_uuid = "poll-chat-uuid"
+    coll.pool.conn.fetchrow = AsyncMock(return_value={
+        "message_id": message_uuid,
+        "is_anonymous": False,
+        "is_closed": False,
+        "question": "Question",
+        "options": [{"text": "Yes", "data": "01"}, {"text": "No", "data": "02"}],
+        "allows_multiple": False,
+        "chat_id": chat_uuid,
+        "platform_chat_id": "12345",
+        "platform_message_id": "12345:99",
+    })
+    coll._capture_poll = AsyncMock()
+    coll._enumerate_poll_votes_and_enqueue = AsyncMock(return_value=2)
+    update = SimpleNamespace(
+        poll_id=456,
+        results=SimpleNamespace(total_voters=2, results=[]),
+        peer=SimpleNamespace(channel_id=12345),
+        msg_id=99,
+        poll=None,
+    )
+
+    await coll._on_raw_poll_update(worker, update)
+    await coll._on_raw_poll_update(worker, update)
+
+    coll._capture_poll.assert_awaited_once()
+    stored_message = coll._capture_poll.await_args.args[2]
+    assert stored_message.id == 99
+    assert stored_message.peer_id == update.peer
+    assert stored_message.poll.poll.public_voters is True
+    assert [answer.option for answer in stored_message.poll.poll.answers] == [b"\x01", b"\x02"]
+    coll._enumerate_poll_votes_and_enqueue.assert_awaited_once()
+    vote_message = coll._enumerate_poll_votes_and_enqueue.await_args.args[1]
+    assert vote_message.id == 99
+    assert vote_message.peer_id == update.peer
+    assert coll._enumerate_poll_votes_and_enqueue.await_args.args[2] == "12345"
+    assert coll._enumerate_poll_votes_and_enqueue.await_args.args[3] == message_uuid
+    assert coll._enumerate_poll_votes_and_enqueue.await_args.kwargs["chat_uuid"] == chat_uuid
+    coll.pool.conn.fetchrow.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("is_anonymous", [True, None])
+async def test_on_raw_poll_update_skips_anonymous_or_unknown_poll(monkeypatch, is_anonymous):
+    coll = _make_collector(monkeypatch)
+    worker = _make_worker(coll)
+    coll.pool.conn.fetchrow = AsyncMock(return_value={
+        "message_id": "poll-message-uuid",
+        "is_anonymous": is_anonymous,
+        "is_closed": False,
+        "question": "Question",
+        "options": [],
+        "allows_multiple": False,
+        "chat_id": "poll-chat-uuid",
+        "platform_chat_id": "12345",
+        "platform_message_id": "12345:99",
+    })
+    coll._capture_poll = AsyncMock()
+    coll._enumerate_poll_votes_and_enqueue = AsyncMock()
+
+    await coll._on_raw_poll_update(worker, SimpleNamespace(poll_id=456, poll=None))
+
+    coll._capture_poll.assert_not_awaited()
+    coll._enumerate_poll_votes_and_enqueue.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_on_raw_poll_update_resolves_missing_message_reference(monkeypatch):
+    coll = _make_collector(monkeypatch)
+    worker = _make_worker(coll)
+    entity = SimpleNamespace(id=12345)
+    peer = SimpleNamespace(channel_id=12345)
+    coll.pool.conn.fetchrow = AsyncMock(return_value={
+        "message_id": "poll-message-uuid",
+        "is_anonymous": False,
+        "is_closed": False,
+        "question": "Question",
+        "options": [{"text": "Yes", "data": "01"}],
+        "allows_multiple": False,
+        "chat_id": "poll-chat-uuid",
+        "platform_chat_id": "12345",
+        "platform_message_id": "12345:99",
+    })
+    coll._resolve_entity_any_worker = AsyncMock(return_value=(worker, entity))
+    coll.wait_rate_limit = AsyncMock()
+    worker.client.get_messages = AsyncMock(return_value=SimpleNamespace(id=99, peer_id=peer))
+    coll._capture_poll = AsyncMock()
+    coll._enumerate_poll_votes_and_enqueue = AsyncMock(return_value=1)
+
+    await coll._on_raw_poll_update(
+        worker,
+        SimpleNamespace(
+            poll_id=789,
+            results=SimpleNamespace(total_voters=1, results=[]),
+            poll=None,
+        ),
+    )
+
+    coll._resolve_entity_any_worker.assert_awaited_once_with(worker, "12345")
+    worker.client.get_messages.assert_awaited_once_with(entity, ids=99)
+    coll._enumerate_poll_votes_and_enqueue.assert_awaited_once()
+    vote_message = coll._enumerate_poll_votes_and_enqueue.await_args.args[1]
+    assert vote_message.peer_id == peer
+    assert vote_message.id == 99
+
+
+def test_realtime_registration_includes_raw_poll_updates(monkeypatch):
+    from telethon.tl.types import UpdateMessagePoll
+
+    coll = _make_collector(monkeypatch)
+    worker = _make_worker(coll)
+    events = SimpleNamespace(
+        NewMessage=lambda: "new-message",
+        MessageEdited=lambda: "message-edited",
+        MessageDeleted=lambda: "message-deleted",
+        ChatAction=lambda: "chat-action",
+        UserUpdate=lambda: "user-update",
+        Raw=lambda types: ("raw", types),
+    )
+
+    assert coll._register_realtime_handlers_for_worker(worker, events) is True
+
+    raw_filters = [
+        call.args[1]
+        for call in worker.client.add_event_handler.call_args_list
+        if isinstance(call.args[1], tuple) and call.args[1][0] == "raw"
+    ]
+    assert any(UpdateMessagePoll in event_types for _, event_types in raw_filters)
+
+
+@pytest.mark.asyncio
 async def test_upsert_message_archives_raw_payload(monkeypatch):
     coll = _make_collector(monkeypatch)
     monkeypatch.setenv("COLLECTOR_TIER1_RAW_PAYLOADS_ENABLED", "1")
