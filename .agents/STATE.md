@@ -1,6 +1,6 @@
 # Agent State
 
-Current task: Complete the UnifiedCollector Full Plan (2026-10-14). This is the active checklist. Reconciled 2026-10-15 11:35 UTC; latest runtime evidence is 11:35 UTC.
+Current task: Complete the UnifiedCollector Full Plan (2026-10-14). This is the active checklist. Reconciled 2026-10-15 11:37 UTC; latest runtime evidence is 11:36 UTC.
 
 ## User decisions and operating rules
 
@@ -11,7 +11,7 @@ Current task: Complete the UnifiedCollector Full Plan (2026-10-14). This is the 
 - Keep at most one extension-managed tab per social. Respect provider cooldowns; do not interrupt Exposure or release its Search mutex. Do not touch Spider/SpiderFoot.
 - `[x]` means acceptance verified; `[~]` means active or awaiting evidence; `[ ]` means not complete. Runtime facts retain their sample time.
 
-## Master checklist — evidence through 2026-10-15 11:35 UTC
+## Master checklist — evidence through 2026-10-15 11:36 UTC
 
 - [x] **Phase 1 — split/rename.** Exposure/Lemon8 and Search/Strava are separated; `instagram_ingest` became `browser_ingest`. Fixes are pushed. Replacement services run with separate configs/logs; no retired service names remain in active code/config/docs. Old containers are stopped orphans.
 - [x] **Phase 2a — Beeper.** Fix `4648f029` is verified: 88 messages/15m and 408/1h at 10:08, with no source-health crashes. The plan's separate final soak is still open.
@@ -20,7 +20,7 @@ Current task: Complete the UnifiedCollector Full Plan (2026-10-14). This is the 
 - [~] **Phase 2c — Snapchat (plan 5b).** At 11:19: 1 story, 15 Spotlights, 23 Highlights/12h; no story/Spotlight titles, 3 Highlight titles, and no thumbnails. At 10:50, 10 followed targets pending, 3 complete, 197 failed; 10 broad targets parked. Keep follow-first and complete public content/profile fields.
 - [~] **Phase 2c — Airbnb (plan 5c).** At 11:34: 3 listings/12h; all had title, description, photos, price, amenities, availability, rating, and host; 2 had location. All 30 reviews had text. Three hosts were refreshed; none had bios, all had avatars/ratings/response rates. Host retry remains scheduled for 13:50:53 UTC; do not force it.
 - [~] **Phase 3 — Telegram.** At 11:34: 5 discussion visits/12h (4 completed, 1 aborted), across 2 accounts; zero fresh voter rows. At 11:01 all 4 account FloodWaits were active through Oct 16 06:02–06:22 UTC. Poll-handler fix `d00a3849` is pushed but not deployed. Wait through cooldowns, then restart only `collector_telegram` and verify all four features across authorized groups/accounts.
-- [~] **Phase 4 — Search.** At 11:19, shared tables had 202 queries/8,086 results and zero documents/12h. The newest 28 queries are `waterfall` and none match the 10 active dynamic terms; all 10 remain due and never searched. Search source health is stale since Oct 14 16:51. The Search-engine advisory lock is still owned by Exposure (idle session since Oct 14 13:28); do not interrupt it. Verify Search-owned terms/results/documents after natural release.
+- [~] **Phase 4 — Search.** At 11:19, shared tables had 202 queries/8,086 results and zero documents/12h. The newest 28 queries are `waterfall` and none match the 10 active dynamic terms; all 10 remain due and never searched. Search source health is stale since Oct 14 16:51. At 11:36, Exposure cursor and source health were both current at 11:35 and its logs showed 558 exposure-query starts since 13:28 Oct 14; it is active, not a dead process. The Search-engine lock is held by Exposure's long-lived DB session. The running Exposure process predates `ea8791b5` (operation-scoped mutex fix, committed 2026-10-14 16:52 UTC), so its in-memory collector still has the earlier cycle-scoped lock behavior. Its current limit is 9,999 queries/cycle with a 30s inter-query delay. Do not restart Exposure or unlock it per user instruction; Search must wait for natural release. Verify Search-owned terms/results/documents afterward.
 - [~] **Cross-cutting — verified-account exclusion.** Explicit metadata filters exist for the seven requested platforms; 14 regression cases passed (`eeec5845`), with Pinterest card filtering (`22610b92`). Live verification remains open because extension ingest is inactive and the CDP profile has no Pinterest-domain cookies as of 11:29. Snapchat uses the plan's public unauthenticated endpoints.
 - [ ] **Final gate.** At 11:34 the source matrix was reachable; current hour showed 0 rate limits but 1 access error. At 11:18 all Compose services were Up, but this is not the required soak. After phase gates pass: verify all services, complete a fresh 15-minute no-error/no-new-rate-limit soak, refresh per-container rolling 12-hour counts, and write `/tmp/unifiedcollector-plan-complete-20261014.md`.
 
@@ -30,7 +30,7 @@ Current task: Complete the UnifiedCollector Full Plan (2026-10-14). This is the 
 2. Wait for a Pinterest-domain cookie in the collector CDP snapshots, then restart only `collector_pinterest` to load the snapshot-selection fix and verify native pins. Finish Snapchat public follow-target collection. Broaden either queue only after preferred targets drain.
 3. Let Airbnb's scheduled 13:50:53 UTC retry occur; then check host/profile completeness.
 4. Wait for all Telegram FloodWaits through Oct 16 06:22 UTC. After expiry, deploy the pushed handler fix and verify discussion visits, voters, member fields, and join/leave events across all authorized accounts/groups.
-5. Wait for Exposure to release the Search mutex naturally; verify Search-owned dynamic terms and indexed documents.
+5. Wait for the active pre-`ea8791b5` Exposure cycle to release the Search mutex naturally; do not interrupt it. Then verify Search-owned dynamic terms and indexed documents. A future Exposure process will load the operation-scoped fix.
 6. After all above pass, run the final soak/count report and write the requested `/tmp` summary.
 
 The Pinterest snapshot-selection regression failed before the code fix; 17 Pinterest-filtered tests and `py_compile` passed. Fix is pushed but not deployed while the collector profile has no Pinterest cookies. No runtime, browser, container, queue, or provider state was changed.
