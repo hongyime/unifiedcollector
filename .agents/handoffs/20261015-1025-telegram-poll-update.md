@@ -1,3 +1,14 @@
+## Latest continuation — 2026-10-15 10:28 UTC
+
+This supersedes the older commit/deployment notes below.
+
+- Telegram poll-update fix and tracker updates were committed and pushed as d00a3849. The live collector has not been recreated.
+- A read-only DB check at 10:27 found four active Telegram account rows and four active persisted FloodWait cooldowns, with about 19.5–19.9 hours remaining. The collector is healthy. Do not restart/reconnect its sessions until the cooldowns expire.
+- Lemon8 remains at 29 posts/12h (16 titles, 14 descriptions), newest at 10:15:48. Cursor is still running with last_processed_at 10:12:44; leave it alone.
+- Browser status remains unavailable to this session: CUA has no surfaces and CDP has no extension target. Continue other gates while waiting.
+
+---
+
 # Telegram Poll Update Handoff — 2026-10-15 10:25 UTC
 
 ## Goal and scope
@@ -15,7 +26,7 @@ At 10:15 UTC the database had 7,325 telegram_polls: 137 public/non-anonymous and
 - docker/docker-compose.yml: set the cooldown to 1,800 seconds.
 - tests/collectors/test_telegram.py: cover public poll updates, anonymous/unknown skips, debounce, missing peer/message fallback, and handler registration.
 
-The focused Telegram and realtime test files pass. Python compilation and git diff --check pass. Changes are not yet committed, pushed, or loaded into the live collector. The Telegram Compose service bind-mounts src; after commit/push, recreate only collector_telegram to load the handler. That will reconnect its Telethon workers; existing startup delays and per-account FloodWait recovery remain in place. Then verify all connected workers register the raw poll handler without printing account names, and wait for a public poll update to create fresh voter rows. Do not count historical rows as live verification.
+The focused Telegram and realtime test files pass. Python compilation and git diff --check pass. Changes were committed and pushed as d00a3849; they are not loaded into the live collector. The Telegram Compose service bind-mounts src; after commit/push, recreate only collector_telegram to load the handler. That will reconnect its Telethon workers; existing startup delays and per-account FloodWait recovery remain in place. Then verify all connected workers register the raw poll handler without printing account names, and wait for a public poll update to create fresh voter rows. Do not count historical rows as live verification.
 
 ## Other live gates
 
@@ -26,7 +37,7 @@ The focused Telegram and realtime test files pass. Python compilation and git di
 
 ## Next actions
 
-1. Inspect diff, run focused checks if code changes, hostname-scrub staged .agents blobs, commit and push the Telegram fix plus tracker updates.
-2. Recreate only collector_telegram; confirm it reconnects all configured workers and registers the raw poll handler.
+1. Wait for the four persisted FloodWait cooldowns to expire (about 19.5–19.9 hours remained at 10:27 UTC); do not restart Telegram before then.
+2. Recreate only collector_telegram to load d00a3849; confirm it reconnects all configured workers and registers the raw poll handler.
 3. Await/verify a public UpdateMessagePoll writes fresh voter rows; no live public poll update means this gate remains pending.
 4. Continue Lemon8, browser/Pinterest/Snapchat/Airbnb, Search, then the final 15-minute soak and per-container 12-hour report.
