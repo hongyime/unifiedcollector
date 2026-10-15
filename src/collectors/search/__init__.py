@@ -466,6 +466,15 @@ _DYNAMIC_TERM_SOURCE_QUERIES = (
            AND (display_name IS NOT NULL OR bio IS NOT NULL)
          ORDER BY collected_at DESC LIMIT $1
     """),
+    ("airbnb_profiles", """
+        SELECT 'airbnb' AS platform, username AS source_reference,
+               username, display_name AS full_name,
+               NULL::text AS text_blob, ARRAY[]::text[] AS hashtags
+          FROM airbnb_profiles
+         WHERE probed_at >= now() - interval '90 days'
+           AND (username IS NOT NULL OR display_name IS NOT NULL)
+         ORDER BY probed_at DESC LIMIT $1
+    """),
     ("airbnb_listings", """
         SELECT 'airbnb' AS platform, listing_id AS source_reference,
                NULL::text AS username, NULL::text AS full_name,
