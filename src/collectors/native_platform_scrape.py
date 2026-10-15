@@ -267,6 +267,16 @@ _FOLLOWED_AIRBNB_LINKS_SQL = r"""
                       AND COALESCE(LOWER(BTRIM(profile.raw_payload->>'verified_badge')), '') NOT IN ('true', '1', 'yes')
                 )
                 OR EXISTS (
+                    SELECT 1 FROM facebook_posts p
+                    JOIN facebook_profiles profile
+                      ON LOWER(profile.username)=LOWER(p.author_username)
+                    JOIN follow_edges f ON f.platform='facebook' AND f.direction='following'
+                        AND (f.target_uid=profile.platform_user_id
+                             OR LOWER(f.target_username)=LOWER(profile.username))
+                    WHERE l.source_table='facebook_posts'
+                      AND (l.source_record_id=p.id::text OR l.source_record_id=p.platform_post_id)
+                )
+                OR EXISTS (
                     SELECT 1 FROM youtube_videos p
                     JOIN youtube_channels channel ON channel.id=p.channel_id
                     JOIN follow_edges f ON f.platform='youtube' AND f.direction='following'
@@ -355,6 +365,67 @@ _FOLLOWED_AIRBNB_PROFILE_URLS_SQL = r"""
             AND (f.target_uid::text=p.platform_user_id::text
                  OR LOWER(f.target_username)=LOWER(p.username))
          WHERE p.is_verified IS NOT TRUE AND p.bio IS NOT NULL
+        UNION ALL
+        SELECT p.external_url, p.updated_at
+          FROM facebook_profiles p
+          JOIN follow_edges f ON f.platform='facebook' AND f.direction='following'
+            AND (f.target_uid=p.platform_user_id
+                 OR LOWER(f.target_username)=LOWER(p.username))
+         WHERE p.external_url IS NOT NULL
+        UNION ALL
+        SELECT p.bio, p.updated_at
+          FROM facebook_profiles p
+          JOIN follow_edges f ON f.platform='facebook' AND f.direction='following'
+            AND (f.target_uid=p.platform_user_id
+                 OR LOWER(f.target_username)=LOWER(p.username))
+         WHERE p.bio IS NOT NULL
+        UNION ALL
+        SELECT p.bio, p.probed_at
+          FROM bluesky_profiles p
+          JOIN follow_edges f ON f.platform='bluesky' AND f.direction='following'
+            AND (f.target_uid=p.did
+                 OR LOWER(f.target_username)=LOWER(p.username))
+         WHERE p.bio IS NOT NULL
+        UNION ALL
+        SELECT p.bio, p.probed_at
+          FROM pinterest_profiles p
+          JOIN follow_edges f ON f.platform='pinterest' AND f.direction='following'
+            AND LOWER(f.target_username)=LOWER(p.username)
+         WHERE p.bio IS NOT NULL
+           AND COALESCE(LOWER(BTRIM(p.raw_payload->>'profile_is_verified')), '') NOT IN ('true', '1', 'yes')
+           AND COALESCE(LOWER(BTRIM(p.raw_payload->>'is_verified')), '') NOT IN ('true', '1', 'yes')
+           AND COALESCE(LOWER(BTRIM(p.raw_payload->>'verified')), '') NOT IN ('true', '1', 'yes')
+           AND COALESCE(LOWER(BTRIM(p.raw_payload->>'is_blue_verified')), '') NOT IN ('true', '1', 'yes')
+           AND COALESCE(LOWER(BTRIM(p.raw_payload->>'blue_verified')), '') NOT IN ('true', '1', 'yes')
+        UNION ALL
+        SELECT p.raw_payload::text, p.probed_at
+          FROM snapchat_profiles p
+          JOIN follow_edges f ON f.platform='snapchat' AND f.direction='following'
+            AND LOWER(f.target_username)=LOWER(p.username)
+         WHERE p.raw_payload IS NOT NULL
+           AND COALESCE(LOWER(BTRIM(p.raw_payload->>'is_verified')), '') NOT IN ('true', '1', 'yes')
+           AND COALESCE(LOWER(BTRIM(p.raw_payload->>'verified')), '') NOT IN ('true', '1', 'yes')
+           AND COALESCE(LOWER(BTRIM(p.raw_payload->>'isVerified')), '') NOT IN ('true', '1', 'yes')
+           AND COALESCE(LOWER(BTRIM(p.raw_payload->>'is_blue_verified')), '') NOT IN ('true', '1', 'yes')
+           AND COALESCE(LOWER(BTRIM(p.raw_payload->>'isBlueVerified')), '') NOT IN ('true', '1', 'yes')
+           AND COALESCE(LOWER(BTRIM(p.raw_payload->>'blue_verified')), '') NOT IN ('true', '1', 'yes')
+           AND COALESCE(LOWER(BTRIM(p.raw_payload->>'blueVerified')), '') NOT IN ('true', '1', 'yes')
+           AND COALESCE(LOWER(BTRIM(p.raw_payload->>'verified_badge')), '') NOT IN ('true', '1', 'yes')
+        UNION ALL
+        SELECT s.metadata::text, s.last_seen
+          FROM social_users s
+          JOIN follow_edges f ON f.platform='threads' AND f.direction='following'
+            AND (f.target_uid=s.uid OR LOWER(f.target_username)=LOWER(s.username))
+         WHERE s.metadata IS NOT NULL
+           AND COALESCE(LOWER(BTRIM(s.metadata->>'author_is_verified')), '') NOT IN ('true', '1', 'yes')
+           AND COALESCE(LOWER(BTRIM(s.metadata->>'is_verified')), '') NOT IN ('true', '1', 'yes')
+           AND COALESCE(LOWER(BTRIM(s.metadata->>'verified')), '') NOT IN ('true', '1', 'yes')
+           AND COALESCE(LOWER(BTRIM(s.metadata->>'isVerified')), '') NOT IN ('true', '1', 'yes')
+           AND COALESCE(LOWER(BTRIM(s.metadata->>'is_blue_verified')), '') NOT IN ('true', '1', 'yes')
+           AND COALESCE(LOWER(BTRIM(s.metadata->>'isBlueVerified')), '') NOT IN ('true', '1', 'yes')
+           AND COALESCE(LOWER(BTRIM(s.metadata->>'blue_verified')), '') NOT IN ('true', '1', 'yes')
+           AND COALESCE(LOWER(BTRIM(s.metadata->>'blueVerified')), '') NOT IN ('true', '1', 'yes')
+           AND COALESCE(LOWER(BTRIM(s.metadata->>'verified_badge')), '') NOT IN ('true', '1', 'yes')
         UNION ALL
         SELECT p.blog, p.collected_at
           FROM github_users p

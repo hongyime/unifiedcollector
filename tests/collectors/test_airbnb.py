@@ -624,8 +624,14 @@ async def test_airbnb_followed_profile_links_are_seeded_before_broad_discovery(m
     )
     assert args[:2] == (native_scrape._FOLLOWED_TARGET_PRIORITY, native_scrape._FOLLOWED_TARGET_CAP)
     assert "youtube_channels c" in query
+    assert "facebook_profiles p" in query
+    assert "bluesky_profiles p" in query
+    assert "pinterest_profiles p" in query
+    assert "snapchat_profiles p" in query
+    assert "social_users s" in query and "f.platform='threads'" in query
     assert "c.last_skip_reason IS DISTINCT FROM 'verified_account'" in query
     assert "strava_athletes" not in query
+    assert "facebook_posts p" in native_scrape._FOLLOWED_AIRBNB_LINKS_SQL
     assert re.search(args[2], "bio: https://www.airbnb.com/rooms/12345").group(1) == "12345"
     assert re.search(args[2], "https://notairbnb.com/rooms/12345") is None
 
