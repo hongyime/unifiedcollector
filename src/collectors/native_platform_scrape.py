@@ -24,7 +24,9 @@ _FOLLOW_ONLY_SEED_QUERY_INDEXES = {
     # identities/listings. Other seed queries expand public discovery.
     "pinterest": (2,),
     "snapchat": (),
-    "airbnb": (0, 1, 2, 4),
+    # Seed explicit Wishlist and homepage selections before the general
+    # enrichment pass for listings already in the database.
+    "airbnb": (4, 5, 0, 1, 2),
 }
 _FOLLOW_ONLY_QUEUE_SOURCES = {
     "pinterest": ("followed_handle_candidate", "pinterest_pin_details"),
@@ -35,6 +37,7 @@ _FOLLOW_ONLY_QUEUE_SOURCES = {
         "discovered_links",
         "airbnb_listings",
         "airbnb_wishlist",
+        "airbnb_homepage",
     ),
 }
 
@@ -839,6 +842,26 @@ _SEED_QUERIES: dict[str, tuple[str, ...]] = {
          ))
         ON CONFLICT (platform, target_url) DO NOTHING
         """,
+        """
+        INSERT INTO browser_native_scrape_queue
+            (platform, target_url, username, source, priority)
+        SELECT 'airbnb', 'https://www.airbnb.com/rooms/' || l.listing_id,
+               NULL, 'airbnb_homepage', 30
+          FROM airbnb_listings l
+         WHERE l.listing_id ~ '^[0-9]{1,24}$'
+           AND l.metadata->>'collection_source'='airbnb_homepage'
+           AND NOT EXISTS (
+                SELECT 1 FROM browser_native_scrape_queue q
+                 WHERE q.platform='airbnb'
+                   AND q.target_url='https://www.airbnb.com/rooms/' || l.listing_id
+           )
+         ORDER BY l.collected_at DESC NULLS LAST, l.listing_id
+         LIMIT GREATEST(0, 10 - (
+             SELECT count(*) FROM browser_native_scrape_queue
+              WHERE platform='airbnb' AND status IN ('pending','claimed')
+         ))
+        ON CONFLICT (platform, target_url) DO NOTHING
+        """,
     ),
 }
 
@@ -884,6 +907,26 @@ async def seed_native_targets(pool: Any, platform: str) -> None:
                     _FOLLOWED_TARGET_CAP,
                     r"(?:^|[^A-Za-z0-9.-])(?:https?://)?(?:www\.)?airbnb\.(?:com(?:\.[a-z]{2})?|co\.[a-z]{2}|[a-z]{2,3})/rooms/([0-9]{1,24})",
                 )
+                await conn.execute(
+                    """
+                    UPDATE browser_native_scrape_queue q
+                       SET source=CASE
+                               WHEN l.metadata->>'collection_source'='airbnb_wishlist'
+                                   THEN 'airbnb_wishlist'
+                               ELSE 'airbnb_homepage'
+                           END,
+                           priority=GREATEST(q.priority, CASE
+                               WHEN l.metadata->>'collection_source'='airbnb_wishlist' THEN 45
+                               ELSE 30
+                           END),
+                           updated_at=now()
+                      FROM airbnb_listings l
+                     WHERE q.platform='airbnb'
+                       AND q.target_url='https://www.airbnb.com/rooms/' || l.listing_id
+                       AND q.source IN ('airbnb_listings','airbnb_homepage')
+                       AND l.metadata->>'collection_source' IN ('airbnb_homepage','airbnb_wishlist')
+                    """
+                )
 
             preferred_count = await conn.fetchval(
                 """
@@ -905,12 +948,16 @@ async def seed_native_targets(pool: Any, platform: str) -> None:
                     queries[index]
                     for index in _FOLLOW_ONLY_SEED_QUERY_INDEXES[platform]
                 )
+            elif platform == "airbnb":
+                # Even with broad discovery enabled, user-selected Wishlist
+                # and homepage seeds get first use of the bounded queue.
+                queries = tuple(queries[index] for index in (4, 5, 0, 1, 2, 3))
             for query in queries:
                 if platform == "airbnb" and "'airbnb_listings'" in query:
                     active_listings = await conn.fetchval(
                         """
                         SELECT count(*) FROM browser_native_scrape_queue
-                         WHERE platform='airbnb' AND source='airbnb_listings'
+                         WHERE platform='airbnb'
                            AND status IN ('pending','claimed')
                         """
                     )

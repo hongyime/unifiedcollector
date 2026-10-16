@@ -335,7 +335,12 @@ async def native_scrape_ingest(request: web.Request) -> web.Response:
                 bedrooms=COALESCE(EXCLUDED.bedrooms,airbnb_listings.bedrooms),
                 bathrooms=COALESCE(EXCLUDED.bathrooms,airbnb_listings.bathrooms),
                 max_guests=COALESCE(EXCLUDED.max_guests,airbnb_listings.max_guests),
-                collected_at=now(),metadata=airbnb_listings.metadata||EXCLUDED.metadata
+                collected_at=now(),metadata=CASE
+                    WHEN airbnb_listings.metadata->>'collection_source'='airbnb_wishlist'
+                     AND EXCLUDED.metadata->>'collection_source'='airbnb_homepage'
+                    THEN airbnb_listings.metadata || (EXCLUDED.metadata - 'collection_source')
+                    ELSE airbnb_listings.metadata || EXCLUDED.metadata
+                END
         """,
         "host": """
             INSERT INTO airbnb_hosts

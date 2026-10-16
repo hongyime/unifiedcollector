@@ -288,6 +288,16 @@ export function isAirbnbWishlistPage(pageUrl: string): boolean {
   }
 }
 
+export function isAirbnbHomePage(pageUrl: string): boolean {
+  try {
+    const parsed = new URL(pageUrl);
+    return /(^|\.)airbnb\.(com|com\.sg|co\.uk|co\.kr)$/i.test(parsed.hostname)
+      && (parsed.pathname === "/" || parsed.pathname === "");
+  } catch {
+    return false;
+  }
+}
+
 function airbnbListingItem(doc: Document, pageUrl: string, anchor: HTMLAnchorElement, card: Element): NativeScrapeItem | null {
   const listingUrl = absoluteHttps(anchor.href, pageUrl);
   if (!listingUrl || !/(^|\.)airbnb\.(com|com\.sg|co\.uk|co\.kr)$/i.test(new URL(listingUrl).hostname)) return null;
@@ -321,8 +331,24 @@ function airbnbListingItem(doc: Document, pageUrl: string, anchor: HTMLAnchorEle
     metadata: {
       page_path: new URL(pageUrl).pathname,
       ...(isAirbnbWishlistPage(pageUrl) ? { collection_source: "airbnb_wishlist" } : {}),
+      ...(isAirbnbHomePage(pageUrl) ? { collection_source: "airbnb_homepage" } : {}),
     },
   };
+}
+
+function airbnbCardVisibleInViewport(card: Element): boolean {
+  if (!(card instanceof HTMLElement)) return false;
+  const rect = card.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0
+    || rect.bottom <= 0 || rect.right <= 0
+    || rect.top >= window.innerHeight || rect.left >= window.innerWidth) return false;
+  for (let current: Element | null = card; current; current = current.parentElement) {
+    if (current.getAttribute("aria-hidden") === "true") return false;
+    const style = window.getComputedStyle(current);
+    if (style.display === "none" || style.visibility === "hidden"
+      || style.visibility === "collapse" || Number(style.opacity) === 0) return false;
+  }
+  return true;
 }
 
 function airbnbItems(doc: Document, pageUrl: string): NativeScrapeItem[] {
@@ -346,10 +372,12 @@ function airbnbItems(doc: Document, pageUrl: string): NativeScrapeItem[] {
     }
   }
   const wishlistPage = isAirbnbWishlistPage(pageUrl);
-  if (/\/s\//i.test(parsed.pathname) || wishlistPage) {
+  const homePage = isAirbnbHomePage(pageUrl);
+  if (/\/s\//i.test(parsed.pathname) || wishlistPage || homePage) {
     const listingRoot = wishlistPage ? (doc.querySelector("main") || doc.body) : doc;
     for (const anchor of Array.from(listingRoot.querySelectorAll<HTMLAnchorElement>('a[href*="/rooms/"]'))) {
       const card = anchor.closest<HTMLElement>('[data-testid="card-container"], [data-testid*="listing-card" i], article, li') || anchor.parentElement || anchor;
+      if (homePage && !airbnbCardVisibleInViewport(card)) continue;
       const item = airbnbListingItem(doc, pageUrl, anchor, card);
       if (!item || seenListings.has(String(item.id))) continue;
       seenListings.add(String(item.id));

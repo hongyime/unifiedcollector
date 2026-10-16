@@ -416,6 +416,14 @@
       return false;
     }
   }
+  function isAirbnbHomePage(pageUrl) {
+    try {
+      const parsed = new URL(pageUrl);
+      return /(^|\.)airbnb\.(com|com\.sg|co\.uk|co\.kr)$/i.test(parsed.hostname) && (parsed.pathname === "/" || parsed.pathname === "");
+    } catch {
+      return false;
+    }
+  }
   function airbnbListingItem(doc, pageUrl, anchor, card) {
     const listingUrl = absoluteHttps(anchor.href, pageUrl);
     if (!listingUrl || !/(^|\.)airbnb\.(com|com\.sg|co\.uk|co\.kr)$/i.test(new URL(listingUrl).hostname)) return null;
@@ -448,9 +456,21 @@
       max_guests: guests ? Number(guests[1]) : null,
       metadata: {
         page_path: new URL(pageUrl).pathname,
-        ...isAirbnbWishlistPage(pageUrl) ? { collection_source: "airbnb_wishlist" } : {}
+        ...isAirbnbWishlistPage(pageUrl) ? { collection_source: "airbnb_wishlist" } : {},
+        ...isAirbnbHomePage(pageUrl) ? { collection_source: "airbnb_homepage" } : {}
       }
     };
+  }
+  function airbnbCardVisibleInViewport(card) {
+    if (!(card instanceof HTMLElement)) return false;
+    const rect = card.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0 || rect.bottom <= 0 || rect.right <= 0 || rect.top >= window.innerHeight || rect.left >= window.innerWidth) return false;
+    for (let current = card; current; current = current.parentElement) {
+      if (current.getAttribute("aria-hidden") === "true") return false;
+      const style = window.getComputedStyle(current);
+      if (style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse" || Number(style.opacity) === 0) return false;
+    }
+    return true;
   }
   function airbnbItems(doc, pageUrl) {
     const parsed = new URL(pageUrl);
@@ -472,10 +492,12 @@
       }
     }
     const wishlistPage = isAirbnbWishlistPage(pageUrl);
-    if (/\/s\//i.test(parsed.pathname) || wishlistPage) {
+    const homePage = isAirbnbHomePage(pageUrl);
+    if (/\/s\//i.test(parsed.pathname) || wishlistPage || homePage) {
       const listingRoot = wishlistPage ? doc.querySelector("main") || doc.body : doc;
       for (const anchor of Array.from(listingRoot.querySelectorAll('a[href*="/rooms/"]'))) {
         const card = anchor.closest('[data-testid="card-container"], [data-testid*="listing-card" i], article, li') || anchor.parentElement || anchor;
+        if (homePage && !airbnbCardVisibleInViewport(card)) continue;
         const item = airbnbListingItem(doc, pageUrl, anchor, card);
         if (!item || seenListings.has(String(item.id))) continue;
         seenListings.add(String(item.id));
@@ -4333,8 +4355,11 @@
         const nextResponse2 = await send({ type: "getNativeScrapeTarget", platform }, { retries: 1, timeoutMs: 12e3 }).catch(() => null);
         const target = nextResponse2 && nextResponse2.target ? nextResponse2.target : null;
         if (!target || !target.target_url) {
-          if (platform === "airbnb" && isAirbnbWishlistPage(location.href)) {
-            const lastCaptureAt = lsNum("uc_airbnb_wishlist_last_capture_at");
+          const airbnbSeedPage = platform === "airbnb" && (isAirbnbWishlistPage(location.href) || isAirbnbHomePage(location.href));
+          if (airbnbSeedPage) {
+            const wishlistPage = isAirbnbWishlistPage(location.href);
+            const captureKey = wishlistPage ? "uc_airbnb_wishlist_last_capture_at" : "uc_airbnb_homepage_last_capture_at";
+            const lastCaptureAt = lsNum(captureKey);
             if (Date.now() - lastCaptureAt < 15 * 60 * 1e3) {
               return { targets, saved, discovered: 0 };
             }
@@ -4348,10 +4373,11 @@
               items
             }, { retries: 1, timeoutMs: 3e4 }).catch(() => null);
             if (result && result.ok) {
-              lsSet("uc_airbnb_wishlist_last_capture_at", String(Date.now()));
+              lsSet(captureKey, String(Date.now()));
               targets += items.length;
               saved += Number((result.accepted || {}).listing || 0);
-              clog("info", `Airbnb Wishlist captured ${saved} listing candidate(s)`, "airbnb");
+              const source = wishlistPage ? "Wishlist" : "homepage";
+              clog("info", `Airbnb ${source} captured ${saved} listing candidate(s)`, "airbnb");
             }
             return { targets, saved, discovered: 0 };
           }

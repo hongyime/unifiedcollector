@@ -31,6 +31,7 @@ import {
 } from "./shared/storage_helpers.js";
 import {
   extractNativePageItems,
+  isAirbnbHomePage,
   isAirbnbWishlistPage,
   nativePageMatchesTarget,
   nativePageUsername,
@@ -3978,8 +3979,15 @@ async function nativeScrapeCycle(platform) {
     const nextResponse = await send({ type: "getNativeScrapeTarget", platform }, { retries: 1, timeoutMs: 12000 }).catch(() => null);
     const target = nextResponse && nextResponse.target ? nextResponse.target : null;
     if (!target || !target.target_url) {
-      if (platform === "airbnb" && isAirbnbWishlistPage(location.href)) {
-        const lastCaptureAt = lsNum("uc_airbnb_wishlist_last_capture_at");
+      const airbnbSeedPage = platform === "airbnb" && (
+        isAirbnbWishlistPage(location.href) || isAirbnbHomePage(location.href)
+      );
+      if (airbnbSeedPage) {
+        const wishlistPage = isAirbnbWishlistPage(location.href);
+        const captureKey = wishlistPage
+          ? "uc_airbnb_wishlist_last_capture_at"
+          : "uc_airbnb_homepage_last_capture_at";
+        const lastCaptureAt = lsNum(captureKey);
         if (Date.now() - lastCaptureAt < 15 * 60 * 1000) {
           return { targets, saved, discovered: 0 };
         }
@@ -3994,10 +4002,11 @@ async function nativeScrapeCycle(platform) {
           items,
         }, { retries: 1, timeoutMs: 30000 }).catch(() => null);
         if (result && result.ok) {
-          lsSet("uc_airbnb_wishlist_last_capture_at", String(Date.now()));
+          lsSet(captureKey, String(Date.now()));
           targets += items.length;
           saved += Number((result.accepted || {}).listing || 0);
-          clog("info", `Airbnb Wishlist captured ${saved} listing candidate(s)`, "airbnb");
+          const source = wishlistPage ? "Wishlist" : "homepage";
+          clog("info", `Airbnb ${source} captured ${saved} listing candidate(s)`, "airbnb");
         }
         return { targets, saved, discovered: 0 };
       }
