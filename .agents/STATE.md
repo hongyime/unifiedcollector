@@ -2,14 +2,15 @@
 
 Current task: Complete the Full Plan from the user-provided plan; Phase 1 and Beeper are complete. Keep all remaining gates open until verified. Do not touch Spider/SpiderFoot.
 
-## Full-plan checklist (2026-10-16 03:22 UTC)
-- [x] Phase 1 — split/rename is deployed; planned services run and main is pushed at `8097cc56` before this checkpoint.
+## Full-plan checklist (2026-10-16 03:27 UTC)
+- [x] Phase 1 — split/rename is deployed; planned services run and main is pushed at `ab0342a1` before this checkpoint.
 - [x] Phase 2a — Beeper history is flowing: 11,515 messages/12h, newest row at 03:15:58 UTC.
-- [x] Phase 2b — Lemon8 API is active (119 posts/12h); extension v1.23.122 recorded 165 stored media candidates and 257 deduplicated repeats/12h (latest stored candidate 03:07 UTC).
+- [x] Phase 2b — Lemon8 API is active (119 posts/12h); extension v1.23.123 recorded 165 stored media candidates and 257 deduplicated repeats/12h (latest stored candidate 03:07 UTC).
 - [~] Phase 2c — Pinterest native output exists (45 pins/37 boards in 12h); the signed-in own-following route previously redirected without exposing a roster. Keep follow-first; do not start generic crawling while host load is high. Snapchat output exists (12 Stories/40 Spotlights/20 Highlights in 12h), but `/web` exposes no Following route; do not read private Friends. Airbnb has 3 listings/14 reviews in 12h. User approved Wishlist seeds, but the signed-in Wishlist index currently contains 0 lists/0 listing links, so there are no seed targets.
 - [~] Phase 3 — all four Telegram accounts and eligible groups are authorized. Current FloodWaits cover all four accounts through 06:22:07 UTC; discussion visits remain 0/12h. Do not restart or probe before expiry; never vote in polls. Cooldown deferrals are noisy (5,440 matching log lines/30m).
 - [~] Phase 4 — Search has 198 queries/7,517 results/20 filetype queries/9 direct document URLs in 12h, but 0 newly indexed documents and 0 Search media items. Direct-document fix `453c4f5d` is pushed; Search process started at 01:55 UTC, before the fix commit at 03:06 UTC. One idle ClientRead backend still holds the shared advisory lock; wait for natural release and never unlock it manually. Search logs had 0 error/rate-limit markers in 30m.
 - [~] Verified-account exclusion — explicit badge filters are in the extension and native/search collection paths for Instagram, Snapchat, Pinterest, X, Threads, TikTok, and YouTube. Unknown badge state remains eligible by design; this is best-effort, not a perfect official-account classifier.
+- [x] Extension tab status — version 1.23.123 now says “scrapers available” and clearly marks no-tab platforms as paused; Airbnb says public listing collection is open but Wishlist seeding requires login. Chrome reports v1.23.123; bridge, scheduler, and dashboard are healthy at the same expected version. Exactly one page is open per social host.
 - [ ] Final verification — after Telegram/Search gates, run the 15-minute health/rate-limit soak and write `/tmp/unifiedcollector-plan-complete-20261014.md`.
 
 Active constraints: one tab per social platform; preserve cookie-vault snapshots without printing cookie values; never manually release the Search/Exposure mutex; respect cooldowns and Retry-After; no Spider/SpiderFoot edits.
@@ -61,7 +62,7 @@ Pinterest checkpoint (2026-10-15 18:10 UTC): A fresh 12-hour aggregate shows 47 
 
 ## At a glance
 
-**Done:** Phase 1 split/rename; Phase 2a Beeper; Phase 2b Lemon8 API + extension/dedupe; badge exclusion guards and one-tab-per-social behavior are deployed. CDP currently shows one page for each of ten social sites plus Extensions.
+**Done:** Phase 1 split/rename; Phase 2a Beeper; Phase 2b Lemon8 API + extension/dedupe; badge exclusion guards; one-tab-per-social behavior; and corrected extension status wording. CDP shows one page for each of ten social sites plus Extensions.
 
 **Still open:** Native Pinterest/Snapchat/Airbnb follow-first acceptance (Pinterest following roster is unavailable, Snapchat has no public Following route, Airbnb has no saved Wishlists); Telegram's cooldown-delayed discussion cycle; Search's post-fix document indexing; final 15-minute soak/report.
 

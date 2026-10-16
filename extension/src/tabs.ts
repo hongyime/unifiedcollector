@@ -108,13 +108,14 @@ async function render() {
   const list = $("list");
   list.innerHTML = platforms
     .map((p) => {
-      const login = p.noLogin ? badge("login", "idle", "no login needed")
+      const login = p.noLogin
+        ? badge("login", "idle", p.id === "airbnb" ? "public listings; Wishlists need login" : "public data; login optional")
         : p.loggedIn === true ? badge("login", "ok", "logged in")
         : p.loggedIn === false ? badge("login", "bad", "not logged in")
         : badge("login", "idle", "login unknown");
       const tab = p.tabOpen ? badge("tab", "ok", "tab open") : badge("tab", "idle", "no tab");
       const scr = p.scraper
-        ? `<span class="pill">scraper available</span>`
+        ? `<span class="pill">scraper ready</span>`
         : `<span class="pill">login-ready</span>`;
       return `
         <div class="card">
@@ -140,9 +141,9 @@ async function render() {
 
   const scrapers = platforms.filter((p) => p.scraper).map((p) => p.label).join(", ") || "none yet";
   $("note").innerHTML =
-    `<b>Scrapers active:</b> ${scrapers}. Other platforms open for login now and will scrape ` +
-    `automatically once their scraper is added. Auto-opened scraper tabs are unpinned by default; ` +
-    `keep them logged in. One tab per social platform.`;
+    `<b>Scrapers available:</b> ${scrapers}. A listed scraper runs only while its matching tab is open; ` +
+    `a platform with no tab is paused. Availability does not mean it is collecting right now. ` +
+    `Public data may not need sign-in; Airbnb Wishlists do. One tab per social platform.`;
   maybeAutoProbe(backgroundError);
 }
 
