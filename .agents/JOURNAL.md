@@ -1034,3 +1034,7 @@ Telegram remains behind four active FloodWaits through 06:22:07 UTC. At 01:33 UT
 2026-10-16 06:13 UTC: Telegram has 3 recent discussion-channel dedup rows with expirations from 06:21:43 to 06:41:46 UTC; 2 earlier visit records have already aged out. Member refreshes reached 658 rows across 102 chats; 2 polls refreshed/12h were anonymous. Check for new discussion visits as dedup entries expire; never vote.
 
 2026-10-16 06:14 UTC: Airbnb `/wishlists` has no room links, Wishlist links, or images; database contains 0 Wishlist-sourced listing rows and 0 Wishlist queue targets. The authorized seed is ready to capture from the existing tab when list content is present.
+
+2026-10-16 06:17 UTC: Telegram's rolling window now has 3 discussion visits, all completed; 0 visits/12h. Three associated dedup rows expire 06:21:43–06:41:46. One of four account FloodWaits remains through 06:22:07 UTC; member refreshes continue. The prior private-group abort has aged out of the rolling 24h window.
+
+2026-10-16 06:19 UTC: PostgreSQL CPU fell to 0.15% while musicstream was at 205.23%; temp writes still rose ~568 MB/34 files and WAL ~64 MB over the interval. Host I/O PSI remained high. Treat PG load as intermittent and continue measuring query/temp/IO deltas before tuning.
