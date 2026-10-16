@@ -976,3 +976,7 @@ Telegram remains behind four active FloodWaits through 06:22:07 UTC. At 01:33 UT
 2026-10-16 05:20 UTC: Search queue 63 complete / 226 pending / 0 claimed; latest query 05:18 UTC. Database had 3 granted advisory locks system-wide; no restart or lock intervention. Rate-limit summary: Lemon8 2×429/12h, latest 02:38 with 903s cooldown (expired); Instagram 23×401/12h, latest 05:00. Sampled last 15m has 0 events for either source.
 
 2026-10-16 05:22 UTC: Telegram discussion dedup expiry check: five recent visit rows age out between 06:11:31 and 06:41:46 UTC. After FloodWait expiry at 06:22:07, some channels become eligible; all prior channels are outside the dedup window only after 06:41:46.
+
+2026-10-16 05:24 UTC: Cookie vault remains healthy at the 05:21 UTC snapshot: 157 cookies (Pinterest 12, Snapchat 23, Airbnb 29), zero consecutive failures. The 161-cookie 04:36 effective restore point remains restorable. No cookie values were read or printed.
+
+2026-10-16 05:26 UTC: Search is healthy and processing a live 9-document batch: 63 complete / 217 pending / 9 claimed; latest query 05:25 UTC. No rate-limit events in the sampled last 15 minutes. Do not restart or interrupt the claim.

@@ -40,3 +40,7 @@ Search queue has advanced to 63 complete / 226 pending / 0 claimed, with the lat
 ## 05:22 UTC addendum
 
 Database confirms four Telegram FloodWait rows expire at 06:22:07 UTC. Five discussion-visit dedup rows expire between 06:11:31 and 06:41:46 UTC, so after the restart at least the older channel rows can become eligible; the latest dedup entries age out by 06:41:46.
+
+## 2026-10-16 05:26 UTC addendum
+
+Search health is good; the 05:25 UTC query has 9 documents claimed (63 complete / 217 pending). Let this batch finish without restart; no rate-limit events occurred in the sampled last 15 minutes.
