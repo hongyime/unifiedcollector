@@ -2,14 +2,14 @@
 
 Current task: Complete the Full Plan from the user-provided plan; Phase 1 and Beeper are complete. Keep all remaining gates open until verified. Do not touch Spider/SpiderFoot.
 
-## Full-plan checklist (2026-10-16 03:20 UTC)
-- [x] Phase 1 — split/rename is deployed; planned collector services are running and main is pushed at `d6914cb2` before this checkpoint.
+## Full-plan checklist (2026-10-16 03:22 UTC)
+- [x] Phase 1 — split/rename is deployed; planned services run and main is pushed at `8097cc56` before this checkpoint.
 - [x] Phase 2a — Beeper history is flowing: 11,515 messages/12h, newest row at 03:15:58 UTC.
-- [~] Phase 2b — Lemon8 API is active (119 posts/12h). Extension v1.23.122 is loaded; recheck its user/profile candidate coverage before closing this phase.
+- [x] Phase 2b — Lemon8 API is active (119 posts/12h); extension v1.23.122 recorded 165 stored media candidates and 257 deduplicated repeats/12h (latest stored candidate 03:07 UTC).
 - [~] Phase 2c — Pinterest native output exists (45 pins/37 boards in 12h); the signed-in own-following route previously redirected without exposing a roster. Keep follow-first; do not start generic crawling while host load is high. Snapchat output exists (12 Stories/40 Spotlights/20 Highlights in 12h), but `/web` exposes no Following route; do not read private Friends. Airbnb has 3 listings/14 reviews in 12h. User approved Wishlist seeds, but the signed-in Wishlist index currently contains 0 lists/0 listing links, so there are no seed targets.
 - [~] Phase 3 — all four Telegram accounts and eligible groups are authorized. Current FloodWaits cover all four accounts through 06:22:07 UTC; discussion visits remain 0/12h. Do not restart or probe before expiry; never vote in polls. Cooldown deferrals are noisy (5,440 matching log lines/30m).
 - [~] Phase 4 — Search has 198 queries/7,517 results/20 filetype queries/9 direct document URLs in 12h, but 0 newly indexed documents and 0 Search media items. Direct-document fix `453c4f5d` is pushed; Search process started at 01:55 UTC, before the fix commit at 03:06 UTC. One idle ClientRead backend still holds the shared advisory lock; wait for natural release and never unlock it manually. Search logs had 0 error/rate-limit markers in 30m.
-- [~] Verified-account exclusion — explicit badge filters are in the extension and native/search collection paths for Instagram, Snapchat, Pinterest, X, Threads, TikTok, and YouTube. Unknown badge state remains eligible by design; this is best-effort and should not be described as a perfect official-account classifier.
+- [~] Verified-account exclusion — explicit badge filters are in the extension and native/search collection paths for Instagram, Snapchat, Pinterest, X, Threads, TikTok, and YouTube. Unknown badge state remains eligible by design; this is best-effort, not a perfect official-account classifier.
 - [ ] Final verification — after Telegram/Search gates, run the 15-minute health/rate-limit soak and write `/tmp/unifiedcollector-plan-complete-20261014.md`.
 
 Active constraints: one tab per social platform; preserve cookie-vault snapshots without printing cookie values; never manually release the Search/Exposure mutex; respect cooldowns and Retry-After; no Spider/SpiderFoot edits.
@@ -61,11 +61,11 @@ Pinterest checkpoint (2026-10-15 18:10 UTC): A fresh 12-hour aggregate shows 47 
 
 ## At a glance
 
-**Done:** Phase 1 split/rename; Phase 2a Beeper verification; Lemon8 API + extension/dedupe are active; badge exclusion guards and one-tab-per-social behavior are deployed. CDP currently shows one page for each of ten social sites plus Extensions.
+**Done:** Phase 1 split/rename; Phase 2a Beeper; Phase 2b Lemon8 API + extension/dedupe; badge exclusion guards and one-tab-per-social behavior are deployed. CDP currently shows one page for each of ten social sites plus Extensions.
 
-**Still open:** Verify Lemon8 user/profile candidate coverage; resolve own-follow seeds where the platforms expose them; wait for Telegram FloodWait expiry before deploying and checking discussions; reload Search only after Exposure releases its mutex, then verify document indexing; complete the final 15-minute soak/report.
+**Still open:** Native Pinterest/Snapchat/Airbnb follow-first acceptance (Pinterest following roster is unavailable, Snapchat has no public Following route, Airbnb has no saved Wishlists); Telegram's cooldown-delayed discussion cycle; Search's post-fix document indexing; final 15-minute soak/report.
 
-**Performance finding:** PostgreSQL is a material load source (current sample 309.44% CPU, 2.52/4 GiB), while prior host samples show shared CPU contention. `pg_stat_statements` is absent, I/O timing is off, and global `work_mem` is already 16 MB. Attribute work first, then tune only measured queries/spills; no settings changed.
+**Performance finding:** PostgreSQL is a material load source (current sample 286.88% CPU, 2.384/4 GiB), while YouTube used 104.33% and a second PostgreSQL instance 22.05% in the same sample. `pg_stat_statements` is absent, I/O timing is off, and global `work_mem` is already 16 MB. Attribute work first, then tune only measured queries/spills; no settings changed.
 
 Immediate checkpoint (2026-10-15 17:04 UTC): Lemon8 is at 55 posts/12h and 73 unique media hashes; extension candidate evidence is active but no binary media is stored and no detail revisits are queued. Pinterest is at 47 pins/12h (1 description), 10 followed targets pending/213 failed; Playwright still lands on the root page. The collector sees a fresh Pinterest-domain cookie snapshot with 11 unexpired entries (values not inspected). The existing Pinterest tab shows the home feed with an account control and no visible login prompt; this does not prove the collector session is accepted. Snapchat remains at 3 Stories/16 Spotlights/20 Highlights, with 9 followed targets pending/241 failed and repeated public 404s. Airbnb remains at 3 listings/hosts and 30 reviews, with one missing location. Telegram remains at 5 visits/5 groups/2 accounts with four FloodWaits through 06:22:07 UTC Oct 16. Search remains at 306 queries/12h, 10 due terms, no indexed documents, and an idle Exposure-held lock. All 30 services run without unhealthy containers. CDP has 11 pages: one each for all 10 extension-managed platforms (Instagram, Threads, TikTok, Lemon8, X, Facebook, Strava, Pinterest, Snapchat, Airbnb) plus Extensions; YouTube is handled outside the extension.
 
