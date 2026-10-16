@@ -1014,3 +1014,11 @@ Telegram remains behind four active FloodWaits through 06:22:07 UTC. At 01:33 UT
 2026-10-16 05:55 UTC: Search rose to 90 documents indexed/12h (89 with text), 90 complete / 199 pending / 0 claimed. Telegram still has four distinct account cooldowns through 06:22:07 UTC and 0 visits/12h. The 05:42:58 Instagram 401 remains the only event in the current 15-minute window; no repeat observed.
 
 2026-10-16 05:57 UTC: New Lemon8 429 at 05:56:45 UTC set a 943-second backoff through 06:12:28 UTC. The 05:42:58 Instagram 401 is still in the rolling window; no newer Instagram event. Respect both platform cooldowns. Search has 0 active download claims.
+
+2026-10-16 05:58 UTC: Lemon8 429 is the only rate-limit event/15m; Instagram 401 aged out without a repeat. All four Telegram account cooldowns remain active through 06:22:07 UTC. Cookie vault backup at 05:56 has 157 cookies and zero failures; CDP remains at 11 unique page hosts with no duplicates.
+
+2026-10-16 06:01 UTC: Airbnb `/wishlists` remains open in the existing tab but has 0 room links, Wishlist links, or images. User-authorized seeding is ready, but there are no listing IDs to capture yet. Telegram still has all four cooldowns through 06:22:07 UTC.
+
+2026-10-16 06:03 UTC: Three Telegram account cooldowns have expired; one remains through 06:22:07 UTC. Discussion visits remain 0/12h and 5/24h (last at 06:41:46 yesterday); the visit dedup window for that latest record expires 06:41:46 today. Member refreshes resumed at 652/103 chats. Verify discussion visits after expiry and the 24h dedup gate.
+
+2026-10-16 06:04 UTC: Verified Telegram Compose mounts `../src:/app/src`; a collector-only container restart after all FloodWaits expire will load current source without rebuilding or restarting other services.
