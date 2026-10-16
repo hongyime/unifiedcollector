@@ -1010,3 +1010,7 @@ Telegram remains behind four active FloodWaits through 06:22:07 UTC. At 01:33 UT
 2026-10-16 05:52 UTC: Search has 84 indexed documents/12h (83 with text), 84 completed / 205 pending / 0 claimed, and 10 active terms with no zero-result terms. One Instagram 401 occurred at 05:42:58 UTC (the only rate-limit event/15m). Public discovery remains disabled for Pinterest, Snapchat, and Airbnb.
 
 2026-10-16 05:54 UTC: PostgreSQL sampled at 292.47% CPU/2.454 GiB; musicstream was 55.25%. Roughly 10-minute counter deltas: temp +1 file/~12.7 MB, WAL +~76 MB, timed checkpoints +2, requested checkpoints unchanged, and ~97.1% interval buffer hits. Host I/O PSI remained elevated. This favors interval/query attribution and targeted plans over blanket memory or checkpoint changes.
+
+2026-10-16 05:55 UTC: Search rose to 90 documents indexed/12h (89 with text), 90 complete / 199 pending / 0 claimed. Telegram still has four distinct account cooldowns through 06:22:07 UTC and 0 visits/12h. The 05:42:58 Instagram 401 remains the only event in the current 15-minute window; no repeat observed.
+
+2026-10-16 05:57 UTC: New Lemon8 429 at 05:56:45 UTC set a 943-second backoff through 06:12:28 UTC. The 05:42:58 Instagram 401 is still in the rolling window; no newer Instagram event. Respect both platform cooldowns. Search has 0 active download claims.
