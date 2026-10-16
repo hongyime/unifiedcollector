@@ -868,6 +868,19 @@ function hasExplicitVerifiedFlag(value) {
     (typeof value[key] === "string" && /^(true|1|yes)$/i.test(value[key].trim())));
 }
 
+function hasVisibleVerifiedBadge(root) {
+  if (!root || !root.querySelectorAll) return false;
+  const candidates = [root, ...root.querySelectorAll("[aria-label],[title]")];
+  return candidates.some((element) => [
+    element.getAttribute && element.getAttribute("aria-label"),
+    element.getAttribute && element.getAttribute("title"),
+  ].some((label) => {
+    const normalized = String(label || "").normalize("NFKC").trim().toLowerCase();
+    if (/\bnot\b.{0,16}\bverified\b|\b(?:un|non)[\s-]*verified\b/.test(normalized)) return false;
+    return /\bverified\b/.test(normalized);
+  }));
+}
+
 function hasVerifiedCreator(value, platform) {
   if (platform !== "tiktok") return false;
   if (!value || typeof value !== "object") return false;
@@ -1273,7 +1286,7 @@ const instagram = {
   // (ban-safer). A user's own story reel_id == their user pk.
   async getStoryTray() {
     const tray = await fetchJson("https://www.instagram.com/api/v1/feed/reels_tray/", { headers: this.headers(), credentials: "include" });
-    const entries = (tray.tray || []).filter((t) => t.user && t.user.pk);
+    const entries = (tray.tray || []).filter((t) => t.user && t.user.pk && t.user.is_verified !== true);
     if (!entries.length) return 0;
     const ids = entries.map((t) => String(t.user.pk));
     const nameById = {};
@@ -1309,7 +1322,7 @@ const instagram = {
   async getComments(mediaId) {
     const url = "https://www.instagram.com/api/v1/media/" + mediaId + "/comments/?can_support_threading=true&permalink_enabled=false";
     const j = await fetchJson(url, { headers: this.headers(), credentials: "include" });
-    return (j.comments || []).map((c) => ({
+    return (j.comments || []).filter((c) => !c.user || c.user.is_verified !== true).map((c) => ({
       platform_comment_id: String(c.pk || c.id),
       author_username: c.user && c.user.username,
       author_platform_id: c.user && String(c.user.pk),
@@ -1328,10 +1341,11 @@ const instagram = {
       const url = "https://www.instagram.com/api/v1/usertags/" + userId + "/feed/?count=24" + (maxId ? "&max_id=" + maxId : "");
       const j = await fetchJson(url, { headers: this.headers(), credentials: "include" });
       (j.items || []).forEach((it) => {
+        if (it.user && it.user.is_verified === true) return;
         this.extractMedia(it, username).forEach((m) => media.push({ ...m, kind: "tagged" }));
         if (it.user) users.push({ user_id: it.user.pk, username: it.user.username, display_name: it.user.full_name });
         const tags = (it.usertags && it.usertags.in) || [];
-        tags.forEach((t) => { if (t.user) users.push({ user_id: t.user.pk, username: t.user.username, display_name: t.user.full_name }); });
+        tags.forEach((t) => { if (t.user && t.user.is_verified !== true) users.push({ user_id: t.user.pk, username: t.user.username, display_name: t.user.full_name }); });
       });
       maxId = j.next_max_id;
       if (!maxId || !j.more_available) break;
@@ -1345,7 +1359,7 @@ const instagram = {
     while (out.length < max) {
       const url = "https://www.instagram.com/api/v1/friendships/" + userId + "/" + kind + "/?count=50" + (maxId ? "&max_id=" + maxId : "");
       const j = await fetchJson(url, { headers: this.headers(), credentials: "include" });
-      (j.users || []).forEach((u) => { if (u && u.username) out.push({ username: u.username }); });
+      (j.users || []).forEach((u) => { if (u && u.username && u.is_verified !== true) out.push({ username: u.username }); });
       maxId = j.next_max_id;
       if (!maxId) break;
       await hsleep(4000);
@@ -1356,7 +1370,7 @@ const instagram = {
   // EXPIRING content (24h stories + highlights) — grab these FIRST each cycle.
   async _expiring(user, username) {
     let saved = 0;
-    if (!user.id) return 0;
+    if (!user.id || user.is_verified === true) return 0;
     await hsleep(3500);
     try { const s = await this.getStories(user.id, username); if (s.length) { await send({ type: "ingest", platform: "instagram", username, items: s }); saved += s.length; clog("info", `${username}: +${s.length} story media (expiring)`, "instagram"); } }
     catch (e) { if (e instanceof WallError) throw e; }
@@ -1369,6 +1383,7 @@ const instagram = {
   // DEEP scrape — timeline media + post metadata + comments + tagged + follow-graph.
   async _deep(user, username, hop) {
     let saved = 0, discovered = 0;
+    if (user.is_verified === true) return { saved, discovered };
     const { media, posts } = await this.scrapeUserMedia(user, username);
     if (media.length) { await send({ type: "ingest", platform: "instagram", username, items: media }); saved += media.length; }
     if (posts.length) { await send({ type: "posts", platform: "instagram", username, posts }); }
@@ -1471,7 +1486,8 @@ const instagram = {
     if (!pool.length) return { targets: 0, saved: 0, discovered: 0 };
     const cache = new Map();
     const getUser = async (u) => { if (cache.has(u)) return cache.get(u); const p = await this.getProfile(u); cache.set(u, p); return p; };
-    const okProfile = (user) => user && ((user.edge_followed_by && user.edge_followed_by.count) || 0) <= igFamousFollowerCap();
+    const okProfile = (user) => user && user.is_verified !== true &&
+      ((user.edge_followed_by && user.edge_followed_by.count) || 0) <= igFamousFollowerCap();
     let saved = 0, discovered = 0, visited = 0;
 
     // PASS 0 — WHOLE STORY TRAY. One reels_tray call captures every followed
@@ -1519,6 +1535,7 @@ const instagram = {
         const user = await getUser(t.username);
         visited++;
         if (!user) continue;
+        if (user.is_verified === true) { clog("info", `skip verified ${t.username}`, "instagram"); continue; }
         if (!okProfile(user)) { clog("info", `skip famous ${t.username}`, "instagram"); continue; }
         await this._sendProfile(user);
         const r = await this._deep(user, t.username, hop);
@@ -2147,6 +2164,10 @@ const tiktok = {
     // short-lived/cookie-bound, so videos go through browser_upload_only while
     // posters/covers can still use normal URL ingest.
     document.querySelectorAll("video").forEach((v, i) => {
+      const card = v.closest(
+        '[data-e2e="recommend-list-item-container"], [data-e2e="user-post-item"], [data-e2e="browse-video"], [data-e2e="video-card"], article'
+      ) || v.parentElement;
+      if (hasVisibleVerifiedBadge(card)) return;
       videoUrlsFromElement(v).forEach((u, sourceIndex) => {
         sink.add({
           content_id: "dom_video_" + urlId(u) + "_" + sourceIndex,
@@ -2176,6 +2197,10 @@ const tiktok = {
       if (!u || !/^https?:/.test(u)) return;
       if (!/tiktokcdn|tiktokv|byteimg|muscdn|p16|p19/i.test(u)) return;
       if (/avatar|emoji|icon|logo|profile/i.test(u)) return;
+      const card = im.closest(
+        '[data-e2e="recommend-list-item-container"], [data-e2e="user-post-item"], [data-e2e="browse-video"], [data-e2e="video-card"], article'
+      ) || im.parentElement;
+      if (hasVisibleVerifiedBadge(card)) return;
       const w = im.naturalWidth || im.width || 0;
       const h = im.naturalHeight || im.height || 0;
       if ((w && w < 160) || (h && h < 160)) return;

@@ -123,6 +123,8 @@ async def ingest_ig(request):  # /ig/ingest alias
 
 async def browser_media_candidates(request):
     from . import (
+        _VERIFIED_FILTER_PLATFORMS,
+        _explicitly_verified_capture,
         _norm_platform,
         _record_browser_media_candidate_batch,
         _safe_json,
@@ -136,7 +138,18 @@ async def browser_media_candidates(request):
     raw_items = body.get("items") or []
     if not isinstance(raw_items, list):
         raw_items = []
-    queued = min(len(raw_items), 500)
+    entries = raw_items[:500]
+    items = []
+    excluded_verified = 0
+    for entry in entries:
+        item = entry.get("item") if isinstance(entry, dict) and isinstance(entry.get("item"), dict) else entry
+        if platform in _VERIFIED_FILTER_PLATFORMS and (
+            _explicitly_verified_capture(entry) or _explicitly_verified_capture(item)
+        ):
+            excluded_verified += 1
+            continue
+        items.append(entry)
+    queued = len(items)
     if queued:
         _schedule_app_task(
             request.app,
@@ -144,9 +157,14 @@ async def browser_media_candidates(request):
                 request.app,
                 platform,
                 username,
-                raw_items,
+                items,
                 extension_version,
             ),
             "browser_media_candidate_batch",
         )
-    return _cors(web.json_response({"ok": True, "queued": queued, "platform": platform}))
+    return _cors(web.json_response({
+        "ok": True,
+        "queued": queued,
+        "excluded_verified": excluded_verified,
+        "platform": platform,
+    }))

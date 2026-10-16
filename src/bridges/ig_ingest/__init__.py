@@ -456,7 +456,7 @@ def _explicitly_verified_capture(value: object) -> bool:
             return True
     # `owner` is commonly the logged-in collector account in extension bodies;
     # do not let that account's badge suppress unrelated targets.
-    for key in ("author", "user", "profile", "channel", "meta", "metadata"):
+    for key in ("author", "creator", "user", "profile", "channel", "meta", "metadata"):
         nested = value.get(key)
         if isinstance(nested, dict) and _explicitly_verified_capture(nested):
             return True
