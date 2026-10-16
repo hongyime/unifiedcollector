@@ -79,6 +79,13 @@ class TelegramWorker:
             name=f"telegram[{account.name}]",
             failure_threshold=5,
             recovery_timeout=60.0,
+            # Entity ownership/privacy outcomes and Telegram FloodWaits are
+            # handled by run_targets; they are not transport failures and must
+            # not lock this account out of subsequent valid chats.
+            ignore_exception=lambda exc: (
+                isinstance(exc, (EntityUnresolvable, EntityResolveDeferred))
+                or _is_flood_wait(exc)
+            ),
         )
 
     async def connect(self):

@@ -66,6 +66,7 @@ class CircuitBreaker:
         failure_threshold: int = 5,
         recovery_timeout: float = 60.0,
         expected_exception: type[BaseException] | tuple[type[BaseException], ...] = Exception,
+        ignore_exception: Callable[[BaseException], bool] | None = None,
     ):
         if failure_threshold < 1:
             raise ValueError(f"failure_threshold must be >=1, got {failure_threshold!r}")
@@ -76,6 +77,9 @@ class CircuitBreaker:
         self.failure_threshold = failure_threshold
         self.recovery_timeout = recovery_timeout
         self.expected_exception = expected_exception
+        # Some callers need to propagate domain/rate-limit exceptions without
+        # treating them as evidence that the protected upstream is unhealthy.
+        self.ignore_exception = ignore_exception
 
         self._state: str = self.CLOSED
         self._failure_count: int = 0
@@ -151,7 +155,8 @@ class CircuitBreaker:
             # Don't trip ourselves on our own gate
             raise
         except BaseException as exc:
-            should_count = isinstance(exc, self.expected_exception)
+            ignored = self.ignore_exception is not None and self.ignore_exception(exc)
+            should_count = not ignored and isinstance(exc, self.expected_exception)
             await self._on_failure(was_probe=we_are_probe, counted=should_count)
             raise
         else:
