@@ -1,6 +1,7 @@
 """Shared leases and target seeding for read-only native platform scrapers."""
 from __future__ import annotations
 
+import os
 from typing import Any
 
 _PLATFORMS = frozenset({"pinterest", "snapchat", "airbnb"})
@@ -18,6 +19,29 @@ _FOLLOWED_TARGET_SOURCES = {
 }
 _FOLLOWED_TARGET_PRIORITY = 50
 _FOLLOWED_TARGET_CAP = 10
+_FOLLOW_ONLY_SEED_QUERY_INDEXES = {
+    # These are tied directly to followed pins or listings already discovered
+    # from followed identities. Other seed queries expand public discovery.
+    "pinterest": (2,),
+    "snapchat": (),
+    "airbnb": (0, 1, 2),
+}
+_FOLLOW_ONLY_QUEUE_SOURCES = {
+    "pinterest": ("followed_handle_candidate", "pinterest_pin_details"),
+    "snapchat": ("followed_handle_candidate",),
+    "airbnb": (
+        "followed_account_link",
+        "airbnb_listing_hosts",
+        "discovered_links",
+        "airbnb_listings",
+    ),
+}
+
+
+def _public_discovery_enabled() -> bool:
+    return os.getenv("NATIVE_PUBLIC_DISCOVERY_ENABLED", "0").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
 
 _FOLLOWED_HANDLE_SEED_SQL = """
     INSERT INTO browser_native_scrape_queue
@@ -854,7 +878,13 @@ async def seed_native_targets(pool: Any, platform: str) -> None:
             if preferred_count:
                 return
 
-            for query in _SEED_QUERIES[platform]:
+            queries = _SEED_QUERIES[platform]
+            if not _public_discovery_enabled():
+                queries = tuple(
+                    queries[index]
+                    for index in _FOLLOW_ONLY_SEED_QUERY_INDEXES[platform]
+                )
+            for query in queries:
                 if platform == "airbnb" and "'airbnb_listings'" in query:
                     active_listings = await conn.fetchval(
                         """
@@ -924,6 +954,7 @@ async def claim_native_target(pool: Any, platform: str) -> dict[str, Any] | None
                      WHERE due.platform=$1
                        AND due.attempts < $2
                        AND due.next_visit_at <= now()
+                       AND ($4::boolean OR due.source = ANY($5::text[]))
                        AND (due.status IN ('pending','failed','completed')
                             OR (due.status='claimed' AND due.claim_expires_at <= now()))
                        AND (
@@ -957,6 +988,8 @@ async def claim_native_target(pool: Any, platform: str) -> dict[str, Any] | None
                 platform,
                 _MAX_ATTEMPTS,
                 _FOLLOWED_TARGET_SOURCES[platform],
+                _public_discovery_enabled(),
+                list(_FOLLOW_ONLY_QUEUE_SOURCES[platform]),
             )
     return dict(row) if row else None
 

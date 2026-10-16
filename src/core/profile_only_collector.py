@@ -40,6 +40,7 @@ _VERIFIED_BADGE_HTML_RE = re.compile(
 )
 
 _FOLLOW_GRAPH_PROBE_SOURCES = frozenset({"snapchat", "pinterest"})
+_PUBLIC_DISCOVERY_PLATFORMS = frozenset({"airbnb", "pinterest", "snapchat"})
 _FOLLOW_GRAPH_TARGET_BATCH = 10
 
 _FOLLOW_GRAPH_SOURCE_SQL = """
@@ -118,6 +119,7 @@ class ProfileOnlyCollector(BaseCollector):
       - ``<SOURCE>_PROBE_BATCH``    default 10
       - ``<SOURCE>_PROBE_QPS``      default 0.5
       - ``<SOURCE>_PROBE_STALE_DAYS`` default 30
+      - ``NATIVE_PUBLIC_DISCOVERY_ENABLED`` default 0 for Airbnb/Pinterest/Snapchat
     """
 
     PROFILE_TABLE: str = ""
@@ -194,6 +196,12 @@ class ProfileOnlyCollector(BaseCollector):
             summary["skipped"] = "no_pool"
             return summary
 
+        allow_public_discovery = (
+            self.SOURCE_NAME not in _PUBLIC_DISCOVERY_PLATFORMS
+            or self._env("NATIVE_PUBLIC_DISCOVERY_ENABLED", "0").strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
+
         async with self.pool.acquire() as conn:
             if self.SOURCE_NAME in _FOLLOW_GRAPH_PROBE_SOURCES:
                 await conn.execute(
@@ -211,6 +219,8 @@ class ProfileOnlyCollector(BaseCollector):
                   AND (
                       enqueued_by LIKE 'followed:%'
                       OR (
+                          $3::boolean
+                          AND
                           NOT EXISTS (
                               SELECT 1 FROM profile_probe_queue preferred
                                WHERE preferred.source=$1
@@ -241,6 +251,7 @@ class ProfileOnlyCollector(BaseCollector):
                 """,
                 self.SOURCE_NAME,
                 self.batch_size,
+                allow_public_discovery,
             )
         if not rows:
             return summary
