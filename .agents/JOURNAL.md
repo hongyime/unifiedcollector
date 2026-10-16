@@ -968,3 +968,5 @@ Telegram remains behind four active FloodWaits through 06:22:07 UTC. At 01:33 UT
 2026-10-16 05:13 UTC: Telegram coverage check: 639 member rows refreshed across 104 chats in 12h, with role on all, join date on 180, username on 482, and display name on 553. Poll-voter table has 262 historical rows (latest refresh Sep 28); 125 open non-anonymous polls exist but none are recent, while the 3 polls refreshed in 12h are anonymous. Do not cast votes; recheck only after the four FloodWaits expire.
 
 2026-10-16 05:13 UTC: Search plan check: 10 active terms exactly (3 usernames, 3 keywords, 2 hashtags, 2 full names); none has zero results. Last 12h: 166 queries/29 filetype, 7,622 results, 42 indexed documents (41 with text); all-time document formats include 64 text-extracted PDFs, 11 text files, 8 JPG metadata rows, and 1 metadata-only DOC. Download backlog remains 247 pending, with no live claims.
+
+2026-10-16 05:15 UTC: Search queue advanced from 42/247 complete/pending to 56/233, with 0 claimed; latest query row was 05:12 UTC. No provider lock or cooldown was manually changed.
