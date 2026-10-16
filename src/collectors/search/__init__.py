@@ -188,6 +188,20 @@ def _document_extension_from_content_type(content_type: str) -> str | None:
     media_type = (content_type or "").split(";", 1)[0].strip().lower()
     return _DOC_CONTENT_TYPE_EXTENSIONS.get(media_type)
 
+
+def _is_direct_document_url(url: Any) -> bool:
+    if not isinstance(url, str):
+        return False
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        return False
+    extension = os.path.splitext(parsed.path.lower())[1]
+    return extension == ".pdf" or extension in DOC_EXTENSIONS
+
+
 _DYNAMIC_TERM_STOPWORDS = frozenset({
     "about", "after", "again", "also", "and", "are", "because", "been", "before",
     "being", "but", "can", "class", "com", "could", "day", "did", "does", "for",
@@ -1469,7 +1483,27 @@ class SearchCollector(BaseCollector):
                         completed=not self._last_search_query_rate_limited,
                     )
                 if results:
-                    pending_postprocessing.append((query, results))
+                    # Process direct documents as soon as their provider query
+                    # completes. The provider mutex is already released, and
+                    # these candidates no longer wait for the full query batch
+                    # or its broad page crawls.
+                    document_hits: list[dict[str, Any]] = []
+                    document_urls: set[str] = set()
+                    for hit in results:
+                        hit_url = hit.get("url")
+                        if _is_direct_document_url(hit_url) and hit_url not in document_urls:
+                            document_urls.add(hit_url)
+                            document_hits.append(hit)
+                    if document_hits:
+                        await self._postprocess_query_results(
+                            query, document_hits, documents_only=True,
+                        )
+                    remaining_hits = [
+                        hit for hit in results
+                        if hit.get("url") not in document_urls
+                    ]
+                    if remaining_hits:
+                        pending_postprocessing.append((query, remaining_hits))
                 await self.checkpoint.save_progress(query)
                 await self.heartbeat_source_health()
             except Exception as e:
@@ -1482,10 +1516,9 @@ class SearchCollector(BaseCollector):
             if query_delay > 0 and not self._stop.is_set():
                 await asyncio.sleep(query_delay)
 
-        # Search provider calls and dynamic-term scheduling finish before any
-        # result crawling or asset downloads. Those follow-up requests can be
-        # slow, but must not hold the shared search-engine mutex or delay the
-        # remaining dork queries in this batch.
+        # Broad result downloads and crawling wait until provider queries
+        # finish, so they do not hold the shared mutex or delay remaining dorks.
+        # Direct document URLs are handled as each query completes above.
         for query, results in pending_postprocessing:
             try:
                 await self._postprocess_query_results(query, results)
@@ -2137,9 +2170,31 @@ class SearchCollector(BaseCollector):
         logger.info("Search %r: %d results persisted (tor=%s)", query, len(hits), os.getenv("TOR_PROXY_ENABLED") == "1")
         return hits
 
-    async def _postprocess_query_results(self, query: str, hits: list[dict]) -> None:
+    async def _postprocess_query_results(
+        self,
+        query: str,
+        hits: list[dict],
+        *,
+        documents_only: bool = False,
+    ) -> None:
         """Fetch result assets and optionally crawl result pages."""
         if not hits:
+            return
+        if documents_only:
+            if not self._download_docs and not self._download_images:
+                return
+            saved = await asyncio.gather(
+                *(
+                    self._download_asset(query, hit, source_url=hit.get("url"))
+                    for hit in hits
+                ),
+                return_exceptions=True,
+            )
+            saved_count = sum(result is True for result in saved)
+            logger.info(
+                "Search direct-document pass: %d candidate(s), %d saved",
+                len(hits), saved_count,
+            )
             return
         if self._download_images:
             tasks = []
