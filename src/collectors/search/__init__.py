@@ -202,6 +202,15 @@ def _is_direct_document_url(url: Any) -> bool:
     return extension == ".pdf" or extension in DOC_EXTENSIONS
 
 
+_DIRECT_DOCUMENT_SQL_PATTERN = (
+    r"^https?://[^/?#]+/[^?#]*[.]({})([/?#]|$)".format(
+        "|".join(re.escape(ext.lstrip(".")) for ext in sorted(DOC_EXTENSIONS | {".pdf"}))
+    )
+)
+_DIRECT_DOCUMENT_QUEUE_MAX_ATTEMPTS = 5
+_DIRECT_DOCUMENT_QUEUE_MAX_SEED = 250
+
+
 _DYNAMIC_TERM_STOPWORDS = frozenset({
     "about", "after", "again", "also", "and", "are", "because", "been", "before",
     "being", "but", "can", "class", "com", "could", "day", "did", "does", "for",
@@ -1454,6 +1463,240 @@ class SearchCollector(BaseCollector):
         )
         return selected
 
+    async def _seed_direct_document_backlog(self, limit: int = _DIRECT_DOCUMENT_QUEUE_MAX_SEED) -> int:
+        """Queue recent direct document results that the prior process did not index."""
+        if self.pool is None or limit <= 0:
+            return 0
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                INSERT INTO search_document_download_queue (
+                    url_hash, source_url, search_query, title, snippet, rank
+                )
+                SELECT digest(candidate.source_url, 'sha256'), candidate.source_url,
+                       candidate.search_query, candidate.title, candidate.snippet, candidate.rank
+                  FROM (
+                    SELECT DISTINCT ON (sr.url)
+                           sr.url AS source_url, sq.query AS search_query,
+                           sr.title, sr.snippet, sr.rank, sr.collected_at
+                      FROM search_results sr
+                      JOIN search_queries sq ON sq.id=sr.query_id
+                     WHERE sr.collected_at >= now() - interval '7 days'
+                       AND sr.url ~* $1
+                       AND NOT EXISTS (
+                            SELECT 1 FROM search_document_download_queue q
+                             WHERE q.url_hash=digest(sr.url, 'sha256')
+                       )
+                       AND NOT EXISTS (
+                            SELECT 1 FROM search_documents d
+                             WHERE d.source_url=sr.url
+                       )
+                     ORDER BY sr.url, sr.collected_at DESC
+                  ) candidate
+                 ORDER BY candidate.collected_at DESC
+                 LIMIT $2
+                ON CONFLICT (url_hash) DO NOTHING
+                RETURNING id
+                """,
+                _DIRECT_DOCUMENT_SQL_PATTERN,
+                limit,
+            )
+        return len(rows)
+
+    async def _enqueue_direct_document_hits(self, query: str, hits: list[dict[str, Any]]) -> int:
+        """Persist fresh direct document hits before attempting their downloads."""
+        if self.pool is None:
+            return 0
+        records = [
+            (
+                str(hit["url"]), query, hit.get("title"), hit.get("snippet"), hit.get("rank"),
+            )
+            for hit in hits
+            if _is_direct_document_url(hit.get("url"))
+        ]
+        if not records:
+            return 0
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                INSERT INTO search_document_download_queue (
+                    url_hash, source_url, search_query, title, snippet, rank
+                )
+                SELECT digest(record.source_url, 'sha256'), record.source_url,
+                       record.search_query, record.title, record.snippet, record.rank
+                  FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::integer[])
+                       AS record(source_url, search_query, title, snippet, rank)
+                ON CONFLICT (url_hash) DO NOTHING
+                RETURNING id
+                """,
+                [record[0] for record in records],
+                [record[1] for record in records],
+                [record[2] for record in records],
+                [record[3] for record in records],
+                [record[4] for record in records],
+            )
+        return len(rows)
+
+    async def _claim_direct_document_jobs(self, limit: int) -> list[dict[str, Any]]:
+        if self.pool is None or limit <= 0:
+            return []
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute(
+                    """
+                    UPDATE search_document_download_queue
+                       SET status='failed', claim_expires_at=NULL,
+                           last_error=COALESCE(last_error, 'claim_expired'), updated_at=now()
+                     WHERE status='claimed' AND claim_expires_at <= now() AND attempts >= $1
+                    """,
+                    _DIRECT_DOCUMENT_QUEUE_MAX_ATTEMPTS,
+                )
+                rows = await conn.fetch(
+                    """
+                    WITH due AS (
+                        SELECT id
+                          FROM search_document_download_queue
+                         WHERE attempts < $2
+                           AND next_attempt_at <= now()
+                           AND (status='pending'
+                                OR (status='claimed' AND claim_expires_at <= now()))
+                         ORDER BY next_attempt_at, id
+                         LIMIT $1
+                         FOR UPDATE SKIP LOCKED
+                    )
+                    UPDATE search_document_download_queue q
+                       SET status='claimed', claim_expires_at=now()+interval '10 minutes',
+                           updated_at=now()
+                      FROM due
+                     WHERE q.id=due.id
+                    RETURNING q.id, q.source_url, q.search_query, q.title, q.snippet,
+                              q.rank, q.attempts
+                    """,
+                    limit,
+                    _DIRECT_DOCUMENT_QUEUE_MAX_ATTEMPTS,
+                )
+        return [dict(row) for row in rows]
+
+    async def _finish_direct_document_job(
+        self,
+        job: dict[str, Any],
+        *,
+        indexed: bool,
+        attempted: bool,
+        error: str | None = None,
+        retry_after_seconds: int | None = None,
+    ) -> None:
+        if self.pool is None:
+            return
+        attempts = int(job.get("attempts") or 0)
+        if indexed:
+            status = "completed"
+            next_attempt_seconds = 0
+            last_error = None
+            completed = True
+        else:
+            if attempted:
+                attempts += 1
+            status = "failed" if attempts >= _DIRECT_DOCUMENT_QUEUE_MAX_ATTEMPTS else "pending"
+            backoff = min(7 * 24 * 60 * 60, 15 * 60 * (4 ** max(0, attempts - 1))) if attempted else 30
+            next_attempt_seconds = max(backoff, int(retry_after_seconds or 0))
+            last_error = (error or "document_not_indexed")[:120]
+            completed = False
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE search_document_download_queue
+                   SET status=$2, attempts=$3,
+                       next_attempt_at=now()+($4 * interval '1 second'),
+                       claim_expires_at=NULL, last_error=$5,
+                       completed_at=CASE WHEN $6 THEN now() ELSE NULL END,
+                       updated_at=now()
+                 WHERE id=$1 AND status='claimed'
+                """,
+                int(job["id"]), status, attempts, next_attempt_seconds,
+                last_error, completed,
+            )
+
+    async def _search_document_is_indexed(self, source_url: str) -> bool:
+        if self.pool is None:
+            return False
+        async with self.pool.acquire() as conn:
+            return bool(await conn.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM search_documents WHERE source_url=$1)",
+                source_url,
+            ))
+
+    async def _process_direct_document_backlog(self, limit: int = 10, *, seed: bool = True) -> dict[str, int]:
+        """Download due document results with persistent leases and backoff."""
+        queued = await self._seed_direct_document_backlog() if seed else 0
+        jobs = await self._claim_direct_document_jobs(limit)
+        summary = {"queued": queued, "claimed": len(jobs), "indexed": 0, "deferred": 0, "failed": 0}
+
+        async def process(job: dict[str, Any]) -> str:
+            source_url = str(job.get("source_url") or "")
+            if not _is_direct_document_url(source_url):
+                await self._finish_direct_document_job(
+                    job, indexed=False, attempted=False, error="invalid_document_url",
+                    retry_after_seconds=24 * 60 * 60,
+                )
+                return "deferred"
+
+            scope = urlparse(source_url).netloc or "download"
+            cooldown = self._search_scope_cooldown_remaining("download", scope)
+            if cooldown > 0:
+                await self._finish_direct_document_job(
+                    job, indexed=False, attempted=False, error="download_cooldown",
+                    retry_after_seconds=int(cooldown + 1),
+                )
+                return "deferred"
+
+            error = None
+            try:
+                await self._download_asset(
+                    str(job.get("search_query") or "search"),
+                    {
+                        "url": source_url,
+                        "title": job.get("title"),
+                        "snippet": job.get("snippet"),
+                        "rank": job.get("rank"),
+                        "engine": "download",
+                    },
+                    source_url=source_url,
+                )
+            except Exception as exc:  # noqa: BLE001 - queue must retain bounded retry state.
+                error = type(exc).__name__
+
+            indexed = await self._search_document_is_indexed(source_url)
+            if indexed:
+                await self._finish_direct_document_job(
+                    job, indexed=True, attempted=True,
+                )
+                return "indexed"
+
+            cooldown = self._search_scope_cooldown_remaining("download", scope)
+            await self._finish_direct_document_job(
+                job,
+                indexed=False,
+                attempted=True,
+                error=error or "document_not_indexed",
+                retry_after_seconds=int(cooldown + 1) if cooldown > 0 else None,
+            )
+            return "failed"
+
+        outcomes = await asyncio.gather(*(process(job) for job in jobs), return_exceptions=True)
+        for outcome in outcomes:
+            if outcome in summary:
+                summary[outcome] += 1
+            elif isinstance(outcome, Exception):
+                summary["failed"] += 1
+        if queued or jobs:
+            logger.info(
+                "Search direct-document backlog: queued=%d claimed=%d indexed=%d deferred=%d failed=%d",
+                summary["queued"], summary["claimed"], summary["indexed"],
+                summary["deferred"], summary["failed"],
+            )
+        return summary
+
     async def collect(self, targets: list[str]):
         # Pace between queries to reduce search-engine 429s (the ddgs brave
         # backend throttles aggressively). Env-tunable; 0 disables.
@@ -1468,6 +1711,10 @@ class SearchCollector(BaseCollector):
         static_queries = [t for t in cycle_targets if not t.startswith(("http://", "https://"))]
         queries = list(dict.fromkeys([*(item["query"] for item in dynamic_items), *static_queries]))
         pending_postprocessing: list[tuple[str, list[dict]]] = []
+        try:
+            await self._process_direct_document_backlog()
+        except Exception as exc:  # noqa: BLE001 - document repair must not block search.
+            logger.warning("Search direct-document backlog deferred: %s", type(exc).__name__)
         for query in queries:
             if self._stop.is_set():
                 break
@@ -1495,9 +1742,13 @@ class SearchCollector(BaseCollector):
                             document_urls.add(hit_url)
                             document_hits.append(hit)
                     if document_hits:
-                        await self._postprocess_query_results(
-                            query, document_hits, documents_only=True,
-                        )
+                        try:
+                            await self._enqueue_direct_document_hits(query, document_hits)
+                            await self._process_direct_document_backlog(
+                                limit=len(document_hits), seed=False,
+                            )
+                        except Exception as exc:  # noqa: BLE001 - persisted hits are retried next cycle.
+                            logger.warning("Search direct-document pass deferred: %s", type(exc).__name__)
                     remaining_hits = [
                         hit for hit in results
                         if hit.get("url") not in document_urls

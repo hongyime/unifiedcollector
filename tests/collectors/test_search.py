@@ -1211,6 +1211,78 @@ async def test_document_index_writes_extracted_text_and_metadata(monkeypatch):
     assert '"search_query": "annual report"' in args[8]
 
 
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://example.org/report.pdf", True),
+        ("https://example.org/report.DOCX?download=1", True),
+        ("https://example.org/download?file=report.pdf", False),
+        ("file:///tmp/report.pdf", False),
+    ],
+)
+def test_direct_document_url_requires_http_path_extension(url, expected):
+    assert search_mod._is_direct_document_url(url) is expected
+
+
+@pytest.mark.asyncio
+async def test_direct_document_backlog_completes_only_after_index_row_exists(monkeypatch):
+    _set_clean_env(monkeypatch)
+    coll = SearchCollector()
+    job = {
+        "id": 7,
+        "source_url": "https://example.org/report.pdf",
+        "search_query": "report filetype:pdf",
+        "title": "report",
+        "snippet": "document result",
+        "rank": 1,
+        "attempts": 0,
+    }
+    coll._seed_direct_document_backlog = AsyncMock(return_value=1)
+    coll._claim_direct_document_jobs = AsyncMock(return_value=[job])
+    coll._search_scope_cooldown_remaining = MagicMock(return_value=0)
+    coll._download_asset = AsyncMock(return_value=True)
+    coll._search_document_is_indexed = AsyncMock(return_value=True)
+    coll._finish_direct_document_job = AsyncMock()
+
+    summary = await coll._process_direct_document_backlog(limit=1)
+
+    assert summary == {"queued": 1, "claimed": 1, "indexed": 1, "deferred": 0, "failed": 0}
+    coll._download_asset.assert_awaited_once()
+    coll._finish_direct_document_job.assert_awaited_once_with(
+        job, indexed=True, attempted=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_direct_document_backlog_defers_host_cooldown_without_consuming_attempt(monkeypatch):
+    _set_clean_env(monkeypatch)
+    coll = SearchCollector()
+    job = {
+        "id": 8,
+        "source_url": "https://example.org/report.pdf",
+        "search_query": "report filetype:pdf",
+        "attempts": 2,
+    }
+    coll._seed_direct_document_backlog = AsyncMock(return_value=0)
+    coll._claim_direct_document_jobs = AsyncMock(return_value=[job])
+    coll._search_scope_cooldown_remaining = MagicMock(return_value=45.2)
+    coll._download_asset = AsyncMock()
+    coll._finish_direct_document_job = AsyncMock()
+
+    summary = await coll._process_direct_document_backlog(limit=1)
+
+    assert summary["deferred"] == 1
+    assert summary["failed"] == 0
+    coll._download_asset.assert_not_awaited()
+    coll._finish_direct_document_job.assert_awaited_once_with(
+        job,
+        indexed=False,
+        attempted=False,
+        error="download_cooldown",
+        retry_after_seconds=46,
+    )
+
+
 @pytest.mark.asyncio
 async def test_image_metadata_is_written_to_search_documents(monkeypatch):
     _set_clean_env(monkeypatch)
