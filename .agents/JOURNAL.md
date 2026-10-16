@@ -974,3 +974,5 @@ Telegram remains behind four active FloodWaits through 06:22:07 UTC. At 01:33 UT
 2026-10-16 05:18 UTC: Two Docker/host pressure samples 37 seconds apart: PostgreSQL 271.40% then 280.41% CPU, 2.473/2.467 GiB of 4 GiB; musicstream 244.95% then 265.73% CPU. Host CPU PSI `some avg10` rose 9.64%→18.54%; I/O PSI showed `some avg10` 13.70%→13.67% and `full avg10` 8.08%→3.77%. Other workloads contribute; no PG setting was changed. Keep optional public spidering disabled.
 
 2026-10-16 05:20 UTC: Search queue 63 complete / 226 pending / 0 claimed; latest query 05:18 UTC. Database had 3 granted advisory locks system-wide; no restart or lock intervention. Rate-limit summary: Lemon8 2×429/12h, latest 02:38 with 903s cooldown (expired); Instagram 23×401/12h, latest 05:00. Sampled last 15m has 0 events for either source.
+
+2026-10-16 05:22 UTC: Telegram discussion dedup expiry check: five recent visit rows age out between 06:11:31 and 06:41:46 UTC. After FloodWait expiry at 06:22:07, some channels become eligible; all prior channels are outside the dedup window only after 06:41:46.

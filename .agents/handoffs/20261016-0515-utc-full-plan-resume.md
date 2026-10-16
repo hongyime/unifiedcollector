@@ -36,3 +36,7 @@ Continue the user-approved UnifiedCollector full plan from the attachment. The u
 ## 05:19 UTC addendum
 
 Search queue has advanced to 63 complete / 226 pending / 0 claimed, with the latest query at 05:18 UTC. No Instagram 401 or Lemon8 429 events occurred in the sampled last 15 minutes; the latest Lemon8 429 was at 02:38 UTC and its 903-second cooldown expired. Three advisory locks were granted system-wide; leave them and provider coordination untouched. PostgreSQL remained at 271–280% CPU across two 37-second samples, with host CPU/I/O pressure and other high-CPU workloads; keep optional native spidering disabled.
+
+## 05:22 UTC addendum
+
+Database confirms four Telegram FloodWait rows expire at 06:22:07 UTC. Five discussion-visit dedup rows expire between 06:11:31 and 06:41:46 UTC, so after the restart at least the older channel rows can become eligible; the latest dedup entries age out by 06:41:46.

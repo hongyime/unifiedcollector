@@ -2,7 +2,7 @@
 
 Current task: Complete the Full Plan from the user-provided plan; Phase 1 and Beeper are complete. Keep all remaining gates open until verified. Do not touch Spider/SpiderFoot.
 
-## Full-plan checklist (2026-10-16 05:20 UTC)
+## Full-plan checklist (2026-10-16 05:22 UTC)
 - [x] Phase 1 — split/rename is deployed; planned services run and `main` is pushed at `80a8479b`.
 - [x] Phase 2a — Beeper history is flowing: 10,811 messages/12h in the latest live check.
 - [x] Phase 2b — Lemon8 API is active (108 posts/12h); extension v1.23.123 last recorded 165 stored media candidates and 257 deduplicated repeats/12h.
