@@ -998,3 +998,15 @@ Telegram remains behind four active FloodWaits through 06:22:07 UTC. At 01:33 UT
 2026-10-16 05:43 UTC: Telegram cause check shows 4 still-active FloodWait records created 2026-10-15 06:43–07:16 UTC with 82,004–83,940s cooldowns, expiring by 06:22:07 UTC today; no Telegram rate-limit events were created in the last 12h. Discussion visits: 0/12h and 5/24h (4 completed, 1 aborted), consistent with the long cooldowns. Wait for expiry and a fresh check before the authorized collector-only restart.
 
 2026-10-16 05:45 UTC: PostgreSQL follow-up found autovacuum enabled but no worker active; estimated dead tuples exceed default thresholds in `exposure_findings`, `browser_media_candidates`, and `telegram_messages` (last_autovacuum null since stats reset). There were no active statements over 30s. Since reset, counters include 4,387 temp files/96 GB, 244.8 GB WAL, and 1,137 timed vs 115 requested checkpoints; keep these as baseline counters and compare intervals before tuning. No settings changed.
+
+2026-10-16 05:46 UTC: Cookie-vault health endpoint reports the 05:46 backup has 156 cookies, `ok=true`, and 0 consecutive failures. Auth-marker counts are not configured for Pinterest, Snapchat, or Airbnb, so the vault cannot confirm those sessions are signed in. Cookie values were not read; the effective restorable snapshot remains the stronger 161-cookie 04:36 copy.
+
+2026-10-16 05:47 UTC: Confirmed exactly four Telegram account records exist and all are active; no spider allowlist excludes an account. CDP has 11 page targets across 11 unique hosts (10 social platforms plus Extensions), with no duplicate host tabs.
+
+2026-10-16 05:48 UTC: Further isolated the Telegram gate: four active FloodWait rows belong to four distinct accounts, so all configured accounts are gated through 06:22:07 UTC. This establishes the immediate cause of zero visits; post-expiry runtime behavior still needs verification.
+
+2026-10-16 05:51 UTC: Cookie-vault health remains good: 158 cookies backed up, zero consecutive failures. CDP has 11 pages on 11 unique hosts, and all 30 UnifiedCollector containers are running. No cookie values or additional tabs were read/created.
+
+2026-10-16 05:52 UTC: Search has 84 indexed documents/12h (83 with text), 84 completed / 205 pending / 0 claimed, and 10 active terms with no zero-result terms. One Instagram 401 occurred at 05:42:58 UTC (the only rate-limit event/15m). Public discovery remains disabled for Pinterest, Snapchat, and Airbnb.
+
+2026-10-16 05:54 UTC: PostgreSQL sampled at 292.47% CPU/2.454 GiB; musicstream was 55.25%. Roughly 10-minute counter deltas: temp +1 file/~12.7 MB, WAL +~76 MB, timed checkpoints +2, requested checkpoints unchanged, and ~97.1% interval buffer hits. Host I/O PSI remained elevated. This favors interval/query attribution and targeted plans over blanket memory or checkpoint changes.
