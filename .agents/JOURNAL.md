@@ -1106,3 +1106,5 @@ Telegram remains behind four active FloodWaits through 06:22:07 UTC. At 01:33 UT
 2026-10-16 09:27 UTC: Committed focused changes: Instagram vault replay/auth attribution (`8fc98215`), bounded Telegram discussion sweeps and deferred leave retry (`b05ee9aa`), and fair Search/Exposure mutex queuing (`2b3421cb`). Python compilation and `git diff --check` passed; no tests were run. Instagram auth and the final post-fetch soak remain open because Lemon8 still owns the shared social lock.
 
 2026-10-16 09:28 UTC: Pushed four focused commits to `main`; current checkpoint is `90ba2ed7`. The worktree is clean after the push. Operational verification remains open for the Instagram post-cooldown fetch and 15-minute soak.
+
+2026-10-16 09:30 UTC: Read-only lock mapping tied the granted `shared_social` advisory lock to `collector_lemon8`. The Lemon8 worker wrote 71 media rows in the latest 45-minute window, newest at 09:22:49, while Instagram continued to skip the lock. This is active work, so no lock release or collector restart was attempted.
