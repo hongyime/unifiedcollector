@@ -705,28 +705,12 @@ async function attemptRecoverablePageInteraction(platformId, shell) {
   if (platformId === "x") {
     if (last && Date.now() - last < 15000) return false;
     lsSet(key, String(Date.now()));
-    const xButtonKey = `uc_recover_x_button_${shell.reason || "shell"}`;
-    const lastXButton = lsNum(xButtonKey);
-    const button = findRecoverablePageActionButton(platformId);
-    if (button && (!lastXButton || Date.now() - lastXButton > 2 * 60000)) {
-      lsSet(xButtonKey, String(Date.now()));
-      try {
-        button.scrollIntoView({ block: "center", inline: "center" });
-      } catch (e) {}
-      await sleep(jitter(700));
-      if (!button.isConnected || (button.closest && button.closest("form")) || button.form) {
-        if (switchXHostForRecoverableShell(shell)) return true;
-        return false;
-      }
-      try {
-        button.click();
-        clog("warn", `x page shell action clicked (${shell.reason || "recoverable"})`, "x");
-        return true;
-      } catch (e) {}
-    }
+    // X may unmount a shell form during the native click's default action,
+    // which produces "Form submission canceled because the form is not
+    // connected" even when the button was connected immediately beforehand.
+    // Use the paced route fallback for every X shell instead of clicking DOM
+    // controls whose React-owned form lifecycle is outside our control.
     if (switchXHostForRecoverableShell(shell)) return true;
-    // X's native shell often re-renders the same empty SPA. Keep clicks bounded;
-    // the scheduled page recovery will hard-navigate when the click does not work.
     return false;
   }
   if (last && Date.now() - last < 60000) return false;

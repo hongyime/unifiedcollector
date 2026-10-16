@@ -1131,27 +1131,6 @@
       if (platformId === "x") {
         if (last && Date.now() - last < 15e3) return false;
         lsSet(key, String(Date.now()));
-        const xButtonKey = `uc_recover_x_button_${shell.reason || "shell"}`;
-        const lastXButton = lsNum(xButtonKey);
-        const button2 = findRecoverablePageActionButton(platformId);
-        if (button2 && (!lastXButton || Date.now() - lastXButton > 2 * 6e4)) {
-          lsSet(xButtonKey, String(Date.now()));
-          try {
-            button2.scrollIntoView({ block: "center", inline: "center" });
-          } catch (e) {
-          }
-          await sleep(jitter(700));
-          if (!button2.isConnected || button2.closest && button2.closest("form") || button2.form) {
-            if (switchXHostForRecoverableShell(shell)) return true;
-            return false;
-          }
-          try {
-            button2.click();
-            clog("warn", `x page shell action clicked (${shell.reason || "recoverable"})`, "x");
-            return true;
-          } catch (e) {
-          }
-        }
         if (switchXHostForRecoverableShell(shell)) return true;
         return false;
       }
