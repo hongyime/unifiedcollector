@@ -261,6 +261,12 @@ class WorkerService:
         "tiktok": "shared_social",
         "instagram": "shared_social",
     }
+    # Search and Exposure issue long provider calls under this shared session
+    # lock. Queueing at PostgreSQL preserves their one-at-a-time limit while
+    # preventing a polling collector from repeatedly reacquiring ahead of an
+    # existing waiter.
+    FAIR_SOURCE_MUTEX_GROUPS = frozenset({"search_engine"})
+    FAIR_SOURCE_MUTEX_WAIT_TIMEOUT_SECONDS = 900
 
     def __init__(self):
         self.pool = None
@@ -847,6 +853,17 @@ class WorkerService:
         conn = await self.pool.acquire()
         key = f"collector_mutex:{group}"
         try:
+            if group in self.FAIR_SOURCE_MUTEX_GROUPS:
+                # The pool's default asyncpg command_timeout is 60s. A fair
+                # waiter must be allowed to outlive one provider call while
+                # the current owner finishes; cancellation still releases the
+                # leased connection through the handler below.
+                await conn.fetchval(
+                    "SELECT pg_advisory_lock(hashtext($1))",
+                    key,
+                    timeout=self.FAIR_SOURCE_MUTEX_WAIT_TIMEOUT_SECONDS,
+                )
+                return conn, key
             locked = await conn.fetchval("SELECT pg_try_advisory_lock(hashtext($1))", key)
         except asyncio.CancelledError:
             try:
