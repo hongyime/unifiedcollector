@@ -1022,3 +1022,7 @@ Telegram remains behind four active FloodWaits through 06:22:07 UTC. At 01:33 UT
 2026-10-16 06:03 UTC: Three Telegram account cooldowns have expired; one remains through 06:22:07 UTC. Discussion visits remain 0/12h and 5/24h (last at 06:41:46 yesterday); the visit dedup window for that latest record expires 06:41:46 today. Member refreshes resumed at 652/103 chats. Verify discussion visits after expiry and the 24h dedup gate.
 
 2026-10-16 06:04 UTC: Verified Telegram Compose mounts `../src:/app/src`; a collector-only container restart after all FloodWaits expire will load current source without rebuilding or restarting other services.
+
+2026-10-16 06:07 UTC: Cookie-vault health confirms a 06:06 snapshot with 158 cookies and zero consecutive failures; cookie values remain unread.
+
+2026-10-16 06:08 UTC: PostgreSQL sampled at 321.45% CPU/2.595 GiB. Since the ~05:54 baseline, temp activity rose by 96 files/~1.88 GB, WAL by ~67 MB, and timed checkpoints by 3; interval buffer-hit ratio was ~88%. Host I/O PSI reached 35.5% some / 23.9% full avg10. Five active queries were under 10s, with one DataFileRead wait. Prioritize identifying spill/read-heavy SQL; no settings changed.
