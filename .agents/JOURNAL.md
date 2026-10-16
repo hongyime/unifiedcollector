@@ -1132,3 +1132,5 @@ Telegram remains behind four active FloodWaits through 06:22:07 UTC. At 01:33 UT
 2026-10-16 10:06 UTC: Instagram had 7 worker slices in the last 10m, all skipped on the Lemon8-held shared social lock. No provider request, HTTP status, or error appeared. The scheduled auth check and its post-request soak remain pending.
 
 2026-10-16 10:07 UTC: Instagram reached 9 shared-lock skips in the last 10m, latest at 10:06:47. The Lemon8 session still held the lock and had been idle 1,245s; Lemon8 post/profile writes remain 0 in the last 15m. Container hang watchdog is configured for 7,200s. No lock release or restart was performed.
+
+2026-10-16 10:08 UTC: Instagram's shared-lock skip count reached 10 in the last 10m, latest at 10:07:48. There are still no provider requests or status responses, so the auth gate and post-request soak remain pending.
