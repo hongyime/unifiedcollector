@@ -1108,3 +1108,17 @@ Telegram remains behind four active FloodWaits through 06:22:07 UTC. At 01:33 UT
 2026-10-16 09:28 UTC: Pushed four focused commits to `main`; current checkpoint is `90ba2ed7`. The worktree is clean after the push. Operational verification remains open for the Instagram post-cooldown fetch and 15-minute soak.
 
 2026-10-16 09:30 UTC: Read-only lock mapping tied the granted `shared_social` advisory lock to `collector_lemon8`. The Lemon8 worker wrote 71 media rows in the latest 45-minute window, newest at 09:22:49, while Instagram continued to skip the lock. This is active work, so no lock release or collector restart was attempted.
+
+2026-10-16 09:33 UTC: Cookie vault checkpoint: the 09:31 archive wrote 164 social cookies from 257 browser cookies, including 11 Instagram, 12 Pinterest, 24 Snapchat, and 34 Airbnb-domain cookies; the previous effective snapshot was preserved because the new auth score was lower. The vault container remains healthy; cookie values were not read. Lemon8 still holds the shared social lock; its latest media write remains 09:22:49.
+
+2026-10-16 09:34 UTC: Lemon8 lock follow-up: although no media rows were added after 09:22:49, its queue advanced from 2,148 completed/243 pending/9 processing to 2,150/240/10 by 09:34. The worker remains healthy and is actively draining queued targets; leave the shared lock in place. Instagram continues to wait without sending provider requests.
+
+2026-10-16 09:36 UTC: Airbnb homepage capture advanced: the listing table now has 23 `airbnb_homepage` rows, latest at 09:35, and all 23 homepage targets are completed. Wishlist rows remain zero because the user has no saved items. The existing Airbnb tab remains the sole Airbnb tab; when saved items exist, revisit Wishlist capture after the user opens a populated Wishlist in this tab.
+
+2026-10-16 09:37 UTC: Lemon8's bounded spider pass progressed from 2,148 completed/243 pending/9 processing to 2,153/237/10 by 09:37. Five targets have completed and one new target remains active; the configured per-cycle cap is eight. The collector remains healthy, so no restart or shared-lock release was attempted.
+
+2026-10-16 09:39 UTC: Lemon8 completed its capped eight-target spider batch and released `shared_social` at 09:39. Instagram's 09:38 collection slice did not make a headless request because its browser extension had stored media at 09:25:57, inside the 900-second freshness window. Let freshness expire naturally; the next eligible worker slice is around 09:41:40. Auth is still unconfirmed and the post-fetch soak has not started.
+
+2026-10-16 09:41 UTC: Search queue progressed without new index rows: 218 documents remain current (latest 09:20:33), 164 queue jobs completed, 124 pending, 1 claimed, 2 invalid URLs. Telegram remains at 2 discussion visits/24h and 0 pending leave retries. Airbnb has 23 homepage-sourced listings and no Wishlist rows.
+
+2026-10-16 09:44 UTC: Airbnb homepage capture remains active at the user's request. A read-only CDP check confirmed 11 page tabs and exactly one Airbnb tab at `/`; database evidence remains 23 homepage-sourced listing rows through 09:35 and no Wishlist rows. The user has no saved listings yet. Revisit Wishlist capture when they open a populated Wishlist in this same tab. Instagram logs end with the 09:38:40 fresh-extension skip; its configured 1200-second idle interval puts the next normal cycle around 09:58:40, so auth is still unconfirmed and the post-fetch soak has not started.
