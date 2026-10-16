@@ -408,6 +408,14 @@
       metadata: { page_path: new URL(pageUrl).pathname }
     };
   }
+  function isAirbnbWishlistPage(pageUrl) {
+    try {
+      const parsed = new URL(pageUrl);
+      return /(^|\.)airbnb\.(com|com\.sg|co\.uk|co\.kr)$/i.test(parsed.hostname) && /(?:^|\/)wishlists?(?:\/|$)/i.test(parsed.pathname);
+    } catch {
+      return false;
+    }
+  }
   function airbnbListingItem(doc, pageUrl, anchor, card) {
     const listingUrl = absoluteHttps(anchor.href, pageUrl);
     if (!listingUrl || !/(^|\.)airbnb\.(com|com\.sg|co\.uk|co\.kr)$/i.test(new URL(listingUrl).hostname)) return null;
@@ -438,7 +446,10 @@
       bedrooms: bedrooms ? Number(bedrooms[1]) : null,
       bathrooms: bathrooms ? Number(bathrooms[1]) : null,
       max_guests: guests ? Number(guests[1]) : null,
-      metadata: { page_path: new URL(pageUrl).pathname }
+      metadata: {
+        page_path: new URL(pageUrl).pathname,
+        ...isAirbnbWishlistPage(pageUrl) ? { collection_source: "airbnb_wishlist" } : {}
+      }
     };
   }
   function airbnbItems(doc, pageUrl) {
@@ -460,8 +471,10 @@
         if (host) output.push(host);
       }
     }
-    if (/\/s\//i.test(parsed.pathname)) {
-      for (const anchor of Array.from(doc.querySelectorAll('a[href*="/rooms/"]'))) {
+    const wishlistPage = isAirbnbWishlistPage(pageUrl);
+    if (/\/s\//i.test(parsed.pathname) || wishlistPage) {
+      const listingRoot = wishlistPage ? doc.querySelector("main") || doc.body : doc;
+      for (const anchor of Array.from(listingRoot.querySelectorAll('a[href*="/rooms/"]'))) {
         const card = anchor.closest('[data-testid="card-container"], [data-testid*="listing-card" i], article, li') || anchor.parentElement || anchor;
         const item = airbnbListingItem(doc, pageUrl, anchor, card);
         if (!item || seenListings.has(String(item.id))) continue;
@@ -4320,6 +4333,28 @@
         const nextResponse2 = await send({ type: "getNativeScrapeTarget", platform }, { retries: 1, timeoutMs: 12e3 }).catch(() => null);
         const target = nextResponse2 && nextResponse2.target ? nextResponse2.target : null;
         if (!target || !target.target_url) {
+          if (platform === "airbnb" && isAirbnbWishlistPage(location.href)) {
+            const lastCaptureAt = lsNum("uc_airbnb_wishlist_last_capture_at");
+            if (Date.now() - lastCaptureAt < 15 * 60 * 1e3) {
+              return { targets, saved, discovered: 0 };
+            }
+            const items = extractNativePageItems(platform, document, location.href).filter((item) => item.type === "listing");
+            if (!items.length) return { targets, saved, discovered: 0 };
+            const result = await send({
+              type: "nativeScrape",
+              platform,
+              page_url: location.href,
+              status: "success",
+              items
+            }, { retries: 1, timeoutMs: 3e4 }).catch(() => null);
+            if (result && result.ok) {
+              lsSet("uc_airbnb_wishlist_last_capture_at", String(Date.now()));
+              targets += items.length;
+              saved += Number((result.accepted || {}).listing || 0);
+              clog("info", `Airbnb Wishlist captured ${saved} listing candidate(s)`, "airbnb");
+            }
+            return { targets, saved, discovered: 0 };
+          }
           return { targets, saved, discovered: 0 };
         }
         if (nativePageMatchesTarget(platform, location.href, String(target.target_url))) {

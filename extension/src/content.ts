@@ -31,6 +31,7 @@ import {
 } from "./shared/storage_helpers.js";
 import {
   extractNativePageItems,
+  isAirbnbWishlistPage,
   nativePageMatchesTarget,
   nativePageUsername,
 } from "./native_scrapers.js";
@@ -3977,6 +3978,29 @@ async function nativeScrapeCycle(platform) {
     const nextResponse = await send({ type: "getNativeScrapeTarget", platform }, { retries: 1, timeoutMs: 12000 }).catch(() => null);
     const target = nextResponse && nextResponse.target ? nextResponse.target : null;
     if (!target || !target.target_url) {
+      if (platform === "airbnb" && isAirbnbWishlistPage(location.href)) {
+        const lastCaptureAt = lsNum("uc_airbnb_wishlist_last_capture_at");
+        if (Date.now() - lastCaptureAt < 15 * 60 * 1000) {
+          return { targets, saved, discovered: 0 };
+        }
+        const items = extractNativePageItems(platform, document, location.href)
+          .filter((item) => item.type === "listing");
+        if (!items.length) return { targets, saved, discovered: 0 };
+        const result = await send({
+          type: "nativeScrape",
+          platform,
+          page_url: location.href,
+          status: "success",
+          items,
+        }, { retries: 1, timeoutMs: 30000 }).catch(() => null);
+        if (result && result.ok) {
+          lsSet("uc_airbnb_wishlist_last_capture_at", String(Date.now()));
+          targets += items.length;
+          saved += Number((result.accepted || {}).listing || 0);
+          clog("info", `Airbnb Wishlist captured ${saved} listing candidate(s)`, "airbnb");
+        }
+        return { targets, saved, discovered: 0 };
+      }
       // These platforms have separate queue-backed collectors. Never ingest an
       // unclaimed home/recommendation page here: it bypasses follow-first
       // priority and can silently turn the user's home feed into a broad crawl.

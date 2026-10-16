@@ -278,6 +278,16 @@ function airbnbHostItem(
   };
 }
 
+export function isAirbnbWishlistPage(pageUrl: string): boolean {
+  try {
+    const parsed = new URL(pageUrl);
+    return /(^|\.)airbnb\.(com|com\.sg|co\.uk|co\.kr)$/i.test(parsed.hostname)
+      && /(?:^|\/)wishlists?(?:\/|$)/i.test(parsed.pathname);
+  } catch {
+    return false;
+  }
+}
+
 function airbnbListingItem(doc: Document, pageUrl: string, anchor: HTMLAnchorElement, card: Element): NativeScrapeItem | null {
   const listingUrl = absoluteHttps(anchor.href, pageUrl);
   if (!listingUrl || !/(^|\.)airbnb\.(com|com\.sg|co\.uk|co\.kr)$/i.test(new URL(listingUrl).hostname)) return null;
@@ -308,7 +318,10 @@ function airbnbListingItem(doc: Document, pageUrl: string, anchor: HTMLAnchorEle
     bedrooms: bedrooms ? Number(bedrooms[1]) : null,
     bathrooms: bathrooms ? Number(bathrooms[1]) : null,
     max_guests: guests ? Number(guests[1]) : null,
-    metadata: { page_path: new URL(pageUrl).pathname },
+    metadata: {
+      page_path: new URL(pageUrl).pathname,
+      ...(isAirbnbWishlistPage(pageUrl) ? { collection_source: "airbnb_wishlist" } : {}),
+    },
   };
 }
 
@@ -332,8 +345,10 @@ function airbnbItems(doc: Document, pageUrl: string): NativeScrapeItem[] {
       if (host) output.push(host);
     }
   }
-  if (/\/s\//i.test(parsed.pathname)) {
-    for (const anchor of Array.from(doc.querySelectorAll<HTMLAnchorElement>('a[href*="/rooms/"]'))) {
+  const wishlistPage = isAirbnbWishlistPage(pageUrl);
+  if (/\/s\//i.test(parsed.pathname) || wishlistPage) {
+    const listingRoot = wishlistPage ? (doc.querySelector("main") || doc.body) : doc;
+    for (const anchor of Array.from(listingRoot.querySelectorAll<HTMLAnchorElement>('a[href*="/rooms/"]'))) {
       const card = anchor.closest<HTMLElement>('[data-testid="card-container"], [data-testid*="listing-card" i], article, li') || anchor.parentElement || anchor;
       const item = airbnbListingItem(doc, pageUrl, anchor, card);
       if (!item || seenListings.has(String(item.id))) continue;

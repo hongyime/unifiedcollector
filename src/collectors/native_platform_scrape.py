@@ -20,11 +20,11 @@ _FOLLOWED_TARGET_SOURCES = {
 _FOLLOWED_TARGET_PRIORITY = 50
 _FOLLOWED_TARGET_CAP = 10
 _FOLLOW_ONLY_SEED_QUERY_INDEXES = {
-    # These are tied directly to followed pins or listings already discovered
-    # from followed identities. Other seed queries expand public discovery.
+    # These are user-selected targets or enrichment for already selected
+    # identities/listings. Other seed queries expand public discovery.
     "pinterest": (2,),
     "snapchat": (),
-    "airbnb": (0, 1, 2),
+    "airbnb": (0, 1, 2, 4),
 }
 _FOLLOW_ONLY_QUEUE_SOURCES = {
     "pinterest": ("followed_handle_candidate", "pinterest_pin_details"),
@@ -34,6 +34,7 @@ _FOLLOW_ONLY_QUEUE_SOURCES = {
         "airbnb_listing_hosts",
         "discovered_links",
         "airbnb_listings",
+        "airbnb_wishlist",
     ),
 }
 
@@ -815,6 +816,26 @@ _SEED_QUERIES: dict[str, tuple[str, ...]] = {
              SELECT count(*) FROM browser_native_scrape_queue
               WHERE platform='airbnb' AND source='airbnb_profiles'
                 AND status IN ('pending','claimed')
+         ))
+        ON CONFLICT (platform, target_url) DO NOTHING
+        """,
+        """
+        INSERT INTO browser_native_scrape_queue
+            (platform, target_url, username, source, priority)
+        SELECT 'airbnb', 'https://www.airbnb.com/rooms/' || l.listing_id,
+               NULL, 'airbnb_wishlist', 45
+          FROM airbnb_listings l
+         WHERE l.listing_id ~ '^[0-9]{1,24}$'
+           AND l.metadata->>'collection_source'='airbnb_wishlist'
+           AND NOT EXISTS (
+                SELECT 1 FROM browser_native_scrape_queue q
+                 WHERE q.platform='airbnb'
+                   AND q.target_url='https://www.airbnb.com/rooms/' || l.listing_id
+           )
+         ORDER BY l.collected_at DESC NULLS LAST, l.listing_id
+         LIMIT GREATEST(0, 10 - (
+             SELECT count(*) FROM browser_native_scrape_queue
+              WHERE platform='airbnb' AND status IN ('pending','claimed')
          ))
         ON CONFLICT (platform, target_url) DO NOTHING
         """,
