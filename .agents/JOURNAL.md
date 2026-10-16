@@ -1032,3 +1032,5 @@ Telegram remains behind four active FloodWaits through 06:22:07 UTC. At 01:33 UT
 2026-10-16 06:12 UTC: Confirmed the Lemon8 943-second backoff expired at 06:12:28 UTC. No active Lemon8 limit and no rate-limit event in the last 15m. Telegram still has one account cooldown through 06:22:07 UTC.
 
 2026-10-16 06:13 UTC: Telegram has 3 recent discussion-channel dedup rows with expirations from 06:21:43 to 06:41:46 UTC; 2 earlier visit records have already aged out. Member refreshes reached 658 rows across 102 chats; 2 polls refreshed/12h were anonymous. Check for new discussion visits as dedup entries expire; never vote.
+
+2026-10-16 06:14 UTC: Airbnb `/wishlists` has no room links, Wishlist links, or images; database contains 0 Wishlist-sourced listing rows and 0 Wishlist queue targets. The authorized seed is ready to capture from the existing tab when list content is present.
