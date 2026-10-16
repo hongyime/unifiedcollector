@@ -63,6 +63,8 @@ SEARCH_MIN_FILE_SIZE           Reject files below N bytes (default 10240).
 SEARCH_MAX_PDF_PAGES           Cap PDF page extraction (default 50).
 SEARCH_CACHE_TTL_HOURS         Search-result cache TTL (default 24).
 SEARCH_CONCURRENT_DOWNLOADS    Parallel asset downloads (default 5).
+SEARCH_MAX_TARGETS_PER_CYCLE   Configured/discovered seeds processed per cycle
+                               (default 10; targets rotate between cycles).
 SEARCH_DOWNLOAD_IMAGES         '1' to download images for each result URL (default 1).
 SEARCH_SPIDER_PAGES            '1' to fetch HTML and extract embedded media
                                (default 0; opt-in because it amplifies traffic).
@@ -726,6 +728,9 @@ class SearchCollector(BaseCollector):
         self._bing_pages = int(os.getenv("SEARCH_BING_PAGES", "3"))
         self._serper_threshold = int(os.getenv("SEARCH_SERPER_THRESHOLD", "5"))
         self._concurrent_downloads = int(os.getenv("SEARCH_CONCURRENT_DOWNLOADS", "5"))
+        self._max_targets_per_cycle = min(
+            100, max(1, int(os.getenv("SEARCH_MAX_TARGETS_PER_CYCLE", "10")))
+        )
         self._serper_api_key = os.getenv("SERPER_API_KEY", "").strip()
         self._serper_quota = int(os.getenv("SERPER_DAILY_QUOTA", "2500"))
         self._domain_pacing = DomainPacer(
@@ -1411,6 +1416,30 @@ class SearchCollector(BaseCollector):
             await asyncio.sleep(random.uniform(0.5, 1.5))
         yield False
 
+    def _select_targets_for_cycle(self, targets: list[str]) -> list[str]:
+        """Select a bounded, persistent round-robin slice of seed targets.
+
+        The worker loads all pending Search targets on each cycle. Limiting the
+        slice lets result downloads/document indexing run between batches while
+        `last_processed_id` keeps later targets from being starved.
+        """
+        unique_targets = list(dict.fromkeys(targets))
+        if len(unique_targets) <= self._max_targets_per_cycle:
+            return unique_targets
+
+        previous = self.checkpoint.last_processed_id
+        try:
+            start = (unique_targets.index(previous) + 1) % len(unique_targets)
+        except ValueError:
+            start = 0
+        rotated = unique_targets[start:] + unique_targets[:start]
+        selected = rotated[: self._max_targets_per_cycle]
+        logger.info(
+            "Search target slice: selected %d of %d starting at offset %d",
+            len(selected), len(unique_targets), start,
+        )
+        return selected
+
     async def collect(self, targets: list[str]):
         # Pace between queries to reduce search-engine 429s (the ddgs brave
         # backend throttles aggressively). Env-tunable; 0 disables.
@@ -1418,10 +1447,11 @@ class SearchCollector(BaseCollector):
         # A target that is a URL is a DIRECT seed (open directory / cloud bucket):
         # crawl it straight away (expand_paste_sites -> _spider_page, which also
         # enumerates S3/GCS ListBucketResult buckets). Everything else is a query.
+        cycle_targets = self._select_targets_for_cycle(targets)
         dynamic_items = await self._prepare_dynamic_search_queries()
         dynamic_by_query = {item["query"]: item for item in dynamic_items}
-        direct = [t for t in targets if t.startswith(("http://", "https://"))]
-        static_queries = [t for t in targets if not t.startswith(("http://", "https://"))]
+        direct = [t for t in cycle_targets if t.startswith(("http://", "https://"))]
+        static_queries = [t for t in cycle_targets if not t.startswith(("http://", "https://"))]
         queries = list(dict.fromkeys([*(item["query"] for item in dynamic_items), *static_queries]))
         pending_postprocessing: list[tuple[str, list[dict]]] = []
         for query in queries:

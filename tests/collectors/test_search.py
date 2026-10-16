@@ -47,6 +47,7 @@ def _set_clean_env(monkeypatch):
         "SEARCH_MAX_RESULTS", "SEARCH_MIN_DIMENSION", "SEARCH_MIN_FILE_SIZE",
         "SEARCH_DOWNLOAD_IMAGES", "SEARCH_SPIDER_PAGES", "SEARCH_BING_PAGES",
         "SEARCH_SERPER_THRESHOLD", "SEARCH_CONCURRENT_DOWNLOADS",
+        "SEARCH_MAX_TARGETS_PER_CYCLE",
         "SEARCH_CACHE_TTL_HOURS", "SEARCH_MAX_PDF_PAGES",
         "SEARCH_DOMAIN_DELAY_SECONDS", "SEARCH_DOMAIN_JITTER_SECONDS",
         "SEARCH_RATE_LIMIT_COOLDOWN_SECONDS", "SEARCH_RATE_LIMIT_MAX_COOLDOWN_SECONDS",
@@ -871,6 +872,30 @@ async def test_collect_runs_dynamic_dork_queries_before_static_targets(monkeypat
         result_count=0,
         completed=True,
     )
+
+
+@pytest.mark.asyncio
+async def test_collect_rotates_a_bounded_target_slice(monkeypatch):
+    _set_clean_env(monkeypatch)
+    monkeypatch.setenv("SEARCH_QUERY_DELAY_SECONDS", "0")
+    monkeypatch.setenv("SEARCH_MAX_TARGETS_PER_CYCLE", "2")
+    coll = SearchCollector()
+    coll.checkpoint.last_processed_id = "beta"
+    coll.checkpoint.save_progress = AsyncMock()
+    coll._prepare_dynamic_search_queries = AsyncMock(return_value=[])
+    coll.search_query = AsyncMock(return_value=[])
+    coll.heartbeat_source_health = AsyncMock()
+
+    await coll.collect(["alpha", "beta", "gamma", "delta"])
+
+    assert [call.args[0] for call in coll.search_query.await_args_list] == [
+        "gamma", "delta",
+    ]
+
+    coll.checkpoint.last_processed_id = "delta"
+    assert coll._select_targets_for_cycle(["alpha", "beta", "gamma", "delta"]) == [
+        "alpha", "beta",
+    ]
 
 
 @pytest.mark.asyncio
