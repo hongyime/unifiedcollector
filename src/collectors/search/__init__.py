@@ -209,6 +209,7 @@ _DIRECT_DOCUMENT_SQL_PATTERN = (
 )
 _DIRECT_DOCUMENT_QUEUE_MAX_ATTEMPTS = 5
 _DIRECT_DOCUMENT_QUEUE_MAX_SEED = 250
+_DIRECT_DOCUMENT_QUEUE_BATCH_SIZE = 10
 
 
 _DYNAMIC_TERM_STOPWORDS = frozenset({
@@ -1626,7 +1627,12 @@ class SearchCollector(BaseCollector):
                 source_url,
             ))
 
-    async def _process_direct_document_backlog(self, limit: int = 10, *, seed: bool = True) -> dict[str, int]:
+    async def _process_direct_document_backlog(
+        self,
+        limit: int = _DIRECT_DOCUMENT_QUEUE_BATCH_SIZE,
+        *,
+        seed: bool = True,
+    ) -> dict[str, int]:
         """Download due document results with persistent leases and backoff."""
         queued = await self._seed_direct_document_backlog() if seed else 0
         jobs = await self._claim_direct_document_jobs(limit)
@@ -1729,13 +1735,13 @@ class SearchCollector(BaseCollector):
                         result_count=len(results),
                         completed=not self._last_search_query_rate_limited,
                     )
+                document_urls: set[str] = set()
                 if results:
                     # Process direct documents as soon as their provider query
                     # completes. The provider mutex is already released, and
                     # these candidates no longer wait for the full query batch
                     # or its broad page crawls.
                     document_hits: list[dict[str, Any]] = []
-                    document_urls: set[str] = set()
                     for hit in results:
                         hit_url = hit.get("url")
                         if _is_direct_document_url(hit_url) and hit_url not in document_urls:
@@ -1744,17 +1750,21 @@ class SearchCollector(BaseCollector):
                     if document_hits:
                         try:
                             await self._enqueue_direct_document_hits(query, document_hits)
-                            await self._process_direct_document_backlog(
-                                limit=len(document_hits), seed=False,
-                            )
                         except Exception as exc:  # noqa: BLE001 - persisted hits are retried next cycle.
-                            logger.warning("Search direct-document pass deferred: %s", type(exc).__name__)
+                            logger.warning("Search direct-document enqueue deferred: %s", type(exc).__name__)
                     remaining_hits = [
                         hit for hit in results
                         if hit.get("url") not in document_urls
                     ]
                     if remaining_hits:
                         pending_postprocessing.append((query, remaining_hits))
+                try:
+                    await self._process_direct_document_backlog(
+                        limit=_DIRECT_DOCUMENT_QUEUE_BATCH_SIZE,
+                        seed=False,
+                    )
+                except Exception as exc:  # noqa: BLE001 - the durable queue retries later.
+                    logger.warning("Search direct-document batch deferred: %s", type(exc).__name__)
                 await self.checkpoint.save_progress(query)
                 await self.heartbeat_source_health()
             except Exception as e:

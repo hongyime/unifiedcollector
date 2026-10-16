@@ -1386,6 +1386,27 @@ async def test_collect_invokes_search_query_and_checkpoints(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_collect_processes_document_backlog_after_each_query_without_hits(monkeypatch):
+    _set_clean_env(monkeypatch)
+    monkeypatch.setenv("SEARCH_QUERY_DELAY_SECONDS", "0")
+    coll = SearchCollector()
+    coll.search_query = AsyncMock(return_value=[])
+    coll._prepare_dynamic_search_queries = AsyncMock(return_value=[])
+    coll._process_direct_document_backlog = AsyncMock(return_value={
+        "queued": 0, "claimed": 0, "indexed": 0, "deferred": 0, "failed": 0,
+    })
+    coll.checkpoint.save_progress = AsyncMock()
+    coll.heartbeat_source_health = AsyncMock()
+
+    await coll.collect(["alpha", "beta"])
+
+    calls = coll._process_direct_document_backlog.await_args_list
+    assert len(calls) == 3  # Initial seed pass plus one bounded pass per query.
+    assert calls[0].args == () and calls[0].kwargs == {}
+    assert all(call.kwargs == {"limit": 10, "seed": False} for call in calls[1:])
+
+
+@pytest.mark.asyncio
 async def test_collect_routes_failures_to_dlq(monkeypatch):
     _set_clean_env(monkeypatch)
     coll = SearchCollector()
