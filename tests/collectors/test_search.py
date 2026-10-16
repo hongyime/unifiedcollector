@@ -836,6 +836,10 @@ def test_dynamic_term_sources_cover_additional_social_profiles_and_posts():
 def test_dynamic_dorks_include_approved_person_and_document_queries():
     queries = search_mod._expand_dynamic_dorks("alice example")
 
+    assert queries[:2] == [
+        '"alice example" filetype:pdf',
+        'filetype:pdf "alice example"',
+    ]
     assert '"alice example" filetype:pdf' in queries
     assert '"alice example" (site:github.com OR site:linkedin.com OR site:twitter.com)' in queries
     assert 'filetype:pdf "alice example"' in queries

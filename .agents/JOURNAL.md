@@ -843,3 +843,17 @@ Machine-specific values in this document use privacy placeholders.
 2026-10-15 23:36 UTC Search soak result: The 15-minute window after `bf3ffe12` deployment completed. Two dynamic terms advanced, no Search 429/cooldown appeared, and Exposure acquired the shared provider mutex after Search released it. Search and Exposure collector tests pass; 30 Compose services are running and CDP remains at one page per managed social plus Extensions. No filetype dork or indexed document has appeared yet, so Phase 4 remains open.
 2026-10-15 23:44 UTC Pinterest pin-detail decision: Detail targets must come from Pinterest pins associated with same-platform `following` edges and verified owner links; cap active details at 10 and only seed them after preferred followed-handle targets drain. Parse only the requested numeric pin, require rendered detail fields before treating its page as public, drop explicit verified authors, and merge authenticated fields only for IDs visible anonymously. Focused Pinterest tests (31) and the full native-platform scraper file (53) pass.
 2026-10-15 23:45 UTC Pinterest deploy decision: The queue has no live claim, but PostgreSQL sampled at 266.76% CPU. Defer the isolated Pinterest restart until load settles; the worker's source bind mount means no shared image rebuild is needed.
+
+2026-10-15 23:45 UTC Pinterest code publication: Committed and pushed `113bc3f0` to `main`; deployment remains pending a lower PostgreSQL load sample.
+
+2026-10-15 23:48 UTC Pinterest load recheck: The active claim completed, but PostgreSQL sampled at 271.42% CPU. Keep `collector_pinterest` running until load settles; change `113bc3f0` is already pushed.
+
+2026-10-15 23:51 UTC Pinterest deployment: Isolated restart of `collector_pinterest` loaded commit `113bc3f0`; runtime import confirms pin detail route and seed SQL. A fresh Postgres sample rose to 267.71%, so monitor the worker and avoid further restarts. The 15-minute soak runs through 00:06:13 UTC Oct 16.
+
+2026-10-15 23:53 UTC Pinterest early runtime result: One detail target completed; no worker error or rate marker appeared. Rolling 12h output is 48 pins, 2 described, and 0 destinations/repin/comment counts. Keep Phase 5 open pending the full soak and additional detail targets.
+
+2026-10-15 23:55 UTC Pinterest soak: One detail target has completed; no rate/error indicators appeared. Postgres rose to 394.03%, so do not restart other services.
+
+2026-10-15 23:55 UTC Search recheck: Five of 10 dynamic terms have advanced, while five remain never searched. The 12h window has 256 query rows/7,240 result rows and no `filetype:` query or indexed document. Keep Phase 4 open.
+
+2026-10-15 23:59 UTC Search dork prioritization: Move person/document templates to the start of the 13-template rotation; this makes filetype dorks available at current cursors 0/1 instead of waiting for cursor 5. The Search test file passes; runtime deployment remains pending.

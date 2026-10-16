@@ -38,3 +38,8 @@ Committed and pushed `bf3ffe12`, then restarted only `collector_search` at 23:20
 ## 2026-10-15 23:36 UTC soak result
 
 The 15-minute soak from the 23:20:41 Search restart completed. Two dynamic terms advanced by 23:35:02; eight remain never searched. Search health updated at 23:35:15. The lock owner changed to Exposure between Search requests, confirming the provider mutex is no longer held during Search postprocessing. No Search 429/cooldown has appeared since restart. The recent query/result rows are shared with Exposure; no `filetype:` dork row or indexed document is present yet. Both Search and Exposure collector test files pass. All 30 Compose services are running, and CDP ports 9222/9336 each have exactly one page per managed social plus Extensions. Continue monitoring the remaining dynamic terms and documents; the other phase gates remain open.
+
+
+## 2026-10-15 23:59 UTC dork-order update
+
+The rolling Search snapshot has 5/10 terms searched, 5 never searched, and no filetype query/document yet. `_expand_dynamic_dorks()` places six cloud-bucket queries before the six person/document templates; filetype templates begin at cursor 5. Reordered the document templates first, placing filetype dorks at cursors 0–4 and keeping the second existing cursor on a filetype query. Added an ordering regression; the complete Search test file passes and `git diff --check` is clean. This source change is local and not loaded by the Search worker. Defer a worker restart until after the Pinterest soak and lower Postgres load.

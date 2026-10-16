@@ -13,7 +13,7 @@ Continue the UnifiedCollector Full Plan. Improve Pinterest pin captions/descript
 - Search fix `bf3ffe12` is live. The 15-minute soak completed through 23:35:41 UTC; two dynamic terms advanced, 0 Search 429s, and documents/filetype dorks remain open.
 - The local implementation now parses only numeric pin detail routes, filters by exact requested ID, enriches missing fields only from authenticated rows whose IDs also appeared anonymously, and drops explicit verified authors. Detail seeding is capped at 10 active rows, requires a same-platform following edge plus verified pin ownership, and runs only after preferred followed-handle work drains.
 - Empty pin shells are rejected by the public-content gate; the route alone is not counted as public data.
-- All 31 Pinterest-focused checks and all 53 tests in `tests/collectors/test_native_platform_scrapers.py` pass. `git diff --check` is clean. Code is still uncommitted; live claim/load and deployment checks remain.
+- All 31 Pinterest-focused checks and all 53 tests in `tests/collectors/test_native_platform_scrapers.py` pass. `git diff --check` is clean. Commit `113bc3f0` is pushed to `main`; live claim/load and deployment checks remain.
 - Deployment check at 23:45 UTC found no unexpired Pinterest claim and 30 running Compose services, but PostgreSQL CPU was 266.76%; defer the Pinterest-only restart until DB load settles. The service bind-mounts `src`, so no image rebuild is needed.
 
 ## Implementation plan
@@ -30,3 +30,11 @@ Continue the UnifiedCollector Full Plan. Improve Pinterest pin captions/descript
 - Explicit blue-check evidence excludes an account; unknown remains eligible.
 - All Telegram groups and configured accounts are authorized, but four FloodWaits expire at 2026-10-16 06:22:07 UTC; do not restart Telegram before then.
 - Do not touch Spider/SpiderFoot. Preserve one extension-managed tab per social.
+
+- At 23:48 UTC the active claim had completed, but PostgreSQL was at 271.42% CPU; keep `collector_pinterest` running and recheck load before deployment.
+
+- `collector_pinterest` restarted at 23:51:13 UTC after a zero-claim check, PostgreSQL at 69.42%, and no Pinterest rate-limit event in the prior 30 minutes. Runtime import confirms the new numeric pin route and detail seed SQL. Post-restart PostgreSQL sampled at 267.71%; monitor through the 15-minute soak ending 00:06:13 UTC Oct 16, with no further restarts while load is elevated.
+
+- Early post-restart check at 23:53 UTC: one `pinterest_pin_details` target completed with no bounded log error/traceback/rate marker. Rolling 12h totals are 48 pins, 2 descriptions, and no destination or repin/comment counts. Continue the soak through 00:06:13 UTC.
+
+- Four-minute soak recheck at 23:55 UTC: one detail row completed, no active claim or error/traceback/rate marker. Pinterest output remains 48 pins/2 described/0 destinations/repin counts/comment counts. PostgreSQL sampled at 394.03%; do not restart other services.

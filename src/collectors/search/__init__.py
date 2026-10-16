@@ -202,19 +202,19 @@ _DYNAMIC_TERM_STOPWORDS = frozenset({
 # emitted from profile display-name fields so the resume query keeps its meaning.
 _DYNAMIC_PERSON_DOCUMENT_DORKS = (
     '"{q}" filetype:pdf',
-    '"{q}" (site:github.com OR site:linkedin.com OR site:twitter.com)',
     'filetype:pdf "{q}"',
     '"{q}" filetype:(pdf OR docx OR xlsx OR pptx)',
     '"{q}" filetype:pdf resume',
     'site:target.com filetype:pdf "{q}"',
+    '"{q}" (site:github.com OR site:linkedin.com OR site:twitter.com)',
 )
 
 
 def _expand_dynamic_dorks(term: str) -> list[str]:
-    """Return the rotating cloud and person/document searches for one term."""
+    """Return document searches first, followed by rotating cloud dorks."""
     return [
-        *expand_dorks([term]),
         *(template.format(q=term) for template in _DYNAMIC_PERSON_DOCUMENT_DORKS),
+        *expand_dorks([term]),
     ]
 
 _EXPLICIT_BADGE_JSON_FLAGS = (
