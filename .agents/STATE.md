@@ -2,7 +2,7 @@
 
 Current task: Complete the Full Plan from the user-provided plan; Phase 1 and Beeper are complete. Keep all remaining gates open until verified. Do not touch Spider/SpiderFoot.
 
-## Full-plan checklist (2026-10-16 11:10 UTC)
+## Full-plan checklist (2026-10-16 11:12 UTC)
 - [x] Phase 1 — split/rename is deployed; all 30 Compose containers were running at the latest check and old names are absent. Follow-up fixes for Instagram, Telegram, and Search are pushed; the checklist is current.
 - [x] Phase 2a — Beeper history is flowing: 9,606 messages/12h; latest row 10:52:38.
 - [~] Phase 2b — Lemon8 has 46 posts/12h (target 50+), latest row refresh 10:52:34; extension candidates remain >900/12h and the extension emits partial/failed media batches with many invalid candidates. API 429 cooldowns are logged; no forced retries.
@@ -13,9 +13,9 @@ Current task: Complete the Full Plan from the user-provided plan; Phase 1 and Be
 - [~] Phase 5a — Pinterest uses Playwright with vault cookies and 27 follow-derived targets, while public discovery remains disabled. The recent pin output and caption/destination/repin/comment coverage remain too thin to meet the requested field gate.
 - [~] Phase 5b — Snapchat uses public HTTP/BeautifulSoup collection and captures Stories, Spotlights, and Highlights. Its own Following roster is not exposed in the existing web view; broad public discovery remains disabled.
 - [x] Phase 5c — Airbnb uses direct GraphQL operations (no Apify). Homepage seeding refreshed 26 listings, 26 hosts, and 156 reviews/12h. Current totals are 27 listings, 29 hosts, and 164 reviews. The user has no saved Wishlists yet; keep seeding from `/` and revisit Wishlist in the same tab later.
-- [~] Cookie vault — Healthy; latest archive 10:56:13 wrote 164 social cookies; effective restorable snapshot has 166. Cookie values remain unread. Instagram still lacks a successful provider request after the 10:21 HTTP 429 and 10:22 HTTP 401.
+- [~] Cookie vault — Healthy; latest archive 11:11:13 wrote 165 social cookies, with 0 consecutive failures. Cookie values remain unread. Instagram still lacks a successful provider request after the 10:21 HTTP 429 and 10:22 HTTP 401.
 - [x] Extension tab status — CDP shows 11 pages: ten web hosts plus Extensions, one tab per observed host. All ten web hosts sent extension v1.23.125 heartbeats in the last 5m. Airbnb remains at `/`; no tabs were opened.
-- [~] Final verification — All 30 UnifiedCollector containers are running (24 healthy, 6 without health checks; 0 unhealthy). No rate-limit events were recorded in the last 15m, but Telegram cooldowns and the Instagram provider-success gate remain. Host I/O pressure is high; the final soak is not started.
+- [~] Final verification — At 11:11 UTC, all 30 UnifiedCollector containers were running (24 healthy, 6 without health checks; 0 unhealthy). Telegram cooldowns and the Instagram provider-success gate remain. The last host I/O sample (10:56 UTC) was elevated; the final soak is not started.
 
 PostgreSQL interval sample (09:49:46–09:55:13 UTC): PostgreSQL instantaneous CPU was 2.50% then 0.00%; temp writes increased by 1 file/~12.4 MiB, WAL by ~192 MiB, and block reads by ~7.2 GiB. Timed checkpoints increased by 1; requested checkpoints were unchanged. Host I/O PSI remained elevated (some avg10 19–25%, full avg10 1.9–9.9%). This points to shared I/O pressure, not a current temp-file spike; no database settings changed.
 
