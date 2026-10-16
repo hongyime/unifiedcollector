@@ -980,3 +980,7 @@ Telegram remains behind four active FloodWaits through 06:22:07 UTC. At 01:33 UT
 2026-10-16 05:24 UTC: Cookie vault remains healthy at the 05:21 UTC snapshot: 157 cookies (Pinterest 12, Snapchat 23, Airbnb 29), zero consecutive failures. The 161-cookie 04:36 effective restore point remains restorable. No cookie values were read or printed.
 
 2026-10-16 05:26 UTC: Search is healthy and processing a live 9-document batch: 63 complete / 217 pending / 9 claimed; latest query 05:25 UTC. No rate-limit events in the sampled last 15 minutes. Do not restart or interrupt the claim.
+
+2026-10-16 05:27 UTC: Search live batch advanced: 7 of 9 claimed docs completed; 2 remain claimed, 68 complete / 219 pending. Search health remains good; do not interrupt the remaining claims.
+
+2026-10-16 05:27 UTC: Search batch settled at 68 complete / 221 pending / 0 claimed; two claimed rows returned to pending retry. Search is healthy, with 2 queries and 0 rate-limit events in the sampled last 15 minutes.

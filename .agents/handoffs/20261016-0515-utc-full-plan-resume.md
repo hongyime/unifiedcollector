@@ -44,3 +44,11 @@ Database confirms four Telegram FloodWait rows expire at 06:22:07 UTC. Five disc
 ## 2026-10-16 05:26 UTC addendum
 
 Search health is good; the 05:25 UTC query has 9 documents claimed (63 complete / 217 pending). Let this batch finish without restart; no rate-limit events occurred in the sampled last 15 minutes.
+
+## 2026-10-16 05:27 UTC addendum
+
+Search batch advanced from 9 to 2 live claims: 68 complete / 219 pending. Let the last two finish naturally.
+
+## 2026-10-16 05:27 UTC addendum
+
+The 05:25 Search batch settled: 68 complete / 221 pending / 0 claimed. Two rows returned to pending retry. Search stayed healthy; the sampled last 15 minutes had 2 queries and no rate-limit events.
