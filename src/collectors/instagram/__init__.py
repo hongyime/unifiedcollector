@@ -212,6 +212,7 @@ class InstagramCollector(BaseCollector):
         # collect() skips these and rotates to a healthy account. Reset on restart.
         self._dead_cookie_accounts: set[str] = set()
         self._session_auth_dead = False
+        self._session_auth_dead_account: str | None = None
         self._daily_views: dict[str, int] = {}
         self._daily_actions: dict[str, int] = {}
         self._daily_quota_exhausted_keys: set[str] = set()
@@ -359,15 +360,20 @@ class InstagramCollector(BaseCollector):
                     continue
                 discovered[account_name] = full
                 logger.info("Auto-discovered cookie file for %s: %s", account_name, full)
-        vault_path = os.path.join(
-            os.getenv("BROWSER_COOKIE_VAULT_DIR", "credentials/browser_cookies"),
-            "latest.json",
+        vault_dir = Path(os.getenv("BROWSER_COOKIE_VAULT_DIR", "credentials/browser_cookies"))
+        vault_paths = sorted(
+            vault_dir.glob("snapshot_*.json"),
+            key=lambda path: path.name,
+            reverse=True,
         )
-        if os.path.isfile(vault_path):
+        vault_paths.append(vault_dir / "latest.json")
+        for vault_path in vault_paths:
+            if not vault_path.is_file():
+                continue
             try:
-                vault_cookies = self._parse_browser_cookies(vault_path)
+                vault_cookies = self._parse_browser_cookies(str(vault_path))
             except Exception:
-                vault_cookies = {}
+                continue
             if {"sessionid", "csrftoken"}.issubset(vault_cookies):
                 account_name = next(
                     (
@@ -380,8 +386,9 @@ class InstagramCollector(BaseCollector):
                     "browser-vault-cookie",
                 )
                 if account_name not in discovered:
-                    discovered[account_name] = vault_path
+                    discovered[account_name] = str(vault_path)
                     logger.info("Auto-discovered Instagram browser vault snapshot")
+                break
         return discovered
 
     @staticmethod
@@ -1137,8 +1144,13 @@ class InstagramCollector(BaseCollector):
             _hashes = getattr(self, "_cookie_file_hashes", {})
             for _name, _path in self._account_browser_cookies.items():
                 try:
-                    with open(_path, "rb") as _f:
-                        _h = _hl.md5(_f.read()).hexdigest()
+                    _cookie_payload = self._parse_browser_cookies(_path)
+                    _fingerprint = json.dumps(
+                        _cookie_payload,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                    _h = _hl.md5(_fingerprint).hexdigest()
                 except Exception:
                     continue
                 if _hashes.get(_name) != _h:
@@ -1205,6 +1217,7 @@ class InstagramCollector(BaseCollector):
         # _healthy[0] when there's no access data yet (prior behaviour preserved).
         acct_name = await self._select_cycle_account(_healthy, targets)
         self._session_auth_dead = False
+        self._session_auth_dead_account = None
         # Wire a REAL Account (stable per-account fingerprint: UA + device_id)
         # and set it as the current account BEFORE the first request. Previously
         # this used a throwaway placeholder and left _current_account = None, so
@@ -1276,17 +1289,19 @@ class InstagramCollector(BaseCollector):
                 # next healthy cookie account instead of burning a full scheduler
                 # interval on one expired session.
                 if self._session_auth_dead:
-                    self._dead_cookie_accounts.add(acct_name)
-                    await self._record_cookie_status(acct_name, "dead", "401 session expired")
+                    dead_account = self._session_auth_dead_account or acct_name
+                    self._dead_cookie_accounts.add(dead_account)
+                    await self._record_cookie_status(dead_account, "dead", "401 session expired")
                     remaining = [
                         a for a in cookie_accounts
-                        if a not in self._dead_cookie_accounts
+                        if a != dead_account
+                        and a not in self._dead_cookie_accounts
                         and not self._daily_quota_exhausted(a)
                     ]
                     logger.warning(
                         "instagram: account %s session is dead (401) — marked dead, "
                         "rotating to another account%s. Healthy remaining: %s",
-                        acct_name,
+                        dead_account,
                         " in this cycle" if remaining else " next cycle",
                         remaining or "NONE",
                     )
@@ -1307,6 +1322,7 @@ class InstagramCollector(BaseCollector):
 
         if retry_with_next_account and not self._stop.is_set():
             self._session_auth_dead = False
+            self._session_auth_dead_account = None
             await self.collect(targets)
             return
 
@@ -2361,14 +2377,23 @@ class InstagramCollector(BaseCollector):
                     raw = json.loads(Path(cookie_path).read_text(encoding="utf-8"))
                 except Exception:
                     return None
+                if isinstance(raw, dict):
+                    raw = raw.get("cookies", [])
                 if isinstance(raw, list):
                     for c in raw:
                         if not isinstance(c, dict):
                             continue
+                        domain = str(c.get("domain") or ".instagram.com")
+                        normalized_domain = domain.lower().lstrip(".").rstrip(".")
+                        if (
+                            normalized_domain != "instagram.com"
+                            and not normalized_domain.endswith(".instagram.com")
+                        ):
+                            continue
                         raw_cookies.append({
                             "name": c.get("name"),
                             "value": c.get("value"),
-                            "domain": c.get("domain", ".instagram.com"),
+                            "domain": domain,
                             "path": c.get("path", "/"),
                             "expires": c.get("expirationDate", c.get("expires")),
                             "httpOnly": c.get("httpOnly", False),
@@ -2387,6 +2412,12 @@ class InstagramCollector(BaseCollector):
                         if len(parts) < 7:
                             continue
                         domain, _flag, path, secure, expires, name, value = parts[:7]
+                        normalized_domain = domain.lower().lstrip(".").rstrip(".")
+                        if (
+                            normalized_domain != "instagram.com"
+                            and not normalized_domain.endswith(".instagram.com")
+                        ):
+                            continue
                         raw_cookies.append({
                             "name": name,
                             "value": value,
@@ -2639,6 +2670,7 @@ class InstagramCollector(BaseCollector):
                     is_auth_failure = status in (401, 403)
                     if is_auth_failure:
                         self._session_auth_dead = True
+                        self._session_auth_dead_account = acct_name
                     if status == 429:
                         await self._handle_rate_limit(
                             Exception("429"),
