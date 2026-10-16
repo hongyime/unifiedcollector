@@ -21,7 +21,14 @@ logger = logging.getLogger("src.collectors.telegram")
 class MembersMixin:
     """Iterate chat participants and upsert into ``telegram_chat_members``."""
 
-    async def collect_chat_members(self, chat_id, worker: "TelegramWorker | None" = None) -> int:
+    async def collect_chat_members(
+        self,
+        chat_id,
+        worker: "TelegramWorker | None" = None,
+        *,
+        max_participants: int | None = None,
+        sleep_on_flood_wait: bool = True,
+    ) -> int:
         """Iterate participants of chat_id and upsert into telegram_chat_members.
 
         Per-memory PRD: refreshed daily at 03:00 SGT for common-chat-membership
@@ -69,6 +76,7 @@ class MembersMixin:
         shared_enabled = False
         shared_limit = 0
         shared_count = 0
+        participants_seen = 0
         try:
             from src.core.spider_graph_store import shared_spider_enabled, bounded_limit
 
@@ -83,6 +91,9 @@ class MembersMixin:
             async for participant in client.iter_participants(entity):
                 if self._stop.is_set():
                     break
+                if max_participants is not None and participants_seen >= max_participants:
+                    break
+                participants_seen += 1
                 pid = getattr(participant, "id", None)
                 if pid is None or pid in seen:
                     continue
@@ -167,7 +178,7 @@ class MembersMixin:
                 upserted += 1
         except Exception as exc:
             if _is_flood_wait(exc):
-                await self._handle_flood_wait(worker, exc)
+                await self._handle_flood_wait(worker, exc, sleep=sleep_on_flood_wait)
             else:
                 logger.error(
                     "collect_chat_members chat=%s failed: %s",

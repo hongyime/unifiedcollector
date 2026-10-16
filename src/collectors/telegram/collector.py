@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlparse
+from uuid import UUID
 
 from src.core.base_collector import BaseCollector
 from src.collectors.telegram.parse import (
@@ -284,6 +285,9 @@ class TelegramCollector(
         self._discussion_message_limit: int | None = (
             None if parsed_discussion_limit <= 0 else parsed_discussion_limit
         )
+        self._discussion_leave_tasks: set[asyncio.Task] = set()
+        self._discussion_leave_visit_ids: set[str] = set()
+        self._discussion_leave_locks: dict[str, asyncio.Lock] = {}
 
         # Hot-reload task (item 4.6) — listens for new accounts via NOTIFY.
         self._hot_reload_task: asyncio.Task | None = None
@@ -847,6 +851,7 @@ class TelegramCollector(
             logger.error("No Telegram workers connected — aborting cycle")
             return
         logger.info("[telegram.collect] got %d workers", len(self._workers))
+        await self._recover_pending_discussion_leaves()
 
         # Register realtime handlers EARLY — telethon fires them from each client's own
         # update loop the moment they're attached, so LIVE messages stream in while the
@@ -888,6 +893,38 @@ class TelegramCollector(
             NotifyCategory.COLLECTION_START,
             f"Starting collection of {len(targets)} targets across {len(self._workers)} accounts",
         )
+
+        # Check a small, priority-ordered channel batch before the potentially
+        # unbounded per-target history backfill below. This discussion-only
+        # pass must not run full channel history, or it could stall on the same
+        # work it is meant to get ahead of.
+        if os.getenv("TELEGRAM_SPIDER_ENABLED", "true").lower() == "true":
+            spider_workers = [
+                w for w in self._workers
+                if self._is_spider_allowed(w) and self._worker_can_resolve(w)
+            ]
+            try:
+                startup_channel_limit = min(
+                    3,
+                    max(0, int(os.getenv("TELEGRAM_DISCUSSION_STARTUP_CHANNELS_PER_ACCOUNT", "3"))),
+                )
+            except ValueError:
+                startup_channel_limit = 3
+            if spider_workers and startup_channel_limit:
+                logger.info(
+                    "[telegram.collect] prioritizing pending channel targets before history backfill: workers=%d per_worker_limit=%d",
+                    len(spider_workers), startup_channel_limit,
+                )
+                first_batch_visits = await self._prefetch_discussion_channels(
+                    spider_workers, per_worker_limit=startup_channel_limit
+                )
+                if first_batch_visits == 0:
+                    logger.info(
+                        "[telegram.collect] first discussion batch found no linked groups; checking the next bounded batch"
+                    )
+                    await self._prefetch_discussion_channels(
+                        spider_workers, per_worker_limit=startup_channel_limit
+                    )
 
         # Dispatch targets to workers (hash-based, shared-chat aware).
         buckets = self._dispatch(targets, len(self._workers))
@@ -1070,6 +1107,256 @@ class TelegramCollector(
                         )
             enqueued += 1
         return enqueued
+
+    async def _prefetch_discussion_channels(
+        self,
+        workers: list["TelegramWorker"],
+        *,
+        per_worker_limit: int,
+    ) -> int:
+        """Visit linked discussions for a bounded batch without channel history."""
+        if self.pool is None or not workers or per_worker_limit <= 0:
+            return 0
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                WITH candidates AS (
+                    SELECT q.id
+                      FROM telegram_spider_queue q
+                      JOIN telegram_chats c ON c.platform_chat_id=q.platform_chat_id
+                     WHERE q.status='pending'
+                       AND c.type='channel'
+                       AND (
+                            q.discussion_checked_at IS NULL
+                            OR q.discussion_checked_at <= now() - interval '24 hours'
+                       )
+                       AND NOT EXISTS (
+                            SELECT 1 FROM telegram_discussion_visits v
+                             WHERE v.channel_chat_id=c.id
+                               AND v.joined_at > now() - interval '24 hours'
+                       )
+                     ORDER BY q.priority ASC,
+                              q.discussion_checked_at ASC NULLS FIRST,
+                              q.collected_at ASC,
+                              q.id
+                     LIMIT $1
+                     FOR UPDATE OF q SKIP LOCKED
+                )
+                UPDATE telegram_spider_queue q
+                   SET status='processing', discussion_checked_at=NOW()
+                  FROM candidates c
+                 WHERE q.id=c.id AND q.status='pending'
+                RETURNING q.id, q.platform_chat_id
+                """,
+                per_worker_limit * len(workers),
+            )
+        queue_ids = [row["id"] for row in rows]
+        targets = [str(row["platform_chat_id"]) for row in rows]
+        queue_id_by_target = {
+            str(row["platform_chat_id"]): row["id"] for row in rows
+        }
+        resolved_queue_ids: set[UUID] = set()
+        if not targets:
+            logger.info("[telegram.collect] startup discussion pass found no eligible channels")
+            return 0
+
+        buckets: list[list[str]] = [[] for _ in workers]
+        for index, channel_id in enumerate(targets):
+            buckets[index % len(workers)].append(channel_id)
+
+        async def visit_bucket(worker: "TelegramWorker", channel_ids: list[str]) -> int:
+            visits = 0
+            for channel_id in channel_ids:
+                try:
+                    owner, entity = await self._resolve_entity_any_worker(worker, channel_id)
+                    resolved_queue_ids.add(queue_id_by_target[channel_id])
+                    if (
+                        not self._is_spider_allowed(owner)
+                        or not getattr(entity, "broadcast", False)
+                    ):
+                        continue
+                    await self._upsert_chat(entity)
+                    if await self._spider_discussion_group(
+                        owner, entity, channel_id, startup_limits=True
+                    ):
+                        visits += 1
+                        break
+                except (EntityResolveDeferred, EntityUnresolvable):
+                    continue
+                except Exception as exc:  # noqa: BLE001 - keep the startup pass bounded to its targets.
+                    logger.debug(
+                        "startup discussion pass deferred for worker=%d (%s)",
+                        worker.worker_id,
+                        type(exc).__name__,
+                    )
+            return visits
+
+        try:
+            results = await asyncio.gather(
+                *(visit_bucket(worker, bucket) for worker, bucket in zip(workers, buckets)),
+                return_exceptions=True,
+            )
+        finally:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE telegram_spider_queue
+                       SET status='pending',
+                           resolve_checked_at=CASE
+                               WHEN id = ANY($2::uuid[]) THEN NOW()
+                               ELSE resolve_checked_at
+                           END
+                     WHERE id = ANY($1::uuid[]) AND status='processing'
+                    """,
+                    queue_ids,
+                    list(resolved_queue_ids),
+                )
+        visits = sum(result for result in results if isinstance(result, int))
+        errors = sum(isinstance(result, Exception) for result in results)
+        logger.info(
+            "[telegram.collect] startup discussion pass checked=%d recorded=%d worker_errors=%d",
+            len(targets), visits, errors,
+        )
+        return visits
+
+    async def _recover_pending_discussion_leaves(self) -> int:
+        """Resume leave requests deferred by a startup FloodWait."""
+        if self.pool is None or not self._workers:
+            return 0
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT v.id, v.account_name, c.platform_chat_id
+                  FROM telegram_discussion_visits v
+                  JOIN telegram_chats c ON c.id=v.discussion_chat_id
+                 WHERE v.left_at IS NULL
+                   AND v.abort_reason='pending_leave'
+                 ORDER BY v.joined_at ASC
+                 LIMIT 100
+                """
+            )
+        by_account = {
+            str(worker.account.name).lower(): worker for worker in self._workers
+        }
+        scheduled = 0
+        for row in rows:
+            worker = by_account.get(str(row["account_name"]).lower())
+            if worker is None:
+                continue
+            self._schedule_discussion_leave_retry(
+                worker,
+                str(row["platform_chat_id"]),
+                row["id"],
+            )
+            scheduled += 1
+        if scheduled:
+            logger.info(
+                "[telegram.collect] resuming %d pending discussion leave(s)",
+                scheduled,
+            )
+        return scheduled
+
+    def _schedule_discussion_leave_retry(
+        self,
+        worker: "TelegramWorker",
+        discussion_platform_id: str,
+        visit_id,
+    ) -> None:
+        visit_key = str(visit_id)
+        if visit_key in self._discussion_leave_visit_ids:
+            return
+        self._discussion_leave_visit_ids.add(visit_key)
+        task = asyncio.create_task(
+            self._retry_discussion_leave_after_cooldown(
+                worker, discussion_platform_id, visit_id
+            )
+        )
+        self._discussion_leave_tasks.add(task)
+
+        def clear_task(done_task: asyncio.Task) -> None:
+            self._discussion_leave_tasks.discard(done_task)
+            self._discussion_leave_visit_ids.discard(visit_key)
+
+        task.add_done_callback(clear_task)
+
+    @staticmethod
+    def _is_not_participant_error(error: Exception) -> bool:
+        error_name = type(error).__name__.lower()
+        error_code = str(getattr(error, "message", "") or "").upper()
+        error_text = str(error).strip().upper()
+        return (
+            error_name == "usernotparticipanterror"
+            or error_code == "USER_NOT_PARTICIPANT"
+            or error_text == "USER_NOT_PARTICIPANT"
+        )
+
+    async def _retry_discussion_leave_after_cooldown(
+        self,
+        worker: "TelegramWorker",
+        discussion_platform_id: str,
+        visit_id,
+    ) -> None:
+        from telethon.tl.functions.channels import LeaveChannelRequest
+
+        account_key = str(worker.account.name).strip().lower()
+        leave_lock = self._discussion_leave_locks.setdefault(account_key, asyncio.Lock())
+        while not self._stop.is_set():
+            if not self._worker_can_resolve(worker):
+                await asyncio.sleep(5)
+                continue
+            try:
+                # Multiple interrupted visits can belong to one account. Keep
+                # its cooldown recovery from issuing concurrent Telegram RPCs.
+                async with leave_lock:
+                    if self._stop.is_set():
+                        return
+                    if not self._worker_can_resolve(worker):
+                        continue
+                    entity = await worker.client.get_entity(int(discussion_platform_id))
+                    await worker.client(LeaveChannelRequest(entity))
+            except Exception as exc:
+                if _is_flood_wait(exc):
+                    await self._handle_flood_wait(worker, exc, sleep=False)
+                    continue
+                if _is_transient(exc):
+                    await asyncio.sleep(5)
+                    continue
+                if self._is_not_participant_error(exc):
+                    async with self.pool.acquire() as conn:
+                        await conn.execute(
+                            """
+                            UPDATE telegram_discussion_visits
+                               SET left_at=NOW(), abort_reason='already_left'
+                             WHERE id=$1 AND abort_reason='pending_leave' AND left_at IS NULL
+                            """,
+                            visit_id,
+                        )
+                    logger.info(
+                        "[telegram.collect] deferred discussion leave already complete for worker=%d",
+                        worker.worker_id,
+                    )
+                    return
+                logger.debug(
+                    "deferred discussion leave will retry for worker=%d (%s)",
+                    worker.worker_id,
+                    type(exc).__name__,
+                )
+                await asyncio.sleep(5 if _is_transient(exc) else 60)
+                continue
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE telegram_discussion_visits
+                       SET left_at=NOW(), abort_reason='flood_wait'
+                     WHERE id=$1 AND abort_reason='pending_leave' AND left_at IS NULL
+                    """,
+                    visit_id,
+                )
+            logger.info(
+                "[telegram.collect] deferred discussion leave completed for worker=%d",
+                worker.worker_id,
+            )
+            return
 
     async def _process_spider_queue(self, worker: "TelegramWorker"):
         """Process telegram_spider_queue jobs using the given worker's client."""
@@ -1592,6 +1879,23 @@ class TelegramCollector(
         await self._upsert_chat(entity)
         await self._collect_profile_photo(worker, entity, chat_id, chat_name)
 
+        # Discussion visits should not wait for a full channel-history sweep.
+        # Process the linked group first, then resume the channel backfill.
+        if getattr(entity, "broadcast", False):
+            if not self._is_spider_allowed(worker):
+                logger.debug(
+                    "[worker=%d] skipping discussion spider for channel; account is outside the configured spider set",
+                    worker.worker_id,
+                )
+            else:
+                try:
+                    await self._spider_discussion_group(worker, entity, chat_id)
+                except Exception as exc:
+                    logger.debug(
+                        "_spider_discussion_group failed for channel (%s)",
+                        type(exc).__name__,
+                    )
+
         last_id = self.checkpoint.last_processed_id
         try:
             min_id = int(last_id) if last_id else 0
@@ -1679,29 +1983,17 @@ class TelegramCollector(
             except Exception as exc:
                 logger.debug("admin log pass failed for chat=%s: %s", chat_id, exc)
 
-        # Discussion group spider (item 2.1) — channels may have a linked
-        # discussion group. If so, we join, scrape members+messages, leave.
-        if getattr(entity, "broadcast", False):
-            if not self._is_spider_allowed(worker):
-                logger.debug(
-                    "[worker=%d account=%s] skipping discussion spider for channel=%s; account not in TELEGRAM_SPIDER_ACCOUNTS",
-                    worker.worker_id, worker.account.name, chat_id,
-                )
-            else:
-                try:
-                    await self._spider_discussion_group(worker, entity, chat_id)
-                except Exception as exc:
-                    logger.debug(
-                        "_spider_discussion_group failed for channel=%s: %s",
-                        chat_id, exc,
-                    )
-
         # Mark this target as collected in collection_targets
         logger.info("[_collect_chat] completed target=%s, calling mark_target_collected", target)
         await self.mark_target_collected(target)
 
     async def _resolve_linked_discussion_entity(
-        self, worker: "TelegramWorker", channel_entity, channel_platform_id: str
+        self,
+        worker: "TelegramWorker",
+        channel_entity,
+        channel_platform_id: str,
+        *,
+        startup_limits: bool = False,
     ):
         """Fetch the linked discussion peer from Telethon's full-channel response."""
         from telethon.tl.functions.channels import GetFullChannelRequest
@@ -1726,7 +2018,7 @@ class TelegramCollector(
                 related_chats = getattr(full, "chats", None) or []
             except Exception as exc:
                 if _is_flood_wait(exc):
-                    await self._handle_flood_wait(worker, exc)
+                    await self._handle_flood_wait(worker, exc, sleep=not startup_limits)
                 else:
                     logger.debug(
                         "Cannot load full channel metadata for discussion lookup channel=%s: %s",
@@ -1752,7 +2044,7 @@ class TelegramCollector(
                 discussion_entity = await client.get_entity(int(linked_chat_id))
             except Exception as exc:
                 if _is_flood_wait(exc):
-                    await self._handle_flood_wait(worker, exc)
+                    await self._handle_flood_wait(worker, exc, sleep=not startup_limits)
                 else:
                     logger.debug(
                         "Cannot resolve discussion group %s: %s",
@@ -1768,9 +2060,17 @@ class TelegramCollector(
         return linked_chat_id, discussion_entity
 
     async def _spider_discussion_group(
-        self, worker: "TelegramWorker", channel_entity, channel_platform_id: str
-    ) -> None:
+        self,
+        worker: "TelegramWorker",
+        channel_entity,
+        channel_platform_id: str,
+        *,
+        startup_limits: bool = False,
+    ) -> bool:
         """Spider the discussion group linked to a channel (item 2.1).
+
+        In startup mode, member and message scans are capped so the direct
+        target workers are not held behind a full discussion history.
 
         Flow:
           1. Check if channel has `linked_chat_id`; if not, return early.
@@ -1794,7 +2094,7 @@ class TelegramCollector(
                 channel_platform_id,
             )
             if channel_row is None:
-                return
+                return False
             channel_uuid = channel_row["id"]
 
             # Check recent visits — skip if visited within 24h.
@@ -1811,13 +2111,16 @@ class TelegramCollector(
                     "Skipping discussion spider for channel=%s — visited <24h ago",
                     channel_platform_id,
                 )
-                return
+                return False
 
         linked_chat_id, discussion_entity = await self._resolve_linked_discussion_entity(
-            worker, channel_entity, channel_platform_id
+            worker,
+            channel_entity,
+            channel_platform_id,
+            startup_limits=startup_limits,
         )
         if not linked_chat_id or discussion_entity is None:
-            return
+            return False
         discussion_platform_id = str(linked_chat_id)
 
         await self._upsert_chat(discussion_entity)
@@ -1851,13 +2154,22 @@ class TelegramCollector(
         members_collected = 0
         messages_collected = 0
         record_visit = True
+        visit_recorded = False
+        message_limit = self._discussion_message_limit
+        if startup_limits:
+            startup_message_limit = 50
+            message_limit = (
+                startup_message_limit
+                if message_limit is None
+                else min(message_limit, startup_message_limit)
+            )
 
         try:
             if not already_member:
                 if not await self._consume_join_budget():
                     abort_reason = "join_budget"
                     record_visit = False
-                    return
+                    return False
                 logger.info(
                     "[worker=%d] Joining discussion group %s (%s) for channel %s",
                     worker.worker_id, discussion_title, discussion_platform_id, channel_platform_id,
@@ -1872,9 +2184,15 @@ class TelegramCollector(
 
             # Scrape members.
             members_collected = await self.collect_chat_members(
-                discussion_entity.id, worker=worker
+                discussion_entity.id,
+                worker=worker,
+                max_participants=100 if startup_limits else None,
+                sleep_on_flood_wait=not startup_limits,
             )
-            if self._admin_log_enabled:
+            if startup_limits and not self._worker_can_resolve(worker):
+                abort_reason = "flood_wait"
+                return discussion_uuid is not None
+            if self._admin_log_enabled and not startup_limits:
                 try:
                     await self._poll_admin_logs(worker, discussion_entity)
                 except Exception as exc:
@@ -1884,7 +2202,7 @@ class TelegramCollector(
             msg_count = 0
             async for message in client.iter_messages(
                 discussion_entity,
-                limit=self._discussion_message_limit,
+                limit=message_limit,
             ):
                 if self._stop.is_set():
                     abort_reason = "stop_signal"
@@ -1912,7 +2230,7 @@ class TelegramCollector(
 
         except Exception as exc:
             if _is_flood_wait(exc):
-                await self._handle_flood_wait(worker, exc)
+                await self._handle_flood_wait(worker, exc, sleep=not startup_limits)
                 abort_reason = "flood_wait"
             else:
                 logger.error("Discussion spider failed for %s: %s", discussion_platform_id, exc)
@@ -1920,16 +2238,32 @@ class TelegramCollector(
 
         finally:
             left_at = None
+            pending_leave_retry = False
             if joined_this_pass:
-                try:
-                    logger.info(
-                        "[worker=%d] Leaving discussion group %s",
-                        worker.worker_id, discussion_title,
-                    )
-                    await client(LeaveChannelRequest(discussion_entity))
-                    left_at = datetime.now(timezone.utc)
-                except Exception as leave_exc:
-                    logger.debug("LeaveChannelRequest failed: %s", leave_exc)
+                if startup_limits and not self._worker_can_resolve(worker):
+                    pending_leave_retry = True
+                    abort_reason = "pending_leave"
+                else:
+                    try:
+                        logger.info(
+                            "[worker=%d] Leaving discussion group %s",
+                            worker.worker_id, discussion_title,
+                        )
+                        await client(LeaveChannelRequest(discussion_entity))
+                        left_at = datetime.now(timezone.utc)
+                    except Exception as leave_exc:
+                        if startup_limits and self._is_not_participant_error(leave_exc):
+                            left_at = datetime.now(timezone.utc)
+                        elif startup_limits:
+                            if _is_flood_wait(leave_exc):
+                                await self._handle_flood_wait(worker, leave_exc, sleep=False)
+                            pending_leave_retry = True
+                            abort_reason = "pending_leave"
+                        else:
+                            logger.debug(
+                                "LeaveChannelRequest failed (%s)",
+                                type(leave_exc).__name__,
+                            )
             else:
                 logger.debug(
                     "[worker=%d] Keeping existing discussion membership for %s",
@@ -1939,13 +2273,14 @@ class TelegramCollector(
             # Record the visit.
             if discussion_uuid is not None and record_visit:
                 async with self.pool.acquire() as conn:
-                    await conn.execute(
+                    visit_id = await conn.fetchval(
                         """
                         INSERT INTO telegram_discussion_visits (
                             channel_chat_id, discussion_chat_id,
                             account_name, joined_at, left_at,
                             members_collected, messages_collected, abort_reason
                         ) VALUES ($1, $2, $3, NOW(), $4, $5, $6, $7)
+                        RETURNING id
                         """,
                         channel_uuid,
                         discussion_uuid,
@@ -1955,14 +2290,20 @@ class TelegramCollector(
                         messages_collected,
                         abort_reason,
                     )
+                    visit_recorded = True
+                    if pending_leave_retry:
+                        self._schedule_discussion_leave_retry(
+                            worker, discussion_platform_id, visit_id
+                        )
 
         logger.info(
             "[worker=%d] Discussion spider done: channel=%s discussion=%s members=%d msgs=%d limit=%s joined=%s left=%s abort=%s",
             worker.worker_id, channel_platform_id, discussion_platform_id,
             members_collected, messages_collected,
-            "all" if self._discussion_message_limit is None else self._discussion_message_limit,
+            "all" if message_limit is None else message_limit,
             joined_this_pass, left_at is not None, abort_reason,
         )
+        return visit_recorded
 
     async def _upsert_chat(self, entity):
         async with self.pool.acquire() as conn:
@@ -4501,6 +4842,7 @@ class TelegramCollector(
     # ==================================================================
 
     async def cleanup(self):
+        self._stop.set()
         self._realtime_running = False
         await self._flush_account_pool_state()
         try:
@@ -4529,6 +4871,13 @@ class TelegramCollector(
             except Exception:
                 pass
             self._hot_reload_task = None
+        pending_leave_tasks = tuple(self._discussion_leave_tasks)
+        for task in pending_leave_tasks:
+            task.cancel()
+        if pending_leave_tasks:
+            await asyncio.gather(*pending_leave_tasks, return_exceptions=True)
+        self._discussion_leave_tasks.clear()
+        self._discussion_leave_visit_ids.clear()
         for w in self._workers:
             await w.disconnect()
         self._workers = []
