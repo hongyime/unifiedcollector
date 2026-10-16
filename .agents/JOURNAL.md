@@ -970,3 +970,7 @@ Telegram remains behind four active FloodWaits through 06:22:07 UTC. At 01:33 UT
 2026-10-16 05:13 UTC: Search plan check: 10 active terms exactly (3 usernames, 3 keywords, 2 hashtags, 2 full names); none has zero results. Last 12h: 166 queries/29 filetype, 7,622 results, 42 indexed documents (41 with text); all-time document formats include 64 text-extracted PDFs, 11 text files, 8 JPG metadata rows, and 1 metadata-only DOC. Download backlog remains 247 pending, with no live claims.
 
 2026-10-16 05:15 UTC: Search queue advanced from 42/247 complete/pending to 56/233, with 0 claimed; latest query row was 05:12 UTC. No provider lock or cooldown was manually changed.
+
+2026-10-16 05:18 UTC: Two Docker/host pressure samples 37 seconds apart: PostgreSQL 271.40% then 280.41% CPU, 2.473/2.467 GiB of 4 GiB; musicstream 244.95% then 265.73% CPU. Host CPU PSI `some avg10` rose 9.64%→18.54%; I/O PSI showed `some avg10` 13.70%→13.67% and `full avg10` 8.08%→3.77%. Other workloads contribute; no PG setting was changed. Keep optional public spidering disabled.
+
+2026-10-16 05:20 UTC: Search queue 63 complete / 226 pending / 0 claimed; latest query 05:18 UTC. Database had 3 granted advisory locks system-wide; no restart or lock intervention. Rate-limit summary: Lemon8 2×429/12h, latest 02:38 with 903s cooldown (expired); Instagram 23×401/12h, latest 05:00. Sampled last 15m has 0 events for either source.
