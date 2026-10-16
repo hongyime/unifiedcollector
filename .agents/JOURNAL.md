@@ -1026,3 +1026,9 @@ Telegram remains behind four active FloodWaits through 06:22:07 UTC. At 01:33 UT
 2026-10-16 06:07 UTC: Cookie-vault health confirms a 06:06 snapshot with 158 cookies and zero consecutive failures; cookie values remain unread.
 
 2026-10-16 06:08 UTC: PostgreSQL sampled at 321.45% CPU/2.595 GiB. Since the ~05:54 baseline, temp activity rose by 96 files/~1.88 GB, WAL by ~67 MB, and timed checkpoints by 3; interval buffer-hit ratio was ~88%. Host I/O PSI reached 35.5% some / 23.9% full avg10. Five active queries were under 10s, with one DataFileRead wait. Prioritize identifying spill/read-heavy SQL; no settings changed.
+
+2026-10-16 06:10 UTC: Search queue is 91 complete / 198 pending / 0 claimed, with 91 indexed documents/12h (90 with text). No new rate limits in the last 15m. One Lemon8 cooldown ends at 06:12:28 UTC and one Telegram cooldown at 06:22:07 UTC. Cookie-vault health remains true with 0 failures.
+
+2026-10-16 06:12 UTC: Confirmed the Lemon8 943-second backoff expired at 06:12:28 UTC. No active Lemon8 limit and no rate-limit event in the last 15m. Telegram still has one account cooldown through 06:22:07 UTC.
+
+2026-10-16 06:13 UTC: Telegram has 3 recent discussion-channel dedup rows with expirations from 06:21:43 to 06:41:46 UTC; 2 earlier visit records have already aged out. Member refreshes reached 658 rows across 102 chats; 2 polls refreshed/12h were anonymous. Check for new discussion visits as dedup entries expire; never vote.
