@@ -143,6 +143,7 @@ class TelegramCollector(
         self._workers: list[TelegramWorker] = []
         self._primary_client = None  # for HubNotifier/BotPool/etc that expect a single client
         self._account_state_repo: AccountStateRepository | None = None
+        self._spider_queue_recovered = False
         self._sem = asyncio.Semaphore(3)
         self._batch_size = int(os.getenv("TELEGRAM_BATCH_SIZE", "100"))
         self._max_media_size = int(os.getenv("TELEGRAM_MAX_MEDIA_SIZE_MB", "50")) * 1024 * 1024
@@ -831,6 +832,7 @@ class TelegramCollector(
         logger.info("[telegram.collect] calling _load_accounts_from_db")
         await self._load_accounts_from_db()
         await self._restore_account_pool_state()
+        await self._recover_interrupted_spider_queue()
 
         logger.info("[telegram.collect] calling _spawn_workers")
         self._workers = await self._spawn_workers()
@@ -1193,6 +1195,44 @@ class TelegramCollector(
             processed,
             attempted,
         )
+
+    async def _recover_interrupted_spider_queue(self) -> int:
+        """Return abandoned processing jobs to pending once before workers start.
+
+        The queue has no lease timestamp separate from its enqueue timestamp, so
+        age-based reclamation can steal a long-running backfill from a live worker.
+        This method runs before this collector spawns any workers; at that point
+        any `processing` row belongs to a prior process that has stopped.
+        """
+        if self.pool is None or self._spider_queue_recovered:
+            return 0
+        self._spider_queue_recovered = True
+        try:
+            async with self.pool.acquire() as conn:
+                recovered = await conn.fetchval(
+                    """
+                    WITH reset AS (
+                        UPDATE telegram_spider_queue
+                        SET status = 'pending'
+                        WHERE status = 'processing'
+                        RETURNING 1
+                    )
+                    SELECT count(*) FROM reset
+                    """
+                )
+            count = int(recovered or 0)
+            if count:
+                logger.warning(
+                    "[telegram.collect] recovered %d interrupted spider queue item(s)",
+                    count,
+                )
+            return count
+        except Exception as exc:
+            logger.warning(
+                "[telegram.collect] spider queue recovery failed: %s",
+                type(exc).__name__,
+            )
+            return 0
 
     async def _mark_spider_status(self, chat_id: str, status: str, err: str):
         async with self.pool.acquire() as conn:
