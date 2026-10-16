@@ -52,3 +52,7 @@ Search batch advanced from 9 to 2 live claims: 68 complete / 219 pending. Let th
 ## 2026-10-16 05:27 UTC addendum
 
 The 05:25 Search batch settled: 68 complete / 221 pending / 0 claimed. Two rows returned to pending retry. Search stayed healthy; the sampled last 15 minutes had 2 queries and no rate-limit events.
+
+## 2026-10-16 05:34 UTC addendum
+
+The 155 Snapchat profile rows/12h are historical pre-restart output. Cross-platform profile probes stopped at 01:21 UTC before the Pinterest/Snapchat restart at 01:22 UTC; none occurred since with public discovery set to 0.

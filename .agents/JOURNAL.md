@@ -984,3 +984,9 @@ Telegram remains behind four active FloodWaits through 06:22:07 UTC. At 01:33 UT
 2026-10-16 05:27 UTC: Search live batch advanced: 7 of 9 claimed docs completed; 2 remain claimed, 68 complete / 219 pending. Search health remains good; do not interrupt the remaining claims.
 
 2026-10-16 05:27 UTC: Search batch settled at 68 complete / 221 pending / 0 claimed; two claimed rows returned to pending retry. Search is healthy, with 2 queries and 0 rate-limit events in the sampled last 15 minutes.
+
+2026-10-16 05:29 UTC: Fresh Compose status: all 30 containers are running with no unhealthy/stopped service. Exact old names `collector_light`, `collector_lowrisk`, and `instagram_ingest` are absent from `docker/` and `src/`.
+
+2026-10-16 05:33 UTC: Native detail aggregates: Airbnb 3/3 listings have description, photos, price, location, amenities, and availability; 3/3 hosts have avatar, bio, and response rate; 14/14 reviews have text, rating, and date. Snapchat had 155 public profile probes/12h, including 145 display names and 0 explicit verified-badge flags.
+
+2026-10-16 05:34 UTC: Clarified Snapchat rolling-window profile rows: cross-platform probe timestamps stop at 01:21 UTC, before Pinterest/Snapchat containers restarted at 01:22 UTC. Since restart, env is `NATIVE_PUBLIC_DISCOVERY_ENABLED=0` and no cross-platform profile probes occurred; those targets remain parked.
