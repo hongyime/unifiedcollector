@@ -1019,7 +1019,122 @@ class TelegramCollector(
         # messages stream in. Gated so it can be disabled if ever needed.
         if os.getenv("TELEGRAM_REALTIME_ENABLED", "true").lower() == "true":
             logger.info("[telegram.collect] entering realtime listener (parks until stop)")
-            await self.collect_realtime()
+            poll_vote_refresh_task = asyncio.create_task(
+                self._poll_vote_refresh_loop(),
+                name="telegram-poll-vote-refresh",
+            )
+            try:
+                await self.collect_realtime()
+            finally:
+                poll_vote_refresh_task.cancel()
+                await asyncio.gather(poll_vote_refresh_task, return_exceptions=True)
+        else:
+            await self._refresh_poll_vote_batch()
+
+    async def _poll_vote_refresh_loop(self) -> None:
+        """Refresh a small, hourly batch of existing public group polls.
+
+        Poll voter enumeration used to run only when a poll message was first
+        ingested or changed. Older polls therefore never got voter rows unless
+        Telegram emitted another update for them. Keep this pass deliberately
+        small: one poll per connected account each hour, and only for
+        non-anonymous group polls. Telegram forbids voter enumeration for
+        broadcast-channel polls, and the collector never casts votes.
+        """
+        while True:
+            try:
+                refreshed = await self._refresh_poll_vote_batch()
+                if refreshed:
+                    logger.info(
+                        "[telegram.poll] checked %d existing group poll(s)",
+                        refreshed,
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning("[telegram.poll] voter refresh batch failed", exc_info=True)
+            await asyncio.sleep(3600)
+
+    async def _refresh_poll_vote_batch(self) -> int:
+        """Claim at most one stale group poll per available account and inspect it."""
+        if self.pool is None or not self._workers:
+            return 0
+        workers = [worker for worker in self._workers if self._worker_can_resolve(worker)]
+        if not workers:
+            return 0
+
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                WITH candidates AS (
+                    SELECT p.message_id, m.platform_message_id,
+                           c.platform_chat_id, c.id AS chat_uuid
+                      FROM telegram_polls p
+                      JOIN telegram_messages m ON m.id = p.message_id
+                      JOIN telegram_chats c ON c.id = m.chat_id
+                     WHERE p.is_anonymous = FALSE
+                       AND p.total_voters > 0
+                       AND c.type IN ('group', 'supergroup')
+                       AND (
+                            p.voters_checked_at IS NULL
+                            OR p.voters_checked_at <= NOW() - INTERVAL '24 hours'
+                       )
+                     ORDER BY p.voters_checked_at ASC NULLS FIRST,
+                              p.refreshed_at ASC,
+                              p.message_id
+                     LIMIT $1
+                     FOR UPDATE OF p SKIP LOCKED
+                )
+                UPDATE telegram_polls p
+                   SET voters_checked_at = NOW()
+                  FROM candidates c
+                 WHERE p.message_id = c.message_id
+                RETURNING c.message_id, c.platform_message_id,
+                          c.platform_chat_id, c.chat_uuid
+                """,
+                len(workers),
+            )
+
+        checked = 0
+        for index, row in enumerate(rows):
+            preferred = workers[index % len(workers)]
+            platform_message_id = str(row["platform_message_id"] or "")
+            chat_message_ids = platform_message_id.split(":", 1)
+            if len(chat_message_ids) != 2:
+                logger.debug("[telegram.poll] skipped poll with malformed message reference")
+                continue
+            try:
+                message_id = int(chat_message_ids[1])
+                worker, entity = await self._resolve_entity_any_worker(
+                    preferred, str(row["platform_chat_id"])
+                )
+                await self.wait_rate_limit("telegram.org")
+                message = await worker.client.get_messages(entity, ids=message_id)
+                if isinstance(message, (list, tuple)):
+                    message = message[0] if message else None
+                if message is None or getattr(message, "poll", None) is None:
+                    continue
+                voter_count = await self._enumerate_poll_votes_and_enqueue(
+                    worker,
+                    message,
+                    str(row["platform_chat_id"]),
+                    row["message_id"],
+                    chat_uuid=row["chat_uuid"],
+                )
+                checked += 1
+                if voter_count:
+                    logger.info(
+                        "[telegram.poll] processed %d voter record(s) for an existing group poll",
+                        voter_count,
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.info(
+                    "[telegram.poll] existing poll refresh deferred (%s)",
+                    type(exc).__name__,
+                )
+        return checked
 
     async def _spider_enqueue(self, rows, source_tag: str, priority: int = 8) -> int:
         """P3-2: bounded enqueue into telegram_spider_queue with backpressure.
@@ -2905,11 +3020,26 @@ class TelegramCollector(
                     if _is_flood_wait(exc):
                         await self._handle_flood_wait(worker, exc)
                     else:
-                        logger.debug(
-                            "GetPollVotesRequest failed for msg=%s: %s",
-                            getattr(message, "id", "?"),
-                            type(exc).__name__,
-                        )
+                        error_name = type(exc).__name__
+                        error_code = str(
+                            getattr(exc, "message", "") or exc
+                        ).upper()
+                        if (
+                            error_name in {"PollVoteRequiredError", "BroadcastForbiddenError"}
+                            or "POLL_VOTE_REQUIRED" in error_code
+                            or "BROADCAST_FORBIDDEN" in error_code
+                        ):
+                            logger.info(
+                                "Telegram does not expose voters for poll msg=%s (%s); no votes were cast",
+                                getattr(message, "id", "?"),
+                                error_name,
+                            )
+                        else:
+                            logger.debug(
+                                "GetPollVotesRequest failed for msg=%s: %s",
+                                getattr(message, "id", "?"),
+                                error_name,
+                            )
                     break
 
                 votes = getattr(resp, "votes", None) or []
