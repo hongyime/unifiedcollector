@@ -990,3 +990,5 @@ Telegram remains behind four active FloodWaits through 06:22:07 UTC. At 01:33 UT
 2026-10-16 05:33 UTC: Native detail aggregates: Airbnb 3/3 listings have description, photos, price, location, amenities, and availability; 3/3 hosts have avatar, bio, and response rate; 14/14 reviews have text, rating, and date. Snapchat had 155 public profile probes/12h, including 145 display names and 0 explicit verified-badge flags.
 
 2026-10-16 05:34 UTC: Clarified Snapchat rolling-window profile rows: cross-platform probe timestamps stop at 01:21 UTC, before Pinterest/Snapchat containers restarted at 01:22 UTC. Since restart, env is `NATIVE_PUBLIC_DISCOVERY_ENABLED=0` and no cross-platform profile probes occurred; those targets remain parked.
+
+2026-10-16 05:38 UTC: User approved Airbnb Wishlist listings as a collection seed. Rechecked the existing Airbnb `/wishlists` tab through CDP without opening another tab or reading list names: route loaded with no visible login prompt, but 0 room links, Wishlist links, or images. The capture path is present; no Wishlist listing IDs are available yet. All 30 UnifiedCollector services are running; no service changes made.
