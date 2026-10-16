@@ -819,7 +819,8 @@ class Lemon8Collector(BaseCollector):
                         post_url  = COALESCE(lemon8_posts.post_url, EXCLUDED.post_url),
                         collection_surface = CASE WHEN EXCLUDED.collection_surface='unknown'
                                                   THEN lemon8_posts.collection_surface
-                                                  ELSE EXCLUDED.collection_surface END
+                                                  ELSE EXCLUDED.collection_surface END,
+                        collected_at = NOW()
                     """,
                     note_id, profile_uuid, username, url, post_url, collection_surface,
                 )
@@ -838,7 +839,8 @@ class Lemon8Collector(BaseCollector):
                         post_url = COALESCE(lemon8_posts.post_url, EXCLUDED.post_url),
                         collection_surface = CASE WHEN EXCLUDED.collection_surface='unknown'
                                                   THEN lemon8_posts.collection_surface
-                                                  ELSE EXCLUDED.collection_surface END
+                                                  ELSE EXCLUDED.collection_surface END,
+                        collected_at = NOW()
                     """,
                     note_id, profile_uuid, username, url, post_url, collection_surface,
                 )
@@ -894,7 +896,8 @@ class Lemon8Collector(BaseCollector):
                         metadata      = EXCLUDED.metadata,
                         collection_surface = CASE WHEN EXCLUDED.collection_surface='unknown'
                                                   THEN lemon8_posts.collection_surface
-                                                  ELSE EXCLUDED.collection_surface END
+                                                  ELSE EXCLUDED.collection_surface END,
+                        collected_at  = NOW()
                 """,
                     platform_post_id, profile_uuid, user_id,
                     post_data.get("title"), post_data.get("description"),
