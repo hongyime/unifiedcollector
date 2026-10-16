@@ -143,7 +143,7 @@ def test_lemon8_runs_as_visible_scraper_alongside_headless_collector():
     content = _read("extension/content.js")
 
     for text in (background, platforms):
-        assert '"https://www.lemon8-app.com/topic/singapore?region=sg"' in text
+        assert '"https://www.lemon8-app.com/feed/foryou"' in text
         lemon8_line = next(line for line in text.splitlines() if 'id: "lemon8"' in line)
         assert "extraUrls" not in lemon8_line
         assert "scraper: true" in lemon8_line

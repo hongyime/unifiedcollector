@@ -1312,8 +1312,8 @@ function shouldNormalizeSingleFeedTab(p, tab, reason) {
   // routed away from the working feed URL) should snap back to p.url on the
   // next watchdog / startup / install / manual-reload sweep. x is included
   // because failedScript URLs sit in that same "wandered off canonical" bucket;
-  // lemon8 is included because the working /topic/<slug> feed is easy to
-  // stray from into /@handle / /post/<id> subpaths that have lower yield.
+  // lemon8 is included because the populated /feed/foryou route is the
+  // canonical feed; normalize away from lower-yield profile/post subpaths.
   const NORMALIZE_PLATFORMS = new Set(["instagram", "threads", "tiktok", "x", "facebook", "strava", "lemon8"]);
   if (!NORMALIZE_PLATFORMS.has(p.id)) return false;
   try {
