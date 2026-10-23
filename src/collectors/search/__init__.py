@@ -90,6 +90,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+import dataclasses
 import hashlib
 import io
 import json
@@ -697,6 +698,33 @@ def _try_import_fitz():
 # Collector
 # ---------------------------------------------------------------------------
 
+@dataclasses.dataclass
+class _PersistOutcome:
+    """Durable persistence outcome for one query's provider hits.
+
+    ``persisted`` rows were newly inserted, ``deduped`` rows already existed
+    (conflict no-op), ``failed`` rows could not be stored. Provider hits are
+    never counted as stored documents: callers must treat ``len(hits)`` as a
+    provider count and only ``persisted`` (+ already-stored ``deduped``) as
+    durable.
+    """
+
+    hits: list[dict]
+    persisted: int = 0
+    deduped: int = 0
+    failed: int = 0
+    error: Optional[str] = None
+
+    @property
+    def complete(self) -> bool:
+        """True when every hit reached a terminal stored state."""
+        return self.failed == 0
+
+
+class SearchPersistenceError(RuntimeError):
+    """Raised when a query's hits were not durably persisted in full."""
+
+
 class SearchCollector(BaseCollector):
     """Multi-engine search → spider → quality-gated download.
 
@@ -788,6 +816,9 @@ class SearchCollector(BaseCollector):
         self._search_rate_limit_streaks: dict[str, int] = {}
         self._last_search_query_rate_limited = False
         self._last_search_query_lock_skipped = False
+        # None until search_query finalises a query; collect() relies on it
+        # being set whenever it reads past the lock-skip check.
+        self._last_persist_outcome: Optional[_PersistOutcome] = None
 
         # Register Serper quota with the unified tracker if available.
         self._register_serper_quota()
@@ -1729,10 +1760,24 @@ class SearchCollector(BaseCollector):
                 results = await self.search_query(query, postprocess=False)
                 if self._last_search_query_lock_skipped:
                     break
+                persist = self._last_persist_outcome
+                if persist is None:
+                    # search_query override (subclass/test) with no outcome.
+                    persist = _PersistOutcome(hits=results)
+                if not persist.complete:
+                    # Provider hits are not stored documents: raise so the
+                    # failure path below keeps the query pending/retryable
+                    # instead of advancing the checkpoint on a partial persist.
+                    raise SearchPersistenceError(
+                        f"search persistence incomplete for {query!r}: persisted="
+                        f"{persist.persisted} deduped={persist.deduped} failed="
+                        f"{persist.failed} of {len(results)} hits"
+                        + (f" ({persist.error})" if persist.error else "")
+                    )
                 if query in dynamic_by_query:
                     await self._mark_dynamic_search_query(
                         dynamic_by_query[query],
-                        result_count=len(results),
+                        result_count=persist.persisted,
                         completed=not self._last_search_query_rate_limited,
                     )
                 document_urls: set[str] = set()
@@ -1808,12 +1853,15 @@ class SearchCollector(BaseCollector):
         postprocess: bool = True,
     ) -> list[dict]:
         self._last_search_query_lock_skipped = False
+        self._last_persist_outcome = None
         async with self._shared_search_engine_mutex() as acquired:
             if not acquired:
                 self._last_search_query_lock_skipped = True
                 return []
             hits = await self._search_query_unlocked(query, engines=engines)
-        return await self._finalise_query(query, hits, postprocess=postprocess)
+        outcome = await self._finalise_query(query, hits, postprocess=postprocess)
+        self._last_persist_outcome = outcome
+        return outcome.hits
 
     async def _search_query_unlocked(
         self,
@@ -2413,23 +2461,51 @@ class SearchCollector(BaseCollector):
         hits: list[dict],
         *,
         postprocess: bool = True,
-    ) -> list[dict]:
-        """Persist the query+hits then optionally fetch their assets."""
+    ) -> _PersistOutcome:
+        """Persist the query+hits then optionally fetch their assets.
+
+        Returns durable counts: ``persisted``/``deduped``/``failed`` never
+        treat provider hits as stored rows. DB errors do not raise; they are
+        recorded on the outcome so callers can leave the query retryable
+        instead of completing it on a partial persist.
+        """
         if not hits:
-            return []
+            return _PersistOutcome(hits=[])
+        outcome = _PersistOutcome(hits=hits)
+        if self.pool is None:
+            if postprocess:
+                await self._postprocess_query_results(query, hits)
+            logger.info(
+                "Search %r: %d results (db unavailable, not persisted, tor=%s)",
+                query, len(hits), os.getenv("TOR_PROXY_ENABLED") == "1",
+            )
+            return outcome
         try:
             await self._upsert_query(query)
             for hit in hits:
-                if await self._upsert_result(query, hit):
+                status = await self._upsert_result(query, hit)
+                if status == "persisted":
+                    outcome.persisted += 1
                     self._progress_count += 1
+                elif status == "deduped":
+                    outcome.deduped += 1
+                else:
+                    outcome.failed += 1
         except Exception as e:
+            # Hits with no terminal status (this one and the rest) failed.
+            outcome.failed = len(hits) - outcome.persisted - outcome.deduped
+            outcome.error = f"{type(e).__name__}: {e}"
             logger.warning("DB persist failed for %r: %s", query, e)
 
         if postprocess:
             await self._postprocess_query_results(query, hits)
 
-        logger.info("Search %r: %d results persisted (tor=%s)", query, len(hits), os.getenv("TOR_PROXY_ENABLED") == "1")
-        return hits
+        logger.info(
+            "Search %r: %d/%d results persisted, %d deduped, %d failed (tor=%s)",
+            query, outcome.persisted, len(hits), outcome.deduped,
+            outcome.failed, os.getenv("TOR_PROXY_ENABLED") == "1",
+        )
+        return outcome
 
     async def _postprocess_query_results(
         self,
@@ -2480,16 +2556,22 @@ class SearchCollector(BaseCollector):
                 query, "waterfall",
             )
 
-    async def _upsert_result(self, query: str, hit: dict) -> bool:
+    async def _upsert_result(self, query: str, hit: dict) -> str:
+        """Store one hit; return "persisted", "deduped", or "failed".
+
+        "failed" covers hits that cannot attach to a stored query row;
+        unexpected DB errors propagate so `_finalise_query` counts the
+        remaining hits as failed instead of silently dropped.
+        """
         if self.pool is None:
-            return False
+            return "failed"
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT id FROM search_queries WHERE query = $1 AND engine = $2",
                 query, "waterfall",
             )
             if not row:
-                return False
+                return "failed"
             result = await conn.fetchrow(
                 """
                 INSERT INTO search_results
@@ -2506,7 +2588,7 @@ class SearchCollector(BaseCollector):
                 hit.get("domain") or urlparse(hit["url"]).netloc,
                 hit.get("date_published"),
             )
-            return result is not None
+            return "persisted" if result is not None else "deduped"
 
     # ------------------------------------------------------------------ #
     # Spider (HTML → image/PDF URL extraction)

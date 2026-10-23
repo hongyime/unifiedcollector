@@ -576,7 +576,9 @@ async def test_finalise_query_persists_query_and_results(monkeypatch):
     ]
     out = await coll._finalise_query("q", hits)
 
-    assert out == hits
+    assert out.hits == hits
+    assert (out.persisted, out.deduped, out.failed) == (2, 0, 0)
+    assert out.complete
     # One execute call for the query upsert. Results use INSERT .. RETURNING
     # so duplicate URL conflicts can be observed as no-progress.
     assert pool._conn.execute.await_count == 1
@@ -604,7 +606,8 @@ async def test_finalise_query_does_not_count_duplicate_results_as_progress(monke
     ]
     out = await coll._finalise_query("q", hits)
 
-    assert out == hits
+    assert (out.persisted, out.deduped, out.failed) == (1, 1, 0)
+    assert out.complete
     assert pool._conn.fetchrow.await_count == 4
     assert coll.progress_count == 1
 
@@ -616,8 +619,32 @@ async def test_finalise_query_empty_short_circuits(monkeypatch):
     pool = _make_pool()
     coll.set_pool(pool)
     out = await coll._finalise_query("q", [])
-    assert out == []
+    assert out.hits == []
+    assert out.persisted == 0 and out.deduped == 0 and out.failed == 0
     pool._conn.execute.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_finalise_query_reports_partial_persistence_without_raising(monkeypatch):
+    _set_clean_env(monkeypatch)
+    coll = SearchCollector()
+    pool = _make_pool()
+    # Two hits insert, then the DB dies on the third hit's INSERT.
+    pool._conn.fetchrow.side_effect = [
+        {"id": "query-uuid"}, {"id": "result-1"},
+        {"id": "query-uuid"}, {"id": "result-2"},
+        Exception("connection reset"),
+    ]
+    coll.set_pool(pool)
+
+    hits = [{"url": f"https://a.com/{i}"} for i in range(5)]
+    out = await coll._finalise_query("q", hits, postprocess=False)
+
+    # 5 provider hits != 5 stored rows: the rest count as failed.
+    assert (out.persisted, out.deduped, out.failed) == (2, 0, 3)
+    assert not out.complete
+    assert "connection reset" in out.error
+    assert coll.progress_count == 2
 
 
 # ── download_media ─────────────────────────────────────────────────────────
@@ -918,6 +945,10 @@ async def test_collect_advances_dynamic_terms_before_result_postprocessing(monke
 
     async def search(_query, *, postprocess=True):
         events.append(("search", postprocess))
+        # Mirror the real search_query contract: report what persisted.
+        coll._last_persist_outcome = search_mod._PersistOutcome(
+            hits=hits, persisted=len(hits),
+        )
         return hits
 
     async def mark(_item, *, result_count, completed):
@@ -968,6 +999,122 @@ async def test_collect_retries_dynamic_query_after_rate_limit(monkeypatch):
     coll._mark_dynamic_search_query.assert_awaited_once_with(
         item, result_count=0, completed=False,
     )
+
+
+@pytest.mark.asyncio
+async def test_collect_completes_dynamic_query_on_full_persistence(monkeypatch):
+    _set_clean_env(monkeypatch)
+    monkeypatch.setenv("SEARCH_QUERY_DELAY_SECONDS", "0")
+    coll = SearchCollector()
+    pool = _make_pool()
+    coll.set_pool(pool)
+    item = {
+        "term": "alice",
+        "query": 'site:s3.amazonaws.com alice',
+        "next_template_cursor": 1,
+    }
+    hits = [{"url": f"https://a.com/{i}"} for i in range(5)]
+    coll._prepare_dynamic_search_queries = AsyncMock(return_value=[item])
+    coll._search_query_unlocked = AsyncMock(return_value=hits)
+    coll._process_direct_document_backlog = AsyncMock()
+    coll._enqueue_direct_document_hits = AsyncMock()
+    coll.checkpoint.save_progress = AsyncMock()
+    coll.heartbeat_source_health = AsyncMock()
+    coll._mark_dynamic_search_query = AsyncMock()
+
+    await coll.collect([])
+
+    # 5 hits, 5 persisted -> query completes with the persisted count.
+    coll._mark_dynamic_search_query.assert_awaited_once_with(
+        item, result_count=5, completed=True,
+    )
+    assert coll._last_persist_outcome.persisted == 5
+    coll.checkpoint.save_progress.assert_awaited_once_with(item["query"])
+
+
+@pytest.mark.asyncio
+async def test_collect_partial_persistence_leaves_dynamic_query_retryable(monkeypatch):
+    _set_clean_env(monkeypatch)
+    monkeypatch.setenv("SEARCH_QUERY_DELAY_SECONDS", "0")
+    coll = SearchCollector()
+    pool = _make_pool()
+    # Two hits insert, then the DB dies on the third hit's INSERT.
+    pool._conn.fetchrow.side_effect = [
+        {"id": "query-uuid"}, {"id": "result-1"},
+        {"id": "query-uuid"}, {"id": "result-2"},
+        {"id": "query-uuid"}, Exception("db down"),
+    ]
+    coll.set_pool(pool)
+    item = {
+        "term": "alice",
+        "query": 'site:s3.amazonaws.com alice',
+        "next_template_cursor": 1,
+    }
+    hits = [{"url": f"https://a.com/{i}"} for i in range(5)]
+    coll._prepare_dynamic_search_queries = AsyncMock(return_value=[item])
+    coll._search_query_unlocked = AsyncMock(return_value=hits)
+    coll._process_direct_document_backlog = AsyncMock()
+    coll._enqueue_direct_document_hits = AsyncMock()
+    coll.checkpoint.save_progress = AsyncMock()
+    coll.heartbeat_source_health = AsyncMock()
+    coll._mark_dynamic_search_query = AsyncMock()
+    coll.send_to_dlq = AsyncMock()
+
+    await coll.collect([])
+
+    # Regression: 5 hits / 2 stored must NOT read as success.
+    coll._mark_dynamic_search_query.assert_awaited_once_with(item, completed=False)
+    assert not coll._mark_dynamic_search_query.await_args.kwargs.get(
+        "completed", True,
+    )
+    # The failure is surfaced with the truthful counts, not the hit count.
+    dlq_args = coll.send_to_dlq.await_args.args
+    assert dlq_args[0] == item["query"]
+    assert "persisted=2" in dlq_args[2]
+    assert "failed=3" in dlq_args[2]
+    # No checkpoint advance and no health heartbeat on a partial persist.
+    coll.checkpoint.save_progress.assert_not_awaited()
+    assert coll.heartbeat_source_health.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_collect_dynamic_result_count_equals_persisted_rows_with_dedupe(monkeypatch):
+    _set_clean_env(monkeypatch)
+    monkeypatch.setenv("SEARCH_QUERY_DELAY_SECONDS", "0")
+    coll = SearchCollector()
+    pool = _make_pool()
+    # 5 hits: 3 new rows, 2 conflicts deduped via ON CONFLICT DO NOTHING.
+    pool._conn.fetchrow.side_effect = [
+        {"id": "query-uuid"}, {"id": "result-1"},
+        {"id": "query-uuid"}, None,
+        {"id": "query-uuid"}, {"id": "result-3"},
+        {"id": "query-uuid"}, None,
+        {"id": "query-uuid"}, {"id": "result-5"},
+    ]
+    coll.set_pool(pool)
+    item = {
+        "term": "alice",
+        "query": 'site:s3.amazonaws.com alice',
+        "next_template_cursor": 1,
+    }
+    hits = [{"url": f"https://a.com/{i}"} for i in range(5)]
+    coll._prepare_dynamic_search_queries = AsyncMock(return_value=[item])
+    coll._search_query_unlocked = AsyncMock(return_value=hits)
+    coll._process_direct_document_backlog = AsyncMock()
+    coll._enqueue_direct_document_hits = AsyncMock()
+    coll.checkpoint.save_progress = AsyncMock()
+    coll.heartbeat_source_health = AsyncMock()
+    coll._mark_dynamic_search_query = AsyncMock()
+
+    await coll.collect([])
+
+    # Dedupe is preserved and result_count equals persisted rows (3), not hits.
+    coll._mark_dynamic_search_query.assert_awaited_once_with(
+        item, result_count=3, completed=True,
+    )
+    outcome = coll._last_persist_outcome
+    assert (outcome.persisted, outcome.deduped, outcome.failed) == (3, 2, 0)
+    coll.checkpoint.save_progress.assert_awaited_once_with(item["query"])
 
 
 @pytest.mark.asyncio
@@ -1061,7 +1208,7 @@ async def test_search_query_releases_shared_mutex_before_finalisation(monkeypatc
 
     async def finalise(_query, hits, *, postprocess=True):
         events.append(("finalise", lock_held))
-        return hits
+        return search_mod._PersistOutcome(hits=hits)
 
     coll._collect_mutex_acquire = acquire
     coll._collect_mutex_release = release
