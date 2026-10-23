@@ -205,29 +205,43 @@ class DomainPacer:
                 needs_active_domain = self._domain_refs[domain] <= 0
             if needs_active_domain:
                 await self._active_domain_sem.acquire()
-            async with self._lock:
-                self._domain_refs[domain] += 1
-                self._active_domains.add(domain)
+            try:
+                async with self._lock:
+                    self._domain_refs[domain] += 1
+                    self._active_domains.add(domain)
+            except BaseException:
+                # Cancelled before the ref increment: hand the active-domain permit back or the cap erodes.
+                if needs_active_domain:
+                    self._active_domain_sem.release()
+                raise
 
-        sem = await self._domain_sem(domain)
-        await sem.acquire()
-        async with self._lock:
-            self._active_domains.add(domain)
-            self._inflight[domain] += 1
-            self._counters["requests_started"] += 1
-        delay = self.delay_seconds + (random.uniform(0, self.jitter_seconds) if self.jitter_seconds else 0.0)
-        if delay > 0:
-            await asyncio.sleep(delay)
+        sem: asyncio.Semaphore | None = None
+        acquired_sem = False
+        counted_inflight = False
         try:
+            sem = await self._domain_sem(domain)
+            await sem.acquire()
+            acquired_sem = True
+            async with self._lock:
+                self._active_domains.add(domain)
+                self._inflight[domain] += 1
+                counted_inflight = True
+                self._counters["requests_started"] += 1
+            delay = self.delay_seconds + (random.uniform(0, self.jitter_seconds) if self.jitter_seconds else 0.0)
+            if delay > 0:
+                await asyncio.sleep(delay)
             yield domain
         finally:
-            sem.release()
+            # Covers cancel-during-acquire and cancel-during-delay, which the yield-only finally missed.
+            if sem is not None and acquired_sem:
+                sem.release()
             release_active_domain = False
             async with self._lock:
-                if self._inflight[domain] > 0:
-                    self._inflight[domain] -= 1
-                if self._inflight[domain] <= 0:
-                    self._inflight.pop(domain, None)
+                if counted_inflight:
+                    if self._inflight[domain] > 0:
+                        self._inflight[domain] -= 1
+                    if self._inflight[domain] <= 0:
+                        self._inflight.pop(domain, None)
                 if self._domain_refs[domain] > 0:
                     self._domain_refs[domain] -= 1
                 if self._domain_refs[domain] <= 0:
