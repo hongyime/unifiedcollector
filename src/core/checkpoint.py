@@ -22,6 +22,75 @@ class CheckpointManager:
     def set_pool(self, pool):
         self._pool = pool
 
+    # --- chat-scoped cursors -------------------------------------------------
+    #
+    # Chat progress lives in dedicated service_cursors rows keyed
+    # "<service>:chat:<chat_id>" whose last_processed_id is always a numeric
+    # message id. The service-level row is chat-ambiguous and must never be
+    # used as a per-chat resume point.
+
+    def chat_cursor_key(self, chat_id: str) -> str:
+        """service_cursors primary key for one chat's numeric cursor."""
+        return f"{self._service}:chat:{chat_id}"
+
+    async def load_chat_progress(self, chat_id: str) -> int | None:
+        """Return the chat's numeric message cursor, or None when absent.
+
+        Non-numeric values (legacy/corrupt rows) are ignored and reported as
+        None; callers must treat None as "no trusted cursor" and schedule a
+        full backfill for that chat instead of silently resuming at 0.
+        """
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT last_processed_id FROM service_cursors WHERE service = $1",
+                self.chat_cursor_key(chat_id),
+            )
+        raw = row["last_processed_id"] if row else None
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return None
+
+    async def save_chat_progress(self, chat_id: str, message_id: int) -> None:
+        """Upsert one chat's numeric message cursor (atomic)."""
+        now = datetime.now(timezone.utc)
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO service_cursors
+                    (service, last_processed_id, last_processed_at, status)
+                VALUES ($1, $2, $3, 'idle')
+                ON CONFLICT (service) DO UPDATE
+                SET last_processed_id = EXCLUDED.last_processed_id,
+                    last_processed_at = EXCLUDED.last_processed_at
+                """,
+                self.chat_cursor_key(chat_id),
+                str(message_id),
+                now,
+            )
+
+    async def touch(self, status: str | None = None):
+        """Heartbeat the service row without advancing its cursor.
+
+        Advances last_processed_at only; last_processed_id is never written
+        here, so it can never be set to a chat target string. Per-chat
+        progress belongs to chat-scoped rows via save_chat_progress.
+        """
+        self.last_processed_at = datetime.now(timezone.utc)
+        if status is not None:
+            self.status = status
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE service_cursors
+                SET last_processed_at = $2, status = $3
+                WHERE service = $1
+                """,
+                self._service,
+                self.last_processed_at,
+                self.status,
+            )
+
     async def load_progress(self):
         async with self._pool.acquire() as conn:
             # Atomic upsert avoids the TOCTOU race where two workers both

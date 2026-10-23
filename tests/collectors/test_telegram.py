@@ -587,8 +587,204 @@ def test_collect_chat_checkpoints_seen_messages_not_only_media():
     assert "last_seen_message_id = int(message.id)" in block
     assert "if seen_count % self._batch_size == 0" in block
     assert "if last_seen_message_id is not None:" in block
-    assert "save_progress(str(last_seen_message_id))" in block
+    assert "save_chat_progress(chat_id, last_seen_message_id)" in block
+    assert "_resolve_chat_min_id(chat_id)" in block
+    assert "save_progress(str(last_seen_message_id))" not in block
     assert "if count % self._batch_size" not in block
+
+
+# ── chat-scoped checkpoints (task 16) ─────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_chat_cursor_store_roundtrips_numeric_and_ignores_non_numeric():
+    from src.core.checkpoint import CheckpointManager
+
+    mgr = CheckpointManager("telegram")
+    pool = _FakePool()
+    mgr.set_pool(pool)
+
+    await mgr.save_chat_progress("100200", 4567)
+    assert pool.conn.execute.await_count == 1
+    sql, key, value, _stamp = pool.conn.execute.await_args.args
+    assert "INSERT INTO service_cursors" in sql
+    assert key == "telegram:chat:100200"
+    assert value == "4567"
+
+    pool.conn.fetchrow = AsyncMock(return_value={"last_processed_id": "4567"})
+    assert await mgr.load_chat_progress("100200") == 4567
+
+    pool.conn.fetchrow = AsyncMock(return_value={"last_processed_id": "@somechannel"})
+    assert await mgr.load_chat_progress("100200") is None
+
+    pool.conn.fetchrow = AsyncMock(return_value={"last_processed_id": None})
+    assert await mgr.load_chat_progress("100200") is None
+
+    pool.conn.fetchrow = AsyncMock(return_value=None)
+    assert await mgr.load_chat_progress("100200") is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_chat_min_id_seeds_only_from_chat_cursor(monkeypatch):
+    coll = _make_collector(monkeypatch)
+    # Legacy global cursor values (numeric or target string) must never seed a chat.
+    coll.checkpoint.last_processed_id = "@legacy_target"
+    coll.checkpoint.load_chat_progress = AsyncMock(return_value=4242)
+    assert await coll._resolve_chat_min_id("1001") == 4242
+
+    coll.checkpoint.last_processed_id = "8888"
+    coll.checkpoint.load_chat_progress = AsyncMock(return_value=77)
+    assert await coll._resolve_chat_min_id("1001") == 77
+
+
+@pytest.mark.asyncio
+async def test_resolve_chat_min_id_legacy_target_schedules_full_backfill(
+    monkeypatch, caplog
+):
+    coll = _make_collector(monkeypatch)
+    coll.checkpoint.last_processed_id = "@legacy_target"
+    coll.checkpoint.load_chat_progress = AsyncMock(return_value=None)
+
+    with caplog.at_level("WARNING", logger="src.collectors.telegram"):
+        assert await coll._resolve_chat_min_id("1001") == 0
+    assert any(
+        "legacy" in r.getMessage().lower() and "backfill" in r.getMessage().lower()
+        for r in caplog.records
+    ), [r.getMessage() for r in caplog.records]
+
+
+@pytest.mark.asyncio
+async def test_resolve_chat_min_id_legacy_numeric_global_is_not_a_chat_seed(
+    monkeypatch, caplog
+):
+    coll = _make_collector(monkeypatch)
+    coll.checkpoint.last_processed_id = "8888"
+    coll.checkpoint.load_chat_progress = AsyncMock(return_value=None)
+
+    assert await coll._resolve_chat_min_id("1001") == 0
+
+
+def _stub_chat_pipeline(coll, streams_by_chat):
+    """Stub every side-effect collaborator of _collect_chat; return the
+    (min_id, entity.id) pairs observed on client.iter_messages calls."""
+
+    async def _fake_resolve(w, target):
+        entity = SimpleNamespace(
+            id=int(target), title=f"chat{target}", username=None,
+            broadcast=False, megagroup=False,
+        )
+        return w, entity
+
+    coll._resolve_entity_any_worker = AsyncMock(side_effect=_fake_resolve)
+    coll._upsert_chat = AsyncMock()
+    coll._collect_profile_photo = AsyncMock()
+    coll.wait_rate_limit = AsyncMock()
+    coll._upsert_message = AsyncMock()
+    coll._enqueue_forward_edges = AsyncMock()
+    coll._download_any_message_media = AsyncMock(return_value=True)
+    coll.collect_chat_members = AsyncMock()
+
+    observed = []
+
+    def _attach(worker):
+        def _iter_messages(*args, **kwargs):
+            observed.append((kwargs.get("min_id"), args[0].id))
+            ids = streams_by_chat[str(args[0].id)].pop(0) if streams_by_chat[
+                str(args[0].id)
+            ] else []
+            return _aiter([SimpleNamespace(id=i, sender_id=None) for i in ids])
+
+        worker.client.iter_messages = _iter_messages
+        return observed
+
+    return _attach, observed
+
+
+@pytest.mark.asyncio
+async def test_collect_chat_cursors_independent_across_chats_and_resume(monkeypatch):
+    coll = _make_collector(monkeypatch)
+    worker = _make_worker(coll)
+    coll._batch_size = 2
+
+    streams = {
+        "1001": [[101, 102, 103], [104, 105]],
+        "2002": [[7, 8], [9]],
+    }
+    attach, observed = _stub_chat_pipeline(coll, streams)
+    attach(worker)
+
+    loads = {"1001": None, "2002": None}
+    saved = []
+
+    async def _fake_load(chat_id):
+        return loads[chat_id]
+
+    async def _fake_save(chat_id, message_id):
+        saved.append((chat_id, message_id))
+        loads[chat_id] = message_id
+
+    coll.checkpoint.load_chat_progress = AsyncMock(side_effect=_fake_load)
+    coll.checkpoint.save_chat_progress = AsyncMock(side_effect=_fake_save)
+    coll.checkpoint.save_progress = AsyncMock()
+
+    await coll._collect_chat(worker, "1001")
+    await coll._collect_chat(worker, "2002")
+    # First pass: both chats start from 0 — never from each other's ids.
+    assert observed == [(0, 1001), (0, 2002)]
+    assert loads == {"1001": 103, "2002": 8}
+
+    # Restart simulation: each chat resumes at its OWN cursor, not the other's.
+    await coll._collect_chat(worker, "1001")
+    await coll._collect_chat(worker, "2002")
+    assert observed == [(0, 1001), (0, 2002), (103, 1001), (8, 2002)]
+    assert loads == {"1001": 105, "2002": 9}
+
+    # Collection must not write the chat-ambiguous service-level cursor.
+    coll.checkpoint.save_progress.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_collect_chat_legacy_target_cursor_backfills_without_numeric_seed(
+    monkeypatch, caplog
+):
+    coll = _make_collector(monkeypatch)
+    worker = _make_worker(coll)
+    coll._batch_size = 5
+
+    streams = {"3003": [[11, 12]]}
+    attach, observed = _stub_chat_pipeline(coll, streams)
+    attach(worker)
+
+    coll.checkpoint.load_chat_progress = AsyncMock(return_value=None)
+    coll.checkpoint.save_chat_progress = AsyncMock()
+    coll.checkpoint.last_processed_id = "@legacy_target"
+    coll.checkpoint.save_progress = AsyncMock()
+
+    with caplog.at_level("WARNING", logger="src.collectors.telegram"):
+        await coll._collect_chat(worker, "3003")
+
+    # Full safe backfill: min_id=0 explicitly, never the legacy global value.
+    assert observed == [(0, 3003)]
+    assert any(
+        "legacy" in r.getMessage().lower() and "backfill" in r.getMessage().lower()
+        for r in caplog.records
+    ), [r.getMessage() for r in caplog.records]
+    coll.checkpoint.save_progress.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_run_targets_never_writes_target_string_into_service_cursor(monkeypatch):
+    coll = _make_collector(monkeypatch)
+    worker = _make_worker(coll)
+    coll._collect_chat = AsyncMock()
+    coll.checkpoint.save_progress = AsyncMock()
+    coll.checkpoint.touch = AsyncMock()
+    coll.account_pool.record_success = MagicMock()
+
+    await worker.run_targets(["@somechannel"])
+
+    coll.checkpoint.touch.assert_awaited_once()
+    coll.checkpoint.save_progress.assert_not_awaited()
 
 
 @pytest.mark.asyncio

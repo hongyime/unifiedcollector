@@ -1982,6 +1982,34 @@ class TelegramCollector(
             return "transient"
         return "dead"
 
+    async def _resolve_chat_min_id(self, chat_id: str) -> int:
+        """Resume min_id for one chat, seeded only from its own cursor.
+
+        The chat-scoped row (``telegram:chat:<chat_id>``) always holds a
+        numeric message id. The legacy service-level ``last_processed_id`` is
+        chat-ambiguous and is never used as a seed: a non-numeric
+        (target-string) value is ignored with a warning and a full safe
+        backfill is scheduled for this chat instead of a silent min_id=0.
+        """
+        cursor = await self.checkpoint.load_chat_progress(chat_id)
+        if cursor is not None:
+            return cursor
+        legacy = self.checkpoint.last_processed_id
+        if legacy is not None and str(legacy) != "":
+            logger.warning(
+                "telegram/chat-%s: ignoring legacy non-chat cursor %r; "
+                "scheduling full safe backfill for this chat",
+                chat_id,
+                str(legacy)[:50],
+            )
+        else:
+            logger.info(
+                "telegram/chat-%s: no chat cursor yet; "
+                "scheduling full safe backfill for this chat",
+                chat_id,
+            )
+        return 0
+
     async def _collect_chat(self, worker: "TelegramWorker", target: str):
         # Use whichever account is actually in this chat (cross-account routing).
         worker, entity = await self._resolve_entity_any_worker(worker, target)
@@ -2011,11 +2039,7 @@ class TelegramCollector(
                         type(exc).__name__,
                     )
 
-        last_id = self.checkpoint.last_processed_id
-        try:
-            min_id = int(last_id) if last_id else 0
-        except (TypeError, ValueError):
-            min_id = 0
+        min_id = await self._resolve_chat_min_id(chat_id)
         count = 0
         seen_count = 0
         last_seen_message_id: int | None = None
@@ -2057,7 +2081,7 @@ class TelegramCollector(
                 count += 1
 
             if seen_count % self._batch_size == 0 and seen_count > 0:
-                await self.checkpoint.save_progress(str(last_seen_message_id))
+                await self.checkpoint.save_chat_progress(chat_id, last_seen_message_id)
 
         # P3-6: flush the final partial batch. The per-batch save above only
         # fires on exact _batch_size multiples, so the trailing remainder
@@ -2066,7 +2090,7 @@ class TelegramCollector(
         # re-collection on restart. Persist the last seen id unconditionally.
         if last_seen_message_id is not None:
             try:
-                await self.checkpoint.save_progress(str(last_seen_message_id))
+                await self.checkpoint.save_chat_progress(chat_id, last_seen_message_id)
             except Exception:
                 logger.warning("telegram/%s: final checkpoint flush failed",
                                chat_name, exc_info=True)
