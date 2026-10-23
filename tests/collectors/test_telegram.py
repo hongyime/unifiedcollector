@@ -772,6 +772,131 @@ async def test_collect_chat_legacy_target_cursor_backfills_without_numeric_seed(
     coll.checkpoint.save_progress.assert_not_awaited()
 
 
+class _ServerOrderFakeClient:
+    """iter_messages with genuine Telegram ordering semantics.
+
+    Yields ids strictly greater than ``min_id`` — ascending when
+    ``reverse=True`` (oldest→newest), descending otherwise (Telethon's
+    newest-first default). The descending branch exists so a traversal
+    regression actually fails the test: a newest-first stream with a rising
+    min_id checkpoint strands every id below the last save.
+    """
+
+    def __init__(self, ids):
+        self.ids = list(ids)
+        self.calls: list[dict] = []
+
+    def iter_messages(self, entity, **kwargs):
+        self.calls.append(dict(kwargs))
+        min_id = kwargs.get("min_id") or 0
+        remaining = [i for i in self.ids if i > min_id]
+        if kwargs.get("reverse"):
+            remaining.sort()
+        else:
+            remaining.sort(reverse=True)
+        return _aiter([SimpleNamespace(id=i, sender_id=None) for i in remaining])
+
+
+@pytest.mark.asyncio
+async def test_full_history_traversal_is_ordered_resumable_and_gap_free(monkeypatch):
+    """GAP-4 synthetic 100-message proof of the traversal contract.
+
+    Contract (task 17): ``iter_messages(entity, min_id=<chat cursor>,
+    reverse=True, limit=None)`` — oldest→newest, bounded below by the
+    chat-scoped cursor. First run imports ids 1..100 exactly once; second
+    run imports 0 old messages; an interrupted run resumes at its persisted
+    cursor with no gaps and no duplicate inserts.
+    """
+    coll = _make_collector(monkeypatch)
+    worker = _make_worker(coll)
+    coll._batch_size = 2
+
+    async def _fake_resolve(w, target):
+        entity = SimpleNamespace(
+            id=int(target), title=f"chat{target}", username=None,
+            broadcast=False, megagroup=False,
+        )
+        return w, entity
+
+    coll._resolve_entity_any_worker = AsyncMock(side_effect=_fake_resolve)
+    coll._upsert_chat = AsyncMock()
+    coll._collect_profile_photo = AsyncMock()
+    coll.wait_rate_limit = AsyncMock()
+    coll._enqueue_forward_edges = AsyncMock()
+    coll._download_any_message_media = AsyncMock(return_value=False)
+    coll.collect_chat_members = AsyncMock()
+
+    fake = _ServerOrderFakeClient(list(range(1, 101)))
+    worker.client.iter_messages = fake.iter_messages
+
+    cursors: dict[str, int | None] = {"700": None}
+
+    async def _load(chat_id):
+        return cursors.get(chat_id)
+
+    async def _save(chat_id, message_id):
+        cursors[chat_id] = message_id
+
+    coll.checkpoint.load_chat_progress = AsyncMock(side_effect=_load)
+    coll.checkpoint.save_chat_progress = AsyncMock(side_effect=_save)
+    coll.checkpoint.last_processed_id = None
+    coll.checkpoint.save_progress = AsyncMock()
+
+    collected: list[int] = []
+    insert_counts: dict[int, int] = {}
+
+    async def _record(message, *_args, **_kwargs):
+        collected.append(message.id)
+        insert_counts[message.id] = insert_counts.get(message.id, 0) + 1
+
+    coll._upsert_message = AsyncMock(side_effect=_record)
+
+    # Run 1: full ascending backfill — all 100 ids collected exactly once.
+    await coll._collect_chat(worker, "700")
+    assert sorted(collected) == list(range(1, 101))
+    assert len(set(collected)) == 100
+    assert cursors["700"] == 100
+    assert fake.calls and all(call.get("reverse") is True for call in fake.calls)
+    assert fake.calls[0]["min_id"] == 0
+
+    # Run 2: rerun imports 0 old messages; only genuinely new ones.
+    collected.clear()
+    fake.ids = list(range(1, 103))
+    await coll._collect_chat(worker, "700")
+    assert collected == [101, 102]
+    assert cursors["700"] == 102
+    assert fake.calls[-1]["min_id"] == 100
+
+    # Run 3: interrupted after 3 of the 4 new messages. Ascending order keeps
+    # the persisted cursor exactly at the last processed id.
+    collected.clear()
+    fake.ids = list(range(1, 107))
+
+    async def _record_and_stop(message, *_args, **_kwargs):
+        await _record(message)
+        if len(collected) >= 3:
+            coll._stop.set()
+
+    coll._upsert_message = AsyncMock(side_effect=_record_and_stop)
+    await coll._collect_chat(worker, "700")
+    assert collected == [103, 104, 105]
+    assert cursors["700"] == 105
+
+    # Run 4: resume from the persisted cursor — the remaining id arrives, no
+    # gap between the interruption point and the resume.
+    coll._stop.clear()
+    collected.clear()
+    coll._upsert_message = AsyncMock(side_effect=_record)
+    await coll._collect_chat(worker, "700")
+    assert collected == [106]
+    assert cursors["700"] == 106
+    assert fake.calls[-1]["min_id"] == 105
+
+    # No duplicate inserts across every run; union covers ids 1..106.
+    assert set(insert_counts) == set(range(1, 107))
+    assert all(count == 1 for count in insert_counts.values())
+
+
 @pytest.mark.asyncio
 async def test_run_targets_never_writes_target_string_into_service_cursor(monkeypatch):
     coll = _make_collector(monkeypatch)
@@ -1280,38 +1405,56 @@ async def test_resolve_linked_discussion_caches_channels_without_a_link(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_discussion_join_budget_refusal_does_not_record_visit(monkeypatch):
+async def test_discussion_visit_without_membership_records_residual_gap(monkeypatch):
+    """GAP-6 fail-closed membership guard: a discussion group the account has
+    not joined is inaccessible content. The collector records the visit with
+    abort_reason='membership_writes_disabled' (the 24h gate then prevents
+    repeating the gap every cycle) and never sends a join/scrape request."""
     coll = _make_collector(monkeypatch)
     coll.pool.conn.fetchval = AsyncMock(return_value=None)
     coll._resolve_linked_discussion_entity = AsyncMock(
         return_value=(902, SimpleNamespace(id=902, title="Discussion"))
     )
     coll._upsert_chat = AsyncMock()
-    coll._consume_join_budget = AsyncMock(return_value=False)
-    worker = _make_worker(coll)
+    coll._consume_join_budget = AsyncMock(return_value=True)
+    coll.collect_chat_members = AsyncMock()
+    worker = SimpleNamespace(
+        worker_id=0,
+        account=SimpleNamespace(name="acct1"),
+        client=AsyncMock(),
+    )
     worker.client.get_me = AsyncMock(return_value=SimpleNamespace(id=1))
     worker.client.get_permissions = AsyncMock(return_value=SimpleNamespace(left=True))
+    worker.client.iter_messages = MagicMock()
 
     await coll._spider_discussion_group(worker, SimpleNamespace(id=901), "901")
 
-    assert not any(
-        "telegram_discussion_visits" in call.args[0]
-        for call in coll.pool.conn.execute.await_args_list
-    )
+    assert worker.client.await_args_list == []
+    worker.client.iter_messages.assert_not_called()
+    coll.collect_chat_members.assert_not_awaited()
+    coll._consume_join_budget.assert_not_awaited()
+    visit_calls = [
+        call for call in coll.pool.conn.fetchval.await_args_list
+        if "INSERT INTO telegram_discussion_visits" in call.args[0]
+    ]
+    assert len(visit_calls) == 1
+    assert visit_calls[0].args[7] == "membership_writes_disabled"
 
 
 @pytest.mark.asyncio
-async def test_discussion_visit_joins_scrapes_leaves_and_records_visit(monkeypatch):
+async def test_discussion_visit_scrapes_existing_membership_and_records_visit(monkeypatch):
+    """Already-member visit: scraping still happens with the membership the
+    account already holds, zero raw RPC requests are sent (no
+    JoinChannelRequest/LeaveChannelRequest), and collect_chat_members uses
+    the current signature (task 16 kwargs drift:
+    max_participants=None, sleep_on_flood_wait=True outside startup mode)."""
     coll = _make_collector(monkeypatch)
-    coll._discussion_dwell_min = 0
-    coll._discussion_dwell_max = 0
     coll._discussion_message_limit = 2
     coll._admin_log_enabled = False
     coll.pool.conn.fetchval = AsyncMock(return_value=None)
     discussion = SimpleNamespace(id=902, title="Discussion", username=None)
     coll._resolve_linked_discussion_entity = AsyncMock(return_value=(902, discussion))
     coll._upsert_chat = AsyncMock()
-    coll._consume_join_budget = AsyncMock(return_value=True)
     coll.collect_chat_members = AsyncMock(return_value=2)
     coll._upsert_message = AsyncMock()
     coll._enqueue_forward_edges = AsyncMock()
@@ -1322,7 +1465,7 @@ async def test_discussion_visit_joins_scrapes_leaves_and_records_visit(monkeypat
         client=AsyncMock(),
     )
     worker.client.get_me = AsyncMock(return_value=SimpleNamespace(id=77))
-    worker.client.get_permissions = AsyncMock(return_value=SimpleNamespace(left=True))
+    worker.client.get_permissions = AsyncMock(return_value=SimpleNamespace(left=False))
     worker.client.iter_messages = MagicMock(return_value=_aiter([
         SimpleNamespace(id=1, sender_id=None),
         SimpleNamespace(id=2, sender_id=None),
@@ -1330,17 +1473,146 @@ async def test_discussion_visit_joins_scrapes_leaves_and_records_visit(monkeypat
 
     await coll._spider_discussion_group(worker, SimpleNamespace(id=901), "901")
 
-    request_names = [type(call.args[0]).__name__ for call in worker.client.await_args_list]
-    assert request_names == ["JoinChannelRequest", "LeaveChannelRequest"]
-    coll.collect_chat_members.assert_awaited_once_with(902, worker=worker)
+    assert worker.client.await_args_list == []
+    coll.collect_chat_members.assert_awaited_once_with(
+        902, worker=worker, max_participants=None, sleep_on_flood_wait=True,
+    )
     assert coll._upsert_message.await_count == 2
     visit_call = next(
-        call for call in coll.pool.conn.execute.await_args_list
+        call for call in coll.pool.conn.fetchval.await_args_list
         if "INSERT INTO telegram_discussion_visits" in call.args[0]
     )
     assert visit_call.args[3] == "acct1"
-    assert visit_call.args[4] is not None
+    assert visit_call.args[4] is None  # left_at: never joined, never leaves
     assert visit_call.args[5:8] == (2, 2, None)
+
+
+@pytest.mark.asyncio
+async def test_pending_leave_recovery_never_sends_leave_request(monkeypatch):
+    """GAP-6: pending-leave recovery relabels the row in the database instead
+    of sending LeaveChannelRequest — no Telegram RPC of any kind."""
+    coll = _make_collector(monkeypatch)
+    worker = _make_worker(coll)
+    worker.client = AsyncMock()
+
+    await coll._retry_discussion_leave_after_cooldown(worker, "902", 42)
+
+    worker.client.assert_not_awaited()
+    execute_calls = [
+        call for call in coll.pool.conn.execute.await_args_list
+        if "telegram_discussion_visits" in call.args[0]
+    ]
+    assert len(execute_calls) == 1
+    assert "membership_writes_disabled" in execute_calls[0].args[0]
+    assert execute_calls[0].args[1] == 42
+
+
+@pytest.mark.asyncio
+async def test_invite_link_visit_records_gap_without_import(monkeypatch):
+    """GAP-6: an invite link the account has not imported is inaccessible
+    content. Only the read-only CheckChatInviteRequest is sent; the visit is
+    recorded with status='membership_writes_disabled' and no scrape runs."""
+    coll = _make_collector(monkeypatch)
+    coll._record_invite_visit = AsyncMock()
+    coll._consume_join_budget = AsyncMock(return_value=True)
+    coll._scrape_joined_entity = AsyncMock(return_value=(None, 0, 0))
+    worker = _make_worker(coll)
+    worker.client = AsyncMock()
+    worker.client.return_value = SimpleNamespace(chats=[], chat=None)
+
+    row = {"id": 7, "url": "https://t.me/+InvHash"}
+    parsed = {"kind": "invite", "invite_hash": "InvHash"}
+    await coll._visit_telegram_link(worker, row, parsed)
+
+    assert len(worker.client.await_args_list) == 1
+    assert type(worker.client.await_args_list[0].args[0]).__name__ == (
+        "CheckChatInviteRequest"
+    )
+    coll._consume_join_budget.assert_not_awaited()
+    coll._scrape_joined_entity.assert_not_awaited()
+    coll._record_invite_visit.assert_awaited_once()
+    kwargs = coll._record_invite_visit.await_args.kwargs
+    assert kwargs["status"] == "membership_writes_disabled"
+    # No joined_this_pass kwarg is passed any more; the helper's default
+    # (False) is what lands in the audit row.
+    assert kwargs.get("joined_this_pass", False) is False
+
+
+@pytest.mark.asyncio
+async def test_username_link_visit_records_gap_without_join(monkeypatch):
+    """GAP-6: a public channel link the account has not joined is
+    inaccessible content — no JoinChannelRequest, no join budget consumed,
+    no scrape, residual-gap visit recorded."""
+    coll = _make_collector(monkeypatch)
+    coll._record_invite_visit = AsyncMock()
+    coll._consume_join_budget = AsyncMock(return_value=True)
+    coll._scrape_joined_entity = AsyncMock(return_value=(None, 0, 0))
+    worker = _make_worker(coll)
+    worker.client = AsyncMock()
+    worker.client.get_entity = AsyncMock(
+        return_value=SimpleNamespace(id=555, title="Chan", username="chan")
+    )
+    worker.client.get_me = AsyncMock(return_value=SimpleNamespace(id=1))
+    worker.client.get_permissions = AsyncMock(return_value=SimpleNamespace(left=True))
+
+    row = {"id": 8, "url": "https://t.me/chan"}
+    parsed = {"kind": "username", "username": "chan"}
+    await coll._visit_telegram_link(worker, row, parsed)
+
+    assert worker.client.await_args_list == []
+    coll._consume_join_budget.assert_not_awaited()
+    coll._scrape_joined_entity.assert_not_awaited()
+    assert coll._record_invite_visit.await_args.kwargs[
+        "status"
+    ] == "membership_writes_disabled"
+
+
+@pytest.mark.asyncio
+async def test_username_link_visit_scrapes_existing_membership_without_join(monkeypatch):
+    coll = _make_collector(monkeypatch)
+    coll._record_invite_visit = AsyncMock()
+    coll._scrape_joined_entity = AsyncMock(return_value=(None, 3, 4))
+    worker = _make_worker(coll)
+    worker.client = AsyncMock()
+    worker.client.get_entity = AsyncMock(
+        return_value=SimpleNamespace(id=555, title="Chan", username="chan")
+    )
+    worker.client.get_me = AsyncMock(return_value=SimpleNamespace(id=1))
+    worker.client.get_permissions = AsyncMock(return_value=SimpleNamespace(left=False))
+
+    row = {"id": 9, "url": "https://t.me/chan"}
+    parsed = {"kind": "username", "username": "chan"}
+    await coll._visit_telegram_link(worker, row, parsed)
+
+    assert worker.client.await_args_list == []
+    coll._scrape_joined_entity.assert_awaited_once()
+    assert coll._record_invite_visit.await_args.kwargs["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_readonly_client_rejects_membership_write_requests():
+    """GAP-6: the generic client(request) RPC escape hatch must fail closed
+    on membership writes — raise, and never forward to the inner client."""
+    from telethon.tl.functions.channels import JoinChannelRequest, LeaveChannelRequest
+    from telethon.tl.functions.messages import ImportChatInviteRequest
+
+    from src.core.readonly_client import ReadOnlyTelegramClient
+
+    inner = AsyncMock()
+    wrapped = ReadOnlyTelegramClient(inner)
+
+    for request in (
+        JoinChannelRequest("somechannel"),
+        ImportChatInviteRequest("a1b2c3"),
+        LeaveChannelRequest("somechannel"),
+    ):
+        with pytest.raises(RuntimeError, match="Membership write blocked"):
+            await wrapped(request)
+    inner.assert_not_awaited()
+
+    # Read requests keep forwarding through the wrapper.
+    await wrapped(SimpleNamespace())
+    inner.assert_awaited_once()
 
 
 def test_message_membership_event_specs_normalize_join_and_leave(monkeypatch):
