@@ -1,8 +1,12 @@
 """Shared leases and target seeding for read-only native platform scrapers."""
 from __future__ import annotations
 
+import logging
 import os
+import uuid
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 _PLATFORMS = frozenset({"pinterest", "snapchat", "airbnb"})
 _MAX_ATTEMPTS = 8
@@ -42,7 +46,17 @@ _FOLLOW_ONLY_QUEUE_SOURCES = {
 }
 
 
-def _public_discovery_enabled() -> bool:
+def _public_discovery_enabled(platform: str | None = None) -> bool:
+    """Same precedence as the profile-only collector: an explicit
+    source-scoped ``<PLATFORM>_PROBE_NATIVE_PUBLIC_DISCOVERY_ENABLED``
+    wins, then the global ``NATIVE_PUBLIC_DISCOVERY_ENABLED``, else disabled.
+    """
+    if platform:
+        scoped = os.getenv(
+            f"{platform.upper()}_PROBE_NATIVE_PUBLIC_DISCOVERY_ENABLED"
+        )
+        if scoped is not None:
+            return scoped.strip().lower() in {"1", "true", "yes", "on"}
     return os.getenv("NATIVE_PUBLIC_DISCOVERY_ENABLED", "0").strip().lower() in {
         "1", "true", "yes", "on",
     }
@@ -943,7 +957,7 @@ async def seed_native_targets(pool: Any, platform: str) -> None:
                 return
 
             queries = _SEED_QUERIES[platform]
-            if not _public_discovery_enabled():
+            if not _public_discovery_enabled(platform):
                 queries = tuple(
                     queries[index]
                     for index in _FOLLOW_ONLY_SEED_QUERY_INDEXES[platform]
@@ -1014,6 +1028,7 @@ async def claim_native_target(pool: Any, platform: str) -> dict[str, Any] | None
                 """
                 UPDATE browser_native_scrape_queue q
                    SET status='claimed', attempts=q.attempts+1,
+                       claim_token=$6,
                        claim_expires_at=now()+interval '10 minutes',
                        updated_at=now(), last_error=NULL
                  WHERE q.id=(
@@ -1051,13 +1066,14 @@ async def claim_native_target(pool: Any, platform: str) -> dict[str, Any] | None
                      LIMIT 1
                      FOR UPDATE SKIP LOCKED
                  )
-                RETURNING q.id, q.target_url, q.username, q.source, q.attempts
+                RETURNING q.id, q.target_url, q.username, q.source, q.attempts, q.claim_token
                 """,
                 platform,
                 _MAX_ATTEMPTS,
                 _FOLLOWED_TARGET_SOURCES[platform],
                 _public_discovery_enabled(),
                 list(_FOLLOW_ONLY_QUEUE_SOURCES[platform]),
+                uuid.uuid4(),
             )
     return dict(row) if row else None
 
@@ -1067,43 +1083,74 @@ async def finish_native_target(
     platform: str,
     target_id: int,
     *,
+    claim_token: str | uuid.UUID,
     success: bool,
     error: str | None = None,
     retry_after_hours: int = 6,
     retry_after_seconds: int | None = None,
-) -> None:
-    """Release a claim and either schedule a refresh or a bounded retry."""
+) -> bool:
+    """Release a claim and either schedule a refresh or a bounded retry.
+
+    Completion is compare-and-swap on the claim token issued by
+    :func:`claim_native_target`: a worker whose lease expired and whose row was
+    re-claimed by another worker gets a no-op rejection (False) instead of
+    completing someone else's claim.
+    """
     if platform not in _PLATFORMS:
-        return
+        return False
+    if isinstance(claim_token, str):
+        try:
+            token = uuid.UUID(claim_token)
+        except ValueError:
+            logger.warning(
+                "native claim finish rejected: malformed claim token platform=%s target_id=%s",
+                platform,
+                target_id,
+            )
+            return False
+    else:
+        token = claim_token
     async with pool.acquire() as conn:
         if success:
-            await conn.execute(
+            finished = await conn.fetchval(
                 """
                 UPDATE browser_native_scrape_queue
                    SET status='completed', attempts=0, last_error=NULL,
                        next_visit_at=now()+interval '12 hours',
                        claim_expires_at=NULL, last_result_at=now(), updated_at=now()
-                 WHERE id=$1 AND platform=$2 AND status='claimed'
+                 WHERE id=$1 AND platform=$2 AND status='claimed' AND claim_token=$3
+                RETURNING 1
                 """,
                 target_id,
                 platform,
+                token,
             )
-            return
-        delay_seconds = (
-            max(1, min(int(retry_after_seconds), 168 * 60 * 60))
-            if retry_after_seconds is not None
-            else max(1, min(int(retry_after_hours), 168)) * 60 * 60
-        )
-        await conn.execute(
-            """
-            UPDATE browser_native_scrape_queue
-               SET status='failed', last_error=$3,
-                   next_visit_at=now()+($4 * interval '1 second'),
-                   claim_expires_at=NULL, last_result_at=now(), updated_at=now()
-             WHERE id=$1 AND platform=$2 AND status='claimed'
-            """,
-            target_id,
+        else:
+            delay_seconds = (
+                max(1, min(int(retry_after_seconds), 168 * 60 * 60))
+                if retry_after_seconds is not None
+                else max(1, min(int(retry_after_hours), 168)) * 60 * 60
+            )
+            finished = await conn.fetchval(
+                """
+                UPDATE browser_native_scrape_queue
+                   SET status='failed', last_error=$4,
+                       next_visit_at=now()+($5 * interval '1 second'),
+                       claim_expires_at=NULL, last_result_at=now(), updated_at=now()
+                 WHERE id=$1 AND platform=$2 AND status='claimed' AND claim_token=$3
+                RETURNING 1
+                """,
+                target_id,
+                platform,
+                token,
+                (error or "native_page_unavailable")[:120],
+                delay_seconds,
+            )
+    if finished is None:
+        logger.warning(
+            "native claim finish was a no-op: lease no longer owned platform=%s target_id=%s success=%s",
             platform,
-            (error or "native_page_unavailable")[:120],
-            delay_seconds,
+            target_id,
+            success,
         )
+    return finished is not None

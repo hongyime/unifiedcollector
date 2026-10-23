@@ -789,6 +789,7 @@ async def test_airbnb_empty_calendar_preserves_stored_availability_and_check_tim
             "id": 7,
             "target_url": "https://www.airbnb.com/rooms/123456",
             "attempts": 1,
+            "claim_token": "00000000-0000-0000-0000-000000000001",
         }),
     )
     monkeypatch.setattr(native_scrape, "finish_native_target", AsyncMock())

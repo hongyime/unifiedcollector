@@ -590,13 +590,15 @@ class SnapchatCollector(ProfileOnlyCollector):
                             item["expires_at"], json.dumps(item["metadata"]),
                         )
             await finish_native_target(
-                self.pool, self.SOURCE_NAME, int(target["id"]), success=True,
+                self.pool, self.SOURCE_NAME, int(target["id"]),
+                claim_token=target["claim_token"], success=True,
             )
             summary["items"] = len(items)
         except Exception as exc:
             if str(exc) == "verified_account_excluded":
                 await finish_native_target(
-                    self.pool, self.SOURCE_NAME, int(target["id"]), success=True,
+                    self.pool, self.SOURCE_NAME, int(target["id"]),
+                    claim_token=target["claim_token"], success=True,
                 )
                 summary["excluded_verified"] = 1
                 return summary
@@ -617,7 +619,8 @@ class SnapchatCollector(ProfileOnlyCollector):
                 "empty_public_page" if is_empty else type(exc).__name__.lower()
             )
             await finish_native_target(
-                self.pool, self.SOURCE_NAME, int(target["id"]), success=False,
+                self.pool, self.SOURCE_NAME, int(target["id"]),
+                claim_token=target["claim_token"], success=False,
                 error=error,
                 retry_after_seconds=retry_after_seconds,
             )

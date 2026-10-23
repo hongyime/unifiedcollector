@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import uuid
 from datetime import datetime
 from urllib.parse import urlparse
 
@@ -285,6 +286,13 @@ async def native_scrape_ingest(request: web.Request) -> web.Response:
         return _cors(web.json_response({"ok": False, "error": "invalid_platform_or_page"}, status=400))
     target_id = _integer(body.get("target_id"), minimum=1)
     status = str(body.get("status") or "success").strip().lower()
+    raw_claim_token = str(body.get("claim_token") or "").strip()
+    claim_token: uuid.UUID | None = None
+    if raw_claim_token:
+        try:
+            claim_token = uuid.UUID(raw_claim_token)
+        except ValueError:
+            return _cors(web.json_response({"ok": False, "error": "stale_claim"}, status=409))
     raw_items = body.get("items") if isinstance(body.get("items"), list) else []
     valid = [row for row in (_validated_item(platform, item) for item in raw_items[:_MAX_ITEMS[platform]]) if row]
     accepted = {"pin": 0, "board": 0, "story": 0, "spotlight": 0, "highlight": 0, "listing": 0, "host": 0}
@@ -362,13 +370,18 @@ async def native_scrape_ingest(request: web.Request) -> web.Response:
             async with conn.transaction():
                 if target_id is not None:
                     target = await conn.fetchrow(
-                        "SELECT target_url,status FROM browser_native_scrape_queue WHERE id=$1 AND platform=$2 FOR UPDATE",
+                        "SELECT target_url,status,claim_token FROM browser_native_scrape_queue WHERE id=$1 AND platform=$2 FOR UPDATE",
                         target_id,
                         platform,
                     )
                     if (target is None or target["status"] != "claimed"
                             or not _same_target(platform, str(body.get("page_url") or ""), target["target_url"])):
                         return _cors(web.json_response({"ok": False, "error": "stale_target"}, status=409))
+                    # Lease fencing: a claim issued with a token may only be
+                    # completed by the worker holding that token, so a worker
+                    # whose lease expired cannot finish a newer worker's claim.
+                    if target["claim_token"] is not None and claim_token != target["claim_token"]:
+                        return _cors(web.json_response({"ok": False, "error": "stale_claim"}, status=409))
                 for kind, args in valid:
                     await conn.execute(statements[kind], *args)
                     accepted[kind] += 1
@@ -377,9 +390,11 @@ async def native_scrape_ingest(request: web.Request) -> web.Response:
                     if status == "success" and has_rows:
                         await conn.execute(
                             """UPDATE browser_native_scrape_queue SET status='completed',last_error=NULL,
-                               claim_expires_at=NULL,last_result_at=now(),updated_at=now() WHERE id=$1 AND platform=$2""",
+                               claim_expires_at=NULL,last_result_at=now(),updated_at=now()
+                               WHERE id=$1 AND platform=$2 AND claim_token IS NOT DISTINCT FROM $3::uuid""",
                             target_id,
                             platform,
+                            claim_token,
                         )
                     else:
                         reason = "empty_public_page" if status == "success" else "page_unavailable"
@@ -387,11 +402,12 @@ async def native_scrape_ingest(request: web.Request) -> web.Response:
                             """UPDATE browser_native_scrape_queue SET status='failed',last_error=$3,
                                next_visit_at=now()+CASE WHEN attempts < $4 THEN interval '6 hours' ELSE interval '1 day' END,
                                claim_expires_at=NULL,last_result_at=now(),updated_at=now()
-                               WHERE id=$1 AND platform=$2""",
+                               WHERE id=$1 AND platform=$2 AND claim_token IS NOT DISTINCT FROM $5::uuid""",
                             target_id,
                             platform,
                             reason,
                             _MAX_ATTEMPTS,
+                            claim_token,
                         )
         return _cors(web.json_response({"ok": True, "accepted": accepted, "target_id": target_id}))
     except Exception as exc:
