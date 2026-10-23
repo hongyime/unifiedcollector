@@ -212,3 +212,113 @@ def test_query_key_is_compact_and_stable():
     assert key == ExposureCollector._query_key(query)
     assert key.startswith("exposure:")
     assert len(key) < 100
+
+
+def _write_two_dork_queries(monkeypatch, tmp_path) -> None:
+    dorks = tmp_path / "exposure.dorks"
+    dorks.write_text("site:[TARGET] filename:.env\nsite:[TARGET] ext:sql\n", encoding="utf-8")
+    monkeypatch.setenv("EXPOSURE_ENABLED", "1")
+    monkeypatch.setenv("EXPOSURE_DORKS_FILE", str(dorks))
+    monkeypatch.setenv("EXPOSURE_ALLOWED_DOMAINS", "example.edu.sg")
+    monkeypatch.setenv("EXPOSURE_QUERY_DELAY_SECONDS", "0")
+
+
+@pytest.mark.asyncio
+async def test_collect_lock_skip_does_not_starve_remaining_queries(monkeypatch, tmp_path):
+    _write_two_dork_queries(monkeypatch, tmp_path)
+
+    coll = ExposureCollector()
+    attempted: list[str] = []
+    lock_skipped_query = "site:example.edu.sg filename:.env"
+
+    async def fake_search_query(query):
+        # Mirror SearchCollector.search_query: reset at entry, flag on skip.
+        coll._last_search_query_lock_skipped = query == lock_skipped_query
+        attempted.append(query)
+        return []
+
+    coll.search_query = fake_search_query
+    coll.checkpoint.save_progress = AsyncMock()
+
+    await coll.collect(["example.edu.sg"])
+
+    # Old `break` behavior starved the second query behind the skipped one.
+    assert attempted == [
+        "site:example.edu.sg filename:.env",
+        "site:example.edu.sg ext:sql",
+    ]
+    saved = [call.args[0] for call in coll.checkpoint.save_progress.await_args_list]
+    assert ExposureCollector._cursor_id(lock_skipped_query) not in saved
+    assert saved == [ExposureCollector._cursor_id("site:example.edu.sg ext:sql")]
+
+
+@pytest.mark.asyncio
+async def test_collect_skipped_query_never_persists_cursor_and_is_retried(monkeypatch, tmp_path):
+    _write_two_dork_queries(monkeypatch, tmp_path)
+    monkeypatch.setenv("EXPOSURE_MAX_QUERIES_PER_CYCLE", "1")
+
+    coll = ExposureCollector()
+    attempted: list[str] = []
+    skip_now = True
+
+    async def fake_search_query(query):
+        coll._last_search_query_lock_skipped = skip_now
+        attempted.append(query)
+        return []
+
+    coll.search_query = fake_search_query
+    coll.checkpoint.save_progress = AsyncMock()
+
+    await coll.collect(["example.edu.sg"])
+
+    assert attempted == ["site:example.edu.sg filename:.env"]
+    assert coll.checkpoint.save_progress.await_count == 0
+    assert coll.checkpoint.last_processed_id is None
+
+    skip_now = False
+    await coll.collect(["example.edu.sg"])
+
+    assert attempted == ["site:example.edu.sg filename:.env"] * 2
+    saved = [call.args[0] for call in coll.checkpoint.save_progress.await_args_list]
+    assert saved == [ExposureCollector._cursor_id("site:example.edu.sg filename:.env")]
+
+
+@pytest.mark.asyncio
+async def test_collect_rotation_reaches_every_scope_across_runs(monkeypatch, tmp_path):
+    dorks = tmp_path / "exposure.dorks"
+    dorks.write_text("site:[TARGET] filename:.env\n", encoding="utf-8")
+    monkeypatch.setenv("EXPOSURE_ENABLED", "1")
+    monkeypatch.setenv("EXPOSURE_DORKS_FILE", str(dorks))
+    monkeypatch.setenv("EXPOSURE_ALLOWED_DOMAINS", "alpha.edu.sg,beta.edu.sg")
+    monkeypatch.setenv("EXPOSURE_MAX_QUERIES_PER_CYCLE", "1")
+    monkeypatch.setenv("EXPOSURE_QUERY_DELAY_SECONDS", "0")
+
+    coll = ExposureCollector()
+    coll.search_query = AsyncMock(return_value=[])
+    coll.checkpoint.save_progress = AsyncMock()
+
+    # Run 1: fresh cursor processes the first scope.
+    await coll.collect(["alpha.edu.sg", "beta.edu.sg"])
+    assert [call.args[0] for call in coll.search_query.await_args_list] == [
+        "site:alpha.edu.sg filename:.env",
+    ]
+    alpha_cursor = coll.checkpoint.save_progress.await_args_list[0].args[0]
+
+    # Run 2: the persisted cursor rotates the start past alpha.
+    coll.checkpoint.last_processed_id = alpha_cursor
+    coll.search_query.reset_mock()
+    coll.checkpoint.save_progress.reset_mock()
+    await coll.collect(["alpha.edu.sg", "beta.edu.sg"])
+    assert [call.args[0] for call in coll.search_query.await_args_list] == [
+        "site:beta.edu.sg filename:.env",
+    ]
+    beta_cursor = coll.checkpoint.save_progress.await_args_list[0].args[0]
+    assert beta_cursor != alpha_cursor
+
+    # Run 3: a cursor at the last query wraps back to the first.
+    coll.checkpoint.last_processed_id = beta_cursor
+    coll.search_query.reset_mock()
+    await coll.collect(["alpha.edu.sg", "beta.edu.sg"])
+    assert [call.args[0] for call in coll.search_query.await_args_list] == [
+        "site:alpha.edu.sg filename:.env",
+    ]

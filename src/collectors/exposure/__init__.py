@@ -256,10 +256,8 @@ class ExposureCollector(SearchCollector):
                 query = dork.replace("[TARGET]", scope)
                 queries.append(query)
                 self._query_scopes[query] = scope
-                if len(queries) >= self._max_queries:
-                    break
-            if len(queries) >= self._max_queries:
-                break
+
+        queries = self._rotate_queries(queries)[: self._max_queries]
         query_delay = _float_env(
             "EXPOSURE_QUERY_DELAY_SECONDS",
             _float_env("SEARCH_QUERY_DELAY_SECONDS", 3.0, minimum=0.0, maximum=3600.0),
@@ -269,19 +267,47 @@ class ExposureCollector(SearchCollector):
         for query in queries:
             if self._stop.is_set():
                 break
-            cursor_id = "dork:" + hashlib.sha256(query.encode("utf-8")).hexdigest()[:24]
+            cursor_id = self._cursor_id(query)
             logger.info("Collecting exposure/%s", cursor_id)
             try:
                 await self.search_query(query)
                 if self._last_search_query_lock_skipped:
-                    break
-                await self.checkpoint.save_progress(cursor_id)
-                await self.heartbeat_source_health()
+                    logger.warning(
+                        "exposure: search engine lock busy; skipped %s without checkpoint",
+                        cursor_id,
+                    )
+                else:
+                    await self.checkpoint.save_progress(cursor_id)
+                    await self.heartbeat_source_health()
             except Exception as exc:  # noqa: BLE001 - one bad dork must not kill the lane.
                 logger.exception("Failed exposure/%s: %s", cursor_id, exc)
                 await self.send_to_dlq(cursor_id, cursor_id, str(exc))
             if query_delay > 0 and not self._stop.is_set():
                 await asyncio.sleep(query_delay)
+
+    @staticmethod
+    def _cursor_id(query: str) -> str:
+        return "dork:" + hashlib.sha256(query.encode("utf-8")).hexdigest()[:24]
+
+    def _rotate_queries(self, queries: list[str]) -> list[str]:
+        """Start the pass after the persisted last-processed query cursor.
+
+        Checkpoints are only written for processed queries, so a lock-skipped
+        or truncated pass leaves the cursor anchored at the last processed
+        query and the next pass resumes at the first unprocessed one instead
+        of restarting from the top and starving later scopes.
+        """
+        previous = self.checkpoint.last_processed_id
+        if previous is None:
+            return queries
+        try:
+            start = ([self._cursor_id(query) for query in queries].index(previous) + 1) % len(queries)
+        except ValueError:
+            return queries
+        if start == 0:
+            return queries
+        logger.info("exposure: rotating pass to start at query offset %d of %d", start, len(queries))
+        return queries[start:] + queries[:start]
 
     def _explicit_query_scopes(self, targets: list[str], gate: ExposureGate) -> list[str]:
         scopes: list[str] = []
