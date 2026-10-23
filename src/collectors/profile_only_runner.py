@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import math
 import os
 import signal
 from typing import Iterable
@@ -39,6 +40,42 @@ _COLLECTORS: dict[str, type[ProfileOnlyCollector]] = {
 }
 
 _INTERVAL = float(os.getenv("PROFILE_ROUND_ROBIN_INTERVAL_SECONDS", "60"))
+
+# Operators set COLLECTOR_STARTUP_DELAY_SECONDS per profile container so a cold
+# boot does not start every probe at the same instant. Keep the value bounded:
+# a typo must never park a collector for hours, and NaN/inf must not reach the
+# event loop.
+_MAX_STARTUP_DELAY_SECONDS = 3600.0
+_STARTUP_DELAY_POLL_SECONDS = 0.5
+
+
+def _startup_delay_seconds() -> float:
+    raw = os.getenv("COLLECTOR_STARTUP_DELAY_SECONDS", "0")
+    try:
+        delay = float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(delay) or delay <= 0:
+        return 0.0
+    return min(delay, _MAX_STARTUP_DELAY_SECONDS)
+
+
+async def _wait_startup_delay(stop_event: asyncio.Event, delay: float) -> None:
+    # Waiting on stop_event rather than asyncio.sleep lets SIGTERM/SIGINT
+    # interrupt the delay immediately.
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + delay
+    while not stop_event.is_set():
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return
+        try:
+            await asyncio.wait_for(
+                stop_event.wait(),
+                timeout=min(remaining, _STARTUP_DELAY_POLL_SECONDS),
+            )
+        except asyncio.TimeoutError:
+            continue
 
 
 def _selected_source() -> str:
@@ -89,6 +126,15 @@ async def run() -> None:
             # Windows can't set POSIX signal handlers; container is Linux
             # so this branch is a no-op safety net.
             pass
+
+    startup_delay = _startup_delay_seconds()
+    if startup_delay > 0 and not stop_event.is_set():
+        logger.info(
+            "profile-only %s: startup delay %.1fs before first cycle",
+            label,
+            startup_delay,
+        )
+        await _wait_startup_delay(stop_event, startup_delay)
 
     while not stop_event.is_set():
         for c in collectors:
