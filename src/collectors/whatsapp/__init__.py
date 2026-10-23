@@ -121,6 +121,25 @@ def _coerce_bool(value) -> bool:
     return bool(value)
 
 
+class _MediaUnavailable(Exception):
+    """Bridge durably reported the media as permanently unavailable.
+
+    Raised by ``_download_via_bridge`` only AFTER ``_mark_media_unavailable``
+    has persisted the unavailable marker on the message, so the caller can
+    treat the message as terminally complete (the media effect is the durable
+    unavailability record).
+    """
+
+
+class _MediaPending(Exception):
+    """A required media effect did not complete and is still retryable.
+
+    Raised from the message-stream path so the broker consumer nacks and
+    requeues the delivery. A durable ``dead_letter_queue`` work item for the
+    media was committed atomically with the message row and stays pending.
+    """
+
+
 class WhatsappCollector(BaseCollector):
     SOURCE_NAME = "whatsapp"
     INGEST_PATH = "messaging"  # realtime messaging path (P2 review §3 provenance)
@@ -148,6 +167,10 @@ class WhatsappCollector(BaseCollector):
         self._rabbitmq_url = os.getenv("WHATSAPP_RABBITMQ_URL", "") or os.getenv("RABBITMQ_URL", "")
         self._redis_url = os.getenv("WHATSAPP_REDIS_URL", "") or os.getenv("REDIS_URL", "")
         self._dedup_ttl = int(os.getenv("WHATSAPP_DEDUP_TTL_SECONDS", "") or os.getenv("COLLECTOR_DEDUP_TTL_SECONDS", "86400"))
+        # Mirrored from the env here so _process_broker_delivery can use it
+        # (the closure-local copy in _consume_realtime stays for the other
+        # consumers; both read the same var).
+        self._handler_timeout = float(os.getenv("WA_CONSUMER_HANDLER_TIMEOUT_SECONDS", "45"))
 
         self._backfill_batch = int(os.getenv("WHATSAPP_BACKFILL_BATCH_SIZE", "") or os.getenv("COLLECTOR_BACKFILL_BATCH_SIZE", "50"))
         self._backfill_poll = int(os.getenv("WHATSAPP_BACKFILL_POLL_SECONDS", "") or os.getenv("COLLECTOR_BACKFILL_POLL_SECONDS", "30"))
@@ -453,7 +476,7 @@ class WhatsappCollector(BaseCollector):
         # except block and swallow the exception so the for-loop keeps
         # consuming and message.process()'s ack-on-success is not triggered.
         # `ignore_processed=True` prevents double-processing errors.
-        _handler_timeout = float(os.getenv("WA_CONSUMER_HANDLER_TIMEOUT_SECONDS", "45"))
+        _handler_timeout = self._handler_timeout
 
         async def _consume_contacts():
             # Sprint-4 batching consumer. When WA_CONTACT_BATCH_MAX > 1, this
@@ -645,41 +668,7 @@ class WhatsappCollector(BaseCollector):
                     if self._stop.is_set():
                         break
                     async with message.process(ignore_processed=True):
-                        try:
-                            body = json.loads(message.body.decode())
-                            # Two payload shapes arrive on this queue:
-                            #  - single live message (flat: message_id/chat_jid/...)
-                            #  - history-sync batch: {sync_type, session_name, messages:[...]}
-                            # Unpack the batch so each historical message is ingested.
-                            # A batch may legitimately take longer than a single event,
-                            # so scale the timeout by the batch size (bounded).
-                            if isinstance(body, dict) and isinstance(body.get("messages"), list):
-                                batch_session = body.get("session_name")
-                                batch_msgs = body["messages"]
-                                batch_timeout = min(
-                                    max(_handler_timeout, _handler_timeout * len(batch_msgs) / 4),
-                                    float(os.getenv("WA_CONSUMER_BATCH_TIMEOUT_MAX_SECONDS", "120")),
-                                )
-                                async with asyncio.timeout(batch_timeout):
-                                    for m in batch_msgs:
-                                        if self._stop.is_set():
-                                            break
-                                        if batch_session and "session_name" not in m:
-                                            m["session_name"] = batch_session
-                                        await self._handle_message_event(m, targets)
-                            else:
-                                async with asyncio.timeout(_handler_timeout):
-                                    await self._handle_message_event(body, targets)
-                        except asyncio.TimeoutError:
-                            logger.warning(
-                                "Message event handler timeout; requeueing",
-                            )
-                            try:
-                                await message.nack(requeue=True)
-                            except Exception:
-                                pass
-                        except Exception as e:
-                            logger.error("Broker message processing failed: %s", e)
+                        await self._process_broker_delivery(message, targets)
 
         # Concurrency per queue. Each queue gets N independent consumer
         # tasks, all iterating the same queue via aio-pika's queue.iterator().
@@ -1165,6 +1154,64 @@ class WhatsappCollector(BaseCollector):
             except Exception as fallback_exc:
                 logger.debug("group metadata fallback upsert failed: %s", fallback_exc)
 
+    async def _process_broker_delivery(self, message, targets: list[str]) -> None:
+        """Decode and dispatch one broker delivery; nack/requeue on failure.
+
+        Every failure path after decode (persistence, media, outbox) nacks the
+        delivery with requeue=True so nothing is acked while incomplete. The
+        exception is caught here — never re-raise out of ``message.process()``
+        (aio-pika treats that as a channel-invalid signal and tears the
+        connection down). Malformed payloads are rejected without requeue (a
+        decode failure can never succeed on retry).
+        """
+        try:
+            body = json.loads(message.body.decode())
+        except Exception as e:
+            logger.error("Broker message decode failed; rejecting: %s", e)
+            try:
+                await message.reject(requeue=False)
+            except Exception:
+                pass
+            return
+        try:
+            # Two payload shapes arrive on this queue:
+            #  - single live message (flat: message_id/chat_jid/...)
+            #  - history-sync batch: {sync_type, session_name, messages:[...]}
+            # Unpack the batch so each historical message is ingested.
+            # A batch may legitimately take longer than a single event,
+            # so scale the timeout by the batch size (bounded).
+            if isinstance(body, dict) and isinstance(body.get("messages"), list):
+                batch_session = body.get("session_name")
+                batch_msgs = body["messages"]
+                batch_timeout = min(
+                    max(self._handler_timeout, self._handler_timeout * len(batch_msgs) / 4),
+                    float(os.getenv("WA_CONSUMER_BATCH_TIMEOUT_MAX_SECONDS", "120")),
+                )
+                async with asyncio.timeout(batch_timeout):
+                    for m in batch_msgs:
+                        if self._stop.is_set():
+                            break
+                        if batch_session and "session_name" not in m:
+                            m["session_name"] = batch_session
+                        await self._handle_message_event(m, targets)
+            else:
+                async with asyncio.timeout(self._handler_timeout):
+                    await self._handle_message_event(body, targets)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Message event handler timeout; requeueing",
+            )
+            try:
+                await message.nack(requeue=True)
+            except Exception:
+                pass
+        except Exception as e:
+            logger.error("Broker message processing failed; requeueing: %s", e)
+            try:
+                await message.nack(requeue=True)
+            except Exception:
+                pass
+
     async def _handle_message_event(self, event: dict, targets: list[str]):
         # WhatsApp "delete for everyone" (revoke) — flag the original message + when.
         if event.get("deletion"):
@@ -1223,18 +1270,41 @@ class WhatsappCollector(BaseCollector):
             },
         )
 
+        # READ-ONLY dedupe check. The marker is claimed only by
+        # _mark_dedupe_complete after every required effect (message
+        # persistence plus media/outbox work) completes; claiming it here
+        # previously stranded markers over unpersisted messages on failure.
         if await self._is_duplicate(msg_id, chat_jid):
             return
 
         chat_name = event.get("chat_name") or event.get("pushName") or chat_jid.split("@")[0]
         session = event.get("session_name", self._session_names[0] if self._session_names else "default")
 
+        # Media requirement is decided before persistence so the message row
+        # and its durable media work item can commit atomically (outbox).
+        media_type = event.get("media_type") or event.get("messageType", "")
+        has_media = media_type in ("imageMessage", "videoMessage", "audioMessage", "documentMessage", "stickerMessage")
+        classified = (
+            self._classify_bridge_media(media_type, event)
+            if (has_media or event.get("media_url") or event.get("directPath"))
+            else None
+        )
+        media_required = classified is not None
+        cid = f"wa_{msg_id}"
+        media_already_saved = self.is_known(cid)
+
         # 1. Upsert Chat & User Info
         await self._upsert_chat(chat_jid, chat_name, event)
         sender_uuid = await self._track_user_profile(event)
 
-        # 2. Save Message (ALL messages)
-        await self._upsert_message(event, chat_jid, sender_uuid)
+        # 2. Save Message + durable media work item in ONE transaction:
+        # a crash can never leave a persisted message without its pending
+        # media work item, and the broker delivery stays unacked.
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                await self._upsert_message(event, chat_jid, sender_uuid, conn=conn)
+                if media_required and not media_already_saved:
+                    await self._ensure_media_work_item(conn, msg_id, chat_jid, session)
         self._progress_count += 1
 
         # Tier 5: shared/live-location messages -> structured lat/lng.
@@ -1245,41 +1315,50 @@ class WhatsappCollector(BaseCollector):
             if text:
                 await self._discover_links(text, chat_jid, session=session)
 
-        # 3. Handle Media if exists
-        media_type = event.get("media_type") or event.get("messageType", "")
-        has_media = media_type in ("imageMessage", "videoMessage", "audioMessage", "documentMessage", "stickerMessage")
-
-        if not has_media:
-            # Check if it has a media_url or directPath even if type is not explicit
-            if not (event.get("media_url") or event.get("directPath")):
-                return
-
-        classified = self._classify_bridge_media(media_type, event)
-        if classified is None:
+        if not media_required or media_already_saved:
+            # No outstanding media effect: terminally complete.
+            await self._complete_media_work_item(msg_id)
+            await self._mark_dedupe_complete(msg_id, chat_jid)
             return
+
+        # 3. Required media is not saved yet: download + save now. Every
+        # non-terminal outcome leaves the pending work item in place and
+        # raises so the consumer nacks/requeues the delivery.
         ext, content_type = classified
-        cid = f"wa_{msg_id}"
-
-        if self.is_known(cid):
-            return
-
         media_key = event.get("mediaKey")
         direct_path = event.get("directPath")
 
-        if media_key and direct_path and session:
-            data = await self._download_via_bridge(
-                session,
-                msg_id,
-                media_key,
-                direct_path,
-                mimetype=event.get("mimetype") or event.get("mime_type"),
-            )
-        else:
-            media_url = event.get("media_url", "")
-            data = await self._download_direct(media_url) if media_url else None
+        try:
+            if media_key and direct_path and session:
+                data = await self._download_via_bridge(
+                    session,
+                    msg_id,
+                    media_key,
+                    direct_path,
+                    mimetype=event.get("mimetype") or event.get("mime_type"),
+                )
+            else:
+                media_url = event.get("media_url", "")
+                data = await self._download_direct(media_url) if media_url else None
+        except _MediaUnavailable:
+            # The unavailability is durably recorded on the message row;
+            # close the work item and treat the message as complete.
+            await self._fail_media_work_item(msg_id, "media permanently unavailable")
+            await self._mark_dedupe_complete(msg_id, chat_jid)
+            return
 
         if data:
-            await self._save_media(data, cid, chat_jid, chat_name, content_type, ext, event)
+            saved = await self._save_media(
+                data, cid, chat_jid, chat_name, content_type, ext, event,
+                dlq_on_error=False,
+            )
+            if saved:
+                await self._complete_media_work_item(msg_id)
+                await self._mark_dedupe_complete(msg_id, chat_jid)
+                return
+            raise _MediaPending(f"media save failed for {cid}; work item left pending")
+
+        raise _MediaPending(f"media download returned no data for {cid}; work item left pending")
 
     def _archive_raw_event(
         self,
@@ -1343,7 +1422,8 @@ class WhatsappCollector(BaseCollector):
                     updated_at = NOW()
             """, jid, name, is_group, chat_type)
 
-    async def _upsert_message(self, event: dict, chat_jid: str, sender_uuid: str | None):
+    async def _upsert_message(self, event: dict, chat_jid: str, sender_uuid: str | None,
+                              conn=None):
         msg_id = event.get("message_id") or event.get("key", {}).get("id", "")
         text = event.get("body") or event.get("text") or event.get("caption")
         timestamp = event.get("timestamp")
@@ -1360,12 +1440,16 @@ class WhatsappCollector(BaseCollector):
             event.get("forwarded_newsletter_name"),
             event.get("forwardFromName"),
         )
-        
-        async with self.pool.acquire() as conn:
-            chat_row = await conn.fetchrow("SELECT id FROM whatsapp_chats WHERE platform_chat_id = $1", chat_jid)
-            chat_uuid = chat_row['id'] if chat_row else None
-            
-            await conn.execute("""
+
+        if conn is None:
+            async with self.pool.acquire() as conn:
+                await self._upsert_message(event, chat_jid, sender_uuid, conn=conn)
+            return
+
+        chat_row = await conn.fetchrow("SELECT id FROM whatsapp_chats WHERE platform_chat_id = $1", chat_jid)
+        chat_uuid = chat_row['id'] if chat_row else None
+
+        await conn.execute("""
                 INSERT INTO whatsapp_messages (
                     platform_message_id, chat_id, sender_id, from_me,
                     text, media_mime_type, quoted_message_id, quoted_text,
@@ -1387,7 +1471,59 @@ class WhatsappCollector(BaseCollector):
             msg_id, chat_uuid, sender_uuid, from_me,
             text, event.get("mimetype"), quoted_message_id, quoted_text,
             forward_from_name, dt, json.dumps(event)
+        )
+
+    async def _ensure_media_work_item(self, conn, msg_id: str, chat_jid: str,
+                                      session: str | None) -> None:
+        # Outbox half: runs INSIDE the same transaction as the
+        # whatsapp_messages upsert. Idempotent — at most one live row per
+        # content_id, so redeliveries never duplicate the work item.
+        await conn.execute(
+            """
+            INSERT INTO dead_letter_queue
+                (source, entity_id, content_id, error_message, next_retry_at, status)
+            SELECT $1, $2, $3, $4, NOW(), 'pending'
+            WHERE NOT EXISTS (
+                SELECT 1 FROM dead_letter_queue
+                WHERE source = $1
+                  AND content_id = $3
+                  AND status IN ('pending', 'in_progress')
             )
+            """,
+            self.SOURCE_NAME, chat_jid, f"wa_{msg_id}",
+            f"media pending for message {msg_id} (session {session})",
+        )
+
+    async def _complete_media_work_item(self, msg_id: str) -> None:
+        # Cleanup only — the media effect is already durable when this runs.
+        # A failed cleanup leaves a stale pending row that the DLQ consumer
+        # self-heals on its next pass.
+        if self.pool is None:
+            return
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    "DELETE FROM dead_letter_queue "
+                    "WHERE source=$1 AND content_id=$2 "
+                    "AND status IN ('pending', 'in_progress')",
+                    self.SOURCE_NAME, f"wa_{msg_id}",
+                )
+        except Exception:
+            logger.warning("wa media work-item cleanup failed for %s", msg_id, exc_info=True)
+
+    async def _fail_media_work_item(self, msg_id: str, reason: str) -> None:
+        if self.pool is None:
+            return
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE dead_letter_queue SET status='failed', error_message=$3 "
+                    "WHERE source=$1 AND content_id=$2 "
+                    "AND status IN ('pending', 'in_progress')",
+                    self.SOURCE_NAME, f"wa_{msg_id}", reason,
+                )
+        except Exception:
+            logger.warning("wa media work-item failure mark failed for %s", msg_id, exc_info=True)
 
     @staticmethod
     def _build_whatsapp_source_url(chat_jid: str | None, cid: str | None) -> str | None:
@@ -1415,7 +1551,15 @@ class WhatsappCollector(BaseCollector):
 
     async def _save_media(self, data: bytes, cid: str, chat_jid: str,
                            chat_name: str, content_type: str, ext: str,
-                           event: dict | None = None):
+                           event: dict | None = None,
+                           dlq_on_error: bool = True) -> bool:
+        """Persist media bytes to the vault + media_items.
+
+        Returns True on success, False on failure. With ``dlq_on_error`` (the
+        default) a failure is recorded in dead_letter_queue and swallowed —
+        callers that manage their own durable work item pass False and handle
+        the False return themselves.
+        """
         entity_id = chat_jid.split("@")[0] if chat_jid else "unknown"
 
         filename = self.build_filename(
@@ -1500,10 +1644,13 @@ class WhatsappCollector(BaseCollector):
                 except Exception:
                     logger.debug("wa media-link update failed for %s", cid, exc_info=True)
             self._known_ids.add(cid)
+            return True
         except Exception as e:
             self.circuit_breaker.record_failure()
             logger.error("Save failed %s: %s", cid, e)
-            await self.send_to_dlq(entity_id, cid, str(e))
+            if dlq_on_error:
+                await self.send_to_dlq(entity_id, cid, str(e))
+            return False
 
     async def _track_user_profile(self, event: dict) -> str | None:
         if not self.pool:
@@ -1669,7 +1816,13 @@ class WhatsappCollector(BaseCollector):
                             if self._stop.is_set():
                                 break
                             msg["session_name"] = session_name
-                            await self._handle_message_event(msg, targets)
+                            try:
+                                await self._handle_message_event(msg, targets)
+                            except _MediaPending:
+                                # Durable media work item is pending (committed
+                                # with the message); the media archival loop and
+                                # the next poll retry it. Keep draining the batch.
+                                continue
 
                         self._record_session_success(session_name)
 
@@ -2091,7 +2244,10 @@ class WhatsappCollector(BaseCollector):
                             resp.status_code,
                             error_code or "",
                         )
-                        return None
+                        raise _MediaUnavailable(
+                            f"WhatsApp media unavailable {msg_id}: "
+                            f"{error_text or f'HTTP {resp.status_code}'}"
+                        )
                     if retryable is True or resp.status_code in {408, 429, 500, 502, 503, 504}:
                         logger.info(
                             "Bridge decrypt deferred %s: HTTP %d %s",
@@ -2114,6 +2270,8 @@ class WhatsappCollector(BaseCollector):
                             "error": error_text or None,
                         },
                     )
+        except _MediaUnavailable:
+            raise
         except Exception as e:
             logger.error("Bridge download failed %s: %s", msg_id, e)
             await self._record_http_exception(
@@ -2194,14 +2352,26 @@ class WhatsappCollector(BaseCollector):
         }
 
     async def _is_duplicate(self, msg_id: str, chat_jid: str) -> bool:
+        # READ-ONLY check. Claiming happens in _mark_dedupe_complete, after
+        # every required effect for the message has completed.
         key = f"collector:dedup:{msg_id}:{chat_jid}"
         if self._redis:
             try:
-                result = await self._redis.set(key, "1", ex=self._dedup_ttl, nx=True)
-                return result is None
+                return bool(await self._redis.exists(key))
             except Exception:
                 pass
         return self.is_known(f"wa_{msg_id}")
+
+    async def _mark_dedupe_complete(self, msg_id: str, chat_jid: str) -> None:
+        # Claim the terminal-completion marker: called only after message
+        # persistence AND all required media/outbox effects are durable.
+        key = f"collector:dedup:{msg_id}:{chat_jid}"
+        if self._redis:
+            try:
+                await self._redis.set(key, "1", ex=self._dedup_ttl)
+            except Exception:
+                pass
+        self._known_ids.add(f"wa_{msg_id}")
 
     def _is_session_cooled_down(self, session_name: str) -> bool:
         health = self._session_health.get(session_name, {})
