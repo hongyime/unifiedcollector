@@ -20,5 +20,10 @@ def test_profile_anchor_is_applied_to_each_service() -> None:
     assert "collector" not in env_files
     for name in _PROBES:
         assert any(entry.endswith("common.env") for entry in env_files[name])
-        probe = name.removeprefix("collector_").upper() + "_PROBE_ENABLED"
-        assert probe in inline_env[name]
+        source = name.removeprefix("collector_")
+        probe = source.upper() + "_PROBE_ENABLED"
+        if source == "paypal":
+            # PayPal is intentionally always-enabled, so it has no opt-out gate.
+            assert probe not in inline_env[name]
+        else:
+            assert probe in inline_env[name]
