@@ -288,6 +288,37 @@ async def test_iter_messages_walks_oldest_cursor(monkeypatch):
     await client.close()
 
 
+@pytest.mark.asyncio
+async def test_iter_message_pages_budgets_api_pages(monkeypatch):
+    monkeypatch.setenv("BEEPER_DESKTOP_API_TOKEN", "x")
+    requests = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests["n"] += 1
+        n = requests["n"]
+        return httpx.Response(200, json={
+            "items": [{"id": f"m{n}-{i}"} for i in range(2)],
+            "oldestCursor": f"c{n}",
+            "newestCursor": "n1",
+            "hasMore": True,
+        })
+
+    client = BeeperClient()
+    client._http = httpx.AsyncClient(
+        base_url=client.base_url,
+        transport=httpx.MockTransport(handler),
+        headers={"Authorization": "Bearer x"},
+    )
+
+    page_sizes = []
+    async for items, meta in client.iter_message_pages("!a:b", direction="before", max_pages=3):
+        page_sizes.append(len(items))
+
+    assert requests["n"] == 3
+    assert page_sizes == [2, 2, 2]
+    await client.close()
+
+
 # ── BeeperWriter ──────────────────────────────────────────────────────────
 
 
@@ -513,7 +544,7 @@ async def test_collector_full_cycle_smoke(monkeypatch, tmp_path):
     monkeypatch.setenv("BEEPER_DESKTOP_API_TOKEN", "x")
     monkeypatch.setenv("COLLECTOR_DRIVE_PATH", str(tmp_path))
     monkeypatch.setenv("BEEPER_MAX_CHATS_PER_CYCLE", "1")
-    monkeypatch.setenv("BEEPER_BACKFILL_PAGES_PER_CYCLE", "1")
+    monkeypatch.setenv("BEEPER_CHAT_PAGES_PER_CYCLE", "1")
 
     pool, conn = _mock_pool()
     # _sync_messages's SELECT
@@ -534,19 +565,21 @@ async def test_collector_full_cycle_smoke(monkeypatch, tmp_path):
     async def _iter_chats(**_kw):
         yield {"id": "!a:b", "accountID": "tg", "network": "Telegram", "title": "x"}
 
-    async def _iter_messages(chat_id, **_kw):
+    async def _iter_message_pages(chat_id, **_kw):
         yield (
-            {
-                "id": "m1", "chatID": chat_id, "accountID": "tg",
-                "network": "Telegram", "senderID": "@u:b",
-                "senderName": "Alice", "timestamp": "2026-05-27T13:55:06.532Z",
-                "type": "TEXT", "text": "hi",
-            },
+            [
+                {
+                    "id": "m1", "chatID": chat_id, "accountID": "tg",
+                    "network": "Telegram", "senderID": "@u:b",
+                    "senderName": "Alice", "timestamp": "2026-05-27T13:55:06.532Z",
+                    "type": "TEXT", "text": "hi",
+                }
+            ],
             {"oldestCursor": "c1", "newestCursor": "n1", "hasMore": False},
         )
 
     fake_client.iter_chats = _iter_chats
-    fake_client.iter_messages = _iter_messages
+    fake_client.iter_message_pages = _iter_message_pages
 
     coll = BeeperCollector(client=fake_client)
     coll.set_pool(pool)
@@ -760,22 +793,25 @@ async def test_sync_one_chat_tails_fresh_messages_before_backfill(monkeypatch):
 
     fake_client = MagicMock(spec=BeeperClient)
 
-    async def _iter_messages(chat_id, **kw):
+    def _page_msg(mid: str) -> dict:
+        return {
+            "id": mid,
+            "chatID": "!a:b",
+            "accountID": "tg",
+            "network": "Telegram",
+            "timestamp": "2026-05-27T13:55:06.532Z",
+            "type": "TEXT",
+            "text": "hi",
+        }
+
+    async def _iter_message_pages(chat_id, **kw):
         directions.append(kw["direction"])
         yield (
-            {
-                "id": f"m-{kw['direction']}",
-                "chatID": chat_id,
-                "accountID": "tg",
-                "network": "Telegram",
-                "timestamp": "2026-05-27T13:55:06.532Z",
-                "type": "TEXT",
-                "text": "hi",
-            },
+            [_page_msg(f"m-{kw['direction']}")],
             {"oldestCursor": "old-1", "newestCursor": "new-1", "hasMore": False},
         )
 
-    fake_client.iter_messages = _iter_messages
+    fake_client.iter_message_pages = _iter_message_pages
     coll = BeeperCollector(client=fake_client)
 
     async def _no_attachments(_msg):
@@ -806,20 +842,22 @@ async def test_sync_one_chat_sets_chat_network_before_upsert(monkeypatch):
     monkeypatch.setenv("BEEPER_DESKTOP_API_TOKEN", "x")
     fake_client = MagicMock(spec=BeeperClient)
 
-    async def _iter_messages(chat_id, **kw):
+    async def _iter_message_pages(chat_id, **kw):
         yield (
-            {
-                "id": "m1",
-                "chatID": chat_id,
-                "accountID": "discord",
-                "timestamp": "2026-05-27T13:55:06.532Z",
-                "type": "TEXT",
-                "text": "hi",
-            },
+            [
+                {
+                    "id": "m1",
+                    "chatID": chat_id,
+                    "accountID": "discord",
+                    "timestamp": "2026-05-27T13:55:06.532Z",
+                    "type": "TEXT",
+                    "text": "hi",
+                }
+            ],
             {"oldestCursor": "old-1", "newestCursor": "new-1", "hasMore": False},
         )
 
-    fake_client.iter_messages = _iter_messages
+    fake_client.iter_message_pages = _iter_message_pages
     coll = BeeperCollector(client=fake_client)
 
     async def _no_attachments(_msg):
@@ -842,6 +880,313 @@ async def test_sync_one_chat_sets_chat_network_before_upsert(monkeypatch):
 
     message = writer.upsert_message.await_args.args[0]
     assert message["network"] == "Discord"
+
+
+# ── page budgeting + page-complete cursors ────────────────────────────────
+
+
+def _beeper_page_msg(mid: str) -> dict:
+    return {
+        "id": mid,
+        "chatID": "!a:b",
+        "accountID": "tg",
+        "timestamp": "2026-05-27T13:55:06.532Z",
+        "type": "TEXT",
+        "text": "hi",
+    }
+
+
+def _real_paging_client(handler) -> BeeperClient:
+    client = BeeperClient()
+    client._http = httpx.AsyncClient(
+        base_url=client.base_url,
+        transport=httpx.MockTransport(handler),
+        headers={"Authorization": "Bearer x"},
+    )
+    return client
+
+
+def _fake_paging_client(pages: list[tuple[list[dict], dict]]) -> MagicMock:
+    fake_client = MagicMock(spec=BeeperClient)
+
+    async def _pages(chat_id, **kw):
+        for items, meta in pages:
+            yield items, meta
+
+    fake_client.iter_message_pages = _pages
+    return fake_client
+
+
+def _writer_with_mid_page_failure(fail_on: str) -> tuple[MagicMock, dict]:
+    writer = MagicMock(spec=BeeperWriter)
+    state = {"upserts": 0, "failing": True, "inserted_ids": []}
+
+    def _upsert(msg):
+        state["upserts"] += 1
+        mid = msg["id"]
+        if mid in state["inserted_ids"]:
+            return False
+        if state["failing"] and mid == fail_on:
+            state["failing"] = False
+            raise BeeperTransientError(f"boom on {mid}")
+        state["inserted_ids"].append(mid)
+        return True
+
+    writer.upsert_message = AsyncMock(side_effect=_upsert)
+    writer.update_sync_state = AsyncMock()
+    return writer, state
+
+
+@pytest.mark.asyncio
+async def test_sync_one_chat_backfill_fetches_exactly_max_pages(monkeypatch):
+    monkeypatch.setenv("BEEPER_DESKTOP_API_TOKEN", "x")
+    requests = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests["n"] += 1
+        n = requests["n"]
+        return httpx.Response(200, json={
+            "items": [_beeper_page_msg(f"m{n}-{i}") for i in range(2)],
+            "oldestCursor": f"c{n}",
+            "newestCursor": "n1",
+            "hasMore": True,
+        })
+
+    coll = BeeperCollector(client=_real_paging_client(handler))
+
+    async def _no_attachments(_msg):
+        return None
+
+    monkeypatch.setattr(coll, "_download_attachments", _no_attachments)
+    writer = MagicMock(spec=BeeperWriter)
+    writer.upsert_message = AsyncMock(return_value=True)
+    writer.update_sync_state = AsyncMock()
+
+    inserted = await coll._sync_one_chat(
+        chat_id="!a:b",
+        network="Telegram",
+        oldest_cursor="old-0",
+        newest_cursor=None,
+        backfill_complete=False,
+        max_pages=3,
+        w=writer,
+    )
+
+    assert requests["n"] == 3
+    assert inserted == 6
+    assert writer.upsert_message.await_count == 6
+    writer.update_sync_state.assert_awaited_once()
+    kwargs = writer.update_sync_state.await_args.kwargs
+    assert kwargs["oldest_cursor"] == "c3"
+    assert kwargs["backfill_complete"] is False
+
+
+@pytest.mark.asyncio
+async def test_sync_one_chat_max_pages_one_fetches_single_page(monkeypatch):
+    monkeypatch.setenv("BEEPER_DESKTOP_API_TOKEN", "x")
+    requests = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests["n"] += 1
+        n = requests["n"]
+        return httpx.Response(200, json={
+            "items": [_beeper_page_msg(f"m{n}-{i}") for i in range(2)],
+            "oldestCursor": f"c{n}",
+            "newestCursor": "n1",
+            "hasMore": True,
+        })
+
+    coll = BeeperCollector(client=_real_paging_client(handler))
+
+    async def _no_attachments(_msg):
+        return None
+
+    monkeypatch.setattr(coll, "_download_attachments", _no_attachments)
+    writer = MagicMock(spec=BeeperWriter)
+    writer.upsert_message = AsyncMock(return_value=True)
+    writer.update_sync_state = AsyncMock()
+
+    inserted = await coll._sync_one_chat(
+        chat_id="!a:b",
+        network="Telegram",
+        oldest_cursor="old-0",
+        newest_cursor=None,
+        backfill_complete=False,
+        max_pages=1,
+        w=writer,
+    )
+
+    assert requests["n"] == 1
+    assert inserted == 2
+    kwargs = writer.update_sync_state.await_args.kwargs
+    assert kwargs["oldest_cursor"] == "c1"
+    assert kwargs["backfill_complete"] is False
+
+
+@pytest.mark.asyncio
+async def test_sync_one_chat_mid_page_failure_holds_backfill_cursor(monkeypatch):
+    monkeypatch.setenv("BEEPER_DESKTOP_API_TOKEN", "x")
+    fake_client = _fake_paging_client([
+        (
+            [_beeper_page_msg(f"m{i}") for i in range(1, 6)],
+            {"oldestCursor": "c1", "newestCursor": "n1", "hasMore": True},
+        ),
+    ])
+    coll = BeeperCollector(client=fake_client)
+
+    async def _no_attachments(_msg):
+        return None
+
+    monkeypatch.setattr(coll, "_download_attachments", _no_attachments)
+    writer, state = _writer_with_mid_page_failure("m3")
+
+    inserted = await coll._sync_one_chat(
+        chat_id="!a:b",
+        network="Telegram",
+        oldest_cursor="old-0",
+        newest_cursor=None,
+        backfill_complete=False,
+        max_pages=3,
+        w=writer,
+    )
+
+    # m1/m2 were durably upserted before m3 failed mid-page; the return value
+    # reflects them, but the cursor must not have advanced.
+    assert inserted == 2
+    assert state["upserts"] == 3
+    writer.update_sync_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sync_one_chat_tail_mid_page_failure_holds_cursor(monkeypatch):
+    monkeypatch.setenv("BEEPER_DESKTOP_API_TOKEN", "x")
+    fake_client = _fake_paging_client([
+        (
+            [_beeper_page_msg("m1"), _beeper_page_msg("m2"), _beeper_page_msg("m3")],
+            {"oldestCursor": "c1", "newestCursor": "new-9", "hasMore": False},
+        ),
+    ])
+    coll = BeeperCollector(client=fake_client)
+
+    async def _no_attachments(_msg):
+        return None
+
+    monkeypatch.setattr(coll, "_download_attachments", _no_attachments)
+    writer, state = _writer_with_mid_page_failure("m2")
+
+    inserted = await coll._sync_one_chat(
+        chat_id="!a:b",
+        network="Telegram",
+        oldest_cursor=None,
+        newest_cursor="new-0",
+        backfill_complete=True,
+        max_pages=3,
+        w=writer,
+    )
+
+    assert inserted == 0
+    assert state["upserts"] == 2
+    writer.update_sync_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sync_one_chat_retry_replays_page_without_duplicates(monkeypatch):
+    monkeypatch.setenv("BEEPER_DESKTOP_API_TOKEN", "x")
+    fake_client = _fake_paging_client([
+        (
+            [_beeper_page_msg(f"m{i}") for i in range(1, 6)],
+            {"oldestCursor": "c1", "newestCursor": "n1", "hasMore": False},
+        ),
+    ])
+    coll = BeeperCollector(client=fake_client)
+
+    async def _no_attachments(_msg):
+        return None
+
+    monkeypatch.setattr(coll, "_download_attachments", _no_attachments)
+    writer, state = _writer_with_mid_page_failure("m3")
+
+    common = dict(
+        chat_id="!a:b",
+        network="Telegram",
+        oldest_cursor="old-0",
+        newest_cursor=None,
+        backfill_complete=False,
+        max_pages=3,
+        w=writer,
+    )
+    first = await coll._sync_one_chat(**common)
+    assert first == 2
+    writer.update_sync_state.assert_not_awaited()
+
+    second = await coll._sync_one_chat(**common)
+
+    assert second == 3
+    assert state["inserted_ids"] == ["m1", "m2", "m3", "m4", "m5"]
+    assert len(state["inserted_ids"]) == len(set(state["inserted_ids"]))
+    writer.update_sync_state.assert_awaited_once()
+    kwargs = writer.update_sync_state.await_args.kwargs
+    assert kwargs["oldest_cursor"] == "c1"
+    assert kwargs["backfill_complete"] is False
+
+
+@pytest.mark.asyncio
+async def test_sync_one_chat_partial_page_advances_cursor_and_completes_next_cycle(monkeypatch):
+    monkeypatch.setenv("BEEPER_DESKTOP_API_TOKEN", "x")
+    requests = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests["n"] += 1
+        if requests["n"] == 1:
+            return httpx.Response(200, json={
+                "items": [_beeper_page_msg("m1"), _beeper_page_msg("m2")],
+                "oldestCursor": "c1",
+                "newestCursor": "n1",
+                "hasMore": False,
+            })
+        return httpx.Response(200, json={
+            "items": [], "oldestCursor": None, "newestCursor": None, "hasMore": False,
+        })
+
+    coll = BeeperCollector(client=_real_paging_client(handler))
+
+    async def _no_attachments(_msg):
+        return None
+
+    monkeypatch.setattr(coll, "_download_attachments", _no_attachments)
+    writer = MagicMock(spec=BeeperWriter)
+    writer.upsert_message = AsyncMock(return_value=True)
+    writer.update_sync_state = AsyncMock()
+
+    first = await coll._sync_one_chat(
+        chat_id="!a:b",
+        network="Telegram",
+        oldest_cursor="old-0",
+        newest_cursor=None,
+        backfill_complete=False,
+        max_pages=3,
+        w=writer,
+    )
+    assert requests["n"] == 1
+    assert first == 2
+    kwargs = writer.update_sync_state.await_args.kwargs
+    assert kwargs["oldest_cursor"] == "c1"
+    assert kwargs["backfill_complete"] is False
+    writer.update_sync_state.reset_mock()
+
+    second = await coll._sync_one_chat(
+        chat_id="!a:b",
+        network="Telegram",
+        oldest_cursor="c1",
+        newest_cursor=None,
+        backfill_complete=False,
+        max_pages=3,
+        w=writer,
+    )
+    assert second == 0
+    kwargs = writer.update_sync_state.await_args.kwargs
+    assert kwargs["oldest_cursor"] == "c1"
+    assert kwargs["backfill_complete"] is True
 
 
 @pytest.mark.asyncio
@@ -1194,12 +1539,12 @@ async def test_sync_one_chat_timeout_does_not_abort_cycle(monkeypatch, tmp_path)
     monkeypatch.setenv("BEEPER_DESKTOP_API_TOKEN", "x")
     monkeypatch.setenv("COLLECTOR_DRIVE_PATH", str(tmp_path))
 
-    async def _messages(*_args, **_kwargs):
+    async def _pages(*_args, **_kwargs):
         raise TimeoutError()
         yield  # pragma: no cover
 
     fake_client = MagicMock(spec=BeeperClient)
-    fake_client.iter_messages = _messages
+    fake_client.iter_message_pages = _pages
     writer = MagicMock(spec=BeeperWriter)
     writer.update_sync_state = AsyncMock()
 
