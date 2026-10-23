@@ -212,6 +212,86 @@ async def test_collect_checkpoints_failed_target_and_dlqs(monkeypatch):
     c.send_to_dlq.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+async def test_collect_all_error_crawl_marks_error(monkeypatch):
+    """Zero pages crawled with errors → status error, never completed."""
+    c = WebsiteCollector()
+    c.pool = _make_pool()
+    c.checkpoint.save_progress = AsyncMock()
+
+    async def _spider(seed, **_kwargs):
+        return {"pages": 0, "errors": 5, "skipped": 0}
+
+    monkeypatch.setattr(c, "spider_domain", _spider)
+    monkeypatch.setattr(c, "_promote_discovered_sg_domains", AsyncMock())
+
+    await c.collect(["https://example.com"])
+
+    sql_calls = [call.args[0] for call in c.pool._conn.execute.await_args_list]
+    assert any("status = 'error'" in sql for sql in sql_calls)
+    assert not any("status = 'completed'" in sql for sql in sql_calls)
+
+
+@pytest.mark.asyncio
+async def test_collect_zero_page_crawl_marks_partial(monkeypatch):
+    """Zero pages crawled without errors (all skipped/blocked) → partial."""
+    c = WebsiteCollector()
+    c.pool = _make_pool()
+    c.checkpoint.save_progress = AsyncMock()
+
+    async def _spider(seed, **_kwargs):
+        return {"pages": 0, "errors": 0, "skipped": 7}
+
+    monkeypatch.setattr(c, "spider_domain", _spider)
+    monkeypatch.setattr(c, "_promote_discovered_sg_domains", AsyncMock())
+
+    await c.collect(["https://example.com"])
+
+    sql_calls = [call.args[0] for call in c.pool._conn.execute.await_args_list]
+    assert any("status = 'partial'" in sql for sql in sql_calls)
+    assert not any("status = 'completed'" in sql for sql in sql_calls)
+
+
+@pytest.mark.asyncio
+async def test_collect_error_dominant_crawl_marks_partial(monkeypatch):
+    """Errors >= pages → partial even when some pages crawled."""
+    c = WebsiteCollector()
+    c.pool = _make_pool()
+    c.checkpoint.save_progress = AsyncMock()
+
+    async def _spider(seed, **_kwargs):
+        return {"pages": 1, "errors": 5}
+
+    monkeypatch.setattr(c, "spider_domain", _spider)
+    monkeypatch.setattr(c, "_promote_discovered_sg_domains", AsyncMock())
+
+    await c.collect(["https://example.com"])
+
+    sql_calls = [call.args[0] for call in c.pool._conn.execute.await_args_list]
+    assert any("status = 'partial'" in sql for sql in sql_calls)
+    assert not any("status = 'completed'" in sql for sql in sql_calls)
+
+
+@pytest.mark.asyncio
+async def test_collect_mixed_crawl_still_completes(monkeypatch):
+    """Pages > errors > 0 → completed (successes dominate)."""
+    c = WebsiteCollector()
+    c.pool = _make_pool()
+    c.checkpoint.save_progress = AsyncMock()
+
+    async def _spider(seed, **_kwargs):
+        return {"pages": 3, "errors": 1}
+
+    monkeypatch.setattr(c, "spider_domain", _spider)
+    monkeypatch.setattr(c, "_promote_discovered_sg_domains", AsyncMock())
+
+    await c.collect(["https://example.com"])
+
+    sql_calls = [call.args[0] for call in c.pool._conn.execute.await_args_list]
+    assert any("status = 'completed'" in sql for sql in sql_calls)
+    assert not any("status = 'error'" in sql or "status = 'partial'" in sql for sql in sql_calls)
+
+
 # ── module helpers (small pure functions) ─────────────────────────────────
 
 
@@ -767,6 +847,113 @@ async def test_stream_video_writes_vault_blob(monkeypatch, tmp_path):
     assert kwargs["metadata"]["vault_artifact"]["ok"] is True
     assert kwargs["metadata"]["vault_artifact"]["partial"] is False
     c.send_to_dlq.assert_not_awaited()
+
+
+# ── _handle_pdf / limiter feedback ─────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_handle_pdf_rasterises_pages_via_convert_to_images():
+    c = WebsiteCollector()
+    # Only the real API name exists: a stale rasterise() dispatch would
+    # produce zero page items.
+    processor = MagicMock(spec=["convert_to_images"])
+    processor.convert_to_images = MagicMock(
+        return_value=[(b"png-page-0", 0), (b"png-page-1", 1)]
+    )
+    c._pdf_processor = processor
+    c.is_known = MagicMock(return_value=False)
+    c.download_media = AsyncMock()
+
+    await c._handle_pdf(b"%PDF-fake", "https://example.com/doc.pdf", "example.com")
+
+    processor.convert_to_images.assert_called_once_with(b"%PDF-fake")
+    items = [call.args[0] for call in c.download_media.await_args_list]
+    assert items[0]["content_type"] == "pdf"
+    assert items[0]["data"] == b"%PDF-fake"
+    pages = [i for i in items[1:] if i["content_type"] == "image"]
+    assert [p["data"] for p in pages] == [b"png-page-0", b"png-page-1"]
+    assert [p["url"] for p in pages] == [
+        "https://example.com/doc.pdf#page=1",
+        "https://example.com/doc.pdf#page=2",
+    ]
+    assert all(p["extension"] == "png" for p in pages)
+
+
+@pytest.mark.asyncio
+async def test_handle_pdf_skips_oversized_pdf_before_rasterise():
+    c = WebsiteCollector()
+    c._max_pdf_bytes = 10
+    processor = MagicMock(spec=["convert_to_images"])
+    processor.convert_to_images = MagicMock(return_value=[])
+    c._pdf_processor = processor
+    c.is_known = MagicMock(return_value=False)
+    c.download_media = AsyncMock()
+
+    await c._handle_pdf(b"x" * 11, "https://example.com/big.pdf", "example.com")
+
+    c.download_media.assert_not_awaited()
+    processor.convert_to_images.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_spider_get_failure_records_limiter_backoff(monkeypatch):
+    c = WebsiteCollector()
+    c._respect_robots = False
+    c._url_filter = MagicMock()
+    c._url_filter.is_allowed = MagicMock(return_value=(True, ""))
+
+    fake_client = MagicMock()
+    fake_client.get = AsyncMock(side_effect=RuntimeError("conn reset"))
+    fake_client.aclose = AsyncMock()
+    monkeypatch.setattr(c, "_build_client", lambda domain: fake_client)
+    monkeypatch.setattr(c, "wait_rate_limit", AsyncMock())
+    monkeypatch.setattr(c, "_record_domain_pacing_event", AsyncMock())
+
+    domain = "example.com"
+    before = c.rate_limiter.get_delay(domain)
+
+    stats = await c.spider_domain("https://example.com", max_depth=1, max_pages=5)
+
+    assert stats["pages"] == 0
+    assert stats["errors"] == 1
+    after = c.rate_limiter.get_delay(domain)
+    assert after == min(
+        before * c.rate_limiter.backoff_factor, c.rate_limiter.max_delay
+    )
+    fake_client.aclose.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_spider_success_records_limiter_success(monkeypatch):
+    c = WebsiteCollector()
+    c._respect_robots = False
+    c._use_playwright = False
+    c._url_filter = MagicMock()
+    c._url_filter.is_allowed = MagicMock(return_value=(True, ""))
+    c.rate_limiter.success_streak = 1
+
+    resp = MagicMock(status_code=200)
+    resp.headers = {"content-type": "text/html"}
+    resp.text = "<html><head><title>t</title></head><body>ok</body></html>"
+    fake_client = MagicMock()
+    fake_client.get = AsyncMock(return_value=resp)
+    fake_client.aclose = AsyncMock()
+    monkeypatch.setattr(c, "_build_client", lambda domain: fake_client)
+    monkeypatch.setattr(c, "wait_rate_limit", AsyncMock())
+    monkeypatch.setattr(c, "_record_domain_pacing_event", AsyncMock())
+    monkeypatch.setattr(c, "_upsert_page", AsyncMock())
+    monkeypatch.setattr(c, "download_media", AsyncMock())
+
+    domain = "example.com"
+    stats = await c.spider_domain("https://example.com", max_depth=1, max_pages=5)
+
+    assert stats["pages"] == 1
+    assert stats["errors"] == 0
+    # success_streak=1 → record_success decays the delay; a stale no-op
+    # method name would leave it at the default.
+    assert c.rate_limiter.get_delay(domain) < c.rate_limiter.default_delay
+    c._upsert_page.assert_awaited_once()
 
 
 # ── cleanup / module exports ──────────────────────────────────────────────

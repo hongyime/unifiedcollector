@@ -878,7 +878,7 @@ class WebsiteCollector(BaseCollector):
                 except Exception as e:
                     logger.debug("GET %s failed: %s", url, e)
                     stats["errors"] += 1
-                    self.rate_limiter.report_failure(domain) if hasattr(self.rate_limiter, "report_failure") else None
+                    self.rate_limiter.record_failure(domain)
                     continue
 
                 if resp.status_code != 200:
@@ -977,7 +977,7 @@ class WebsiteCollector(BaseCollector):
                             continue
                         queue.append((link, depth + 1))
 
-                self.rate_limiter.report_success(domain) if hasattr(self.rate_limiter, "report_success") else None
+                self.rate_limiter.record_success(domain)
 
         finally:
             try:
@@ -1388,16 +1388,13 @@ class WebsiteCollector(BaseCollector):
         }
         await self.download_media(item)
 
-        # Rasterise pages → image media items (best-effort).
+        # Rasterise pages → image media items (best-effort). convert_to_images
+        # applies its own page/size caps and never raises (returns [] on failure).
         if self._pdf_processor is None:
             return
-        try:
-            pages = self._pdf_processor.rasterise(pdf_data) if hasattr(self._pdf_processor, "rasterise") else []
-        except Exception as e:
-            logger.debug("PDF rasterise failed for %s: %s", source_url, e)
-            pages = []
-        for idx, png_bytes in enumerate(pages):
-            page_cid = hashlib.sha256(f"{cid}:{idx}".encode()).hexdigest()[:16]
+        pages = self._pdf_processor.convert_to_images(pdf_data)
+        for png_bytes, page_num in pages:
+            page_cid = hashlib.sha256(f"{cid}:{page_num}".encode()).hexdigest()[:16]
             if self.is_known(page_cid):
                 continue
             await self.download_media({
@@ -1405,7 +1402,7 @@ class WebsiteCollector(BaseCollector):
                 "entity_name": domain,
                 "content_type": "image",
                 "content_id": page_cid,
-                "url": f"{source_url}#page={idx + 1}",
+                "url": f"{source_url}#page={page_num + 1}",
                 "extension": "png",
                 "source_url": source_url,
                 "data": png_bytes,
@@ -1707,6 +1704,9 @@ class WebsiteCollector(BaseCollector):
     ) -> None:
         """Mark a configured website target as attempted so one site cannot
         recrawl forever from the top of the queue.
+
+        Status is computed from actual crawl outcomes: a zero-page crawl or a
+        crawl where errors dominate is never recorded as completed.
         """
         if not self.pool:
             return
@@ -1718,6 +1718,12 @@ class WebsiteCollector(BaseCollector):
         docs = int(stats.get("docs") or 0)
         videos = int(stats.get("videos") or 0)
         errors = int(stats.get("errors") or 0)
+        if pages == 0:
+            status = "error" if errors > 0 else "partial"
+        elif errors > 0 and errors >= pages:
+            status = "partial"
+        else:
+            status = "completed"
         summary = (
             f"last crawl: pages={pages} images={images} pdfs={pdfs} "
             f"docs={docs} videos={videos} errors={errors}"
@@ -1725,11 +1731,11 @@ class WebsiteCollector(BaseCollector):
         try:
             async with self.pool.acquire() as conn:
                 await conn.execute(
-                    """
+                    f"""
                     UPDATE collection_targets
                        SET collection_count = collection_count + 1,
                            last_collection_at = NOW(),
-                           status = 'completed',
+                           status = '{status}',
                            error_message = $2
                      WHERE source = 'website'
                        AND target_id = ANY($1::text[])
@@ -1738,9 +1744,9 @@ class WebsiteCollector(BaseCollector):
                     summary[:1000],
                 )
                 await conn.execute(
-                    """
+                    f"""
                     UPDATE website_targets
-                       SET status = 'completed',
+                       SET status = '{status}',
                            collected_at = NOW(),
                            updated_at = NOW()
                      WHERE domain = $1
