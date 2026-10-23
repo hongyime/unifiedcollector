@@ -346,7 +346,7 @@ def test_browser_media_candidates_records_non_tiktok_platform():
     )
     payload = json.loads(response.text)
 
-    assert payload == {"ok": True, "queued": 1, "platform": "facebook"}
+    assert payload == {"ok": True, "queued": 1, "excluded_verified": 0, "platform": "facebook"}
     queries = [query for query, _rows in pool.conn.executemany_calls]
     assert any("browser_media_candidates" in query for query in queries)
     assert not any("tiktok_browser_media_candidates" in query for query in queries)
@@ -448,7 +448,7 @@ def test_browser_media_candidates_queues_x_video_revisit():
     )
     payload = json.loads(response.text)
 
-    assert payload == {"ok": True, "queued": 1, "platform": "x"}
+    assert payload == {"ok": True, "queued": 1, "excluded_verified": 0, "platform": "x"}
     queries = [query for query, _rows in pool.conn.executemany_calls]
     assert any("browser_media_candidates" in query for query in queries)
     assert any("browser_media_revisit_queue" in query for query in queries)
@@ -495,7 +495,7 @@ def test_browser_media_candidates_queues_instagram_video_revisit():
     )
     payload = json.loads(response.text)
 
-    assert payload == {"ok": True, "queued": 1, "platform": "instagram"}
+    assert payload == {"ok": True, "queued": 1, "excluded_verified": 0, "platform": "instagram"}
     queries = [query for query, _rows in pool.conn.executemany_calls]
     assert any("browser_media_candidates" in query for query in queries)
     assert any("browser_media_revisit_queue" in query for query in queries)
@@ -539,7 +539,7 @@ def test_browser_media_candidates_synthesizes_instagram_revisit_url_from_media_i
     )
     payload = json.loads(response.text)
 
-    assert payload == {"ok": True, "queued": 1, "platform": "instagram"}
+    assert payload == {"ok": True, "queued": 1, "excluded_verified": 0, "platform": "instagram"}
     queue_args = next(rows[0] for query, rows in pool.conn.executemany_calls if "browser_media_revisit_queue" in query)
     assert queue_args[0] == "instagram"
     assert queue_args[1] == "3953923014190275071"
@@ -574,7 +574,7 @@ def test_browser_media_candidates_skips_unopenable_instagram_revisit():
     )
     payload = json.loads(response.text)
 
-    assert payload == {"ok": True, "queued": 1, "platform": "instagram"}
+    assert payload == {"ok": True, "queued": 1, "excluded_verified": 0, "platform": "instagram"}
     queries = [query for query, _rows in pool.conn.executemany_calls]
     assert any("browser_media_candidates" in query for query in queries)
     assert not any("browser_media_revisit_queue" in query for query in queries)
@@ -1115,7 +1115,8 @@ def test_record_browser_ingest_event_writes_observed_and_stored_counts():
     query, args = pool.conn.executes[0]
     assert "browser_ingest_events" in query
     assert args[:5] == ("threads", "media", "feed", 12, 3)
-    assert "extension_version" in args[5]
+    assert args[5:10] == ("unknown", 0, 0, "success", None)
+    assert "extension_version" in args[10]
     health_query, health_args = pool.conn.executes[1]
     assert "source_health" in health_query
     assert health_args == ("threads",)
@@ -1205,9 +1206,10 @@ def test_browser_upload_duplicate_counts_as_accepted(monkeypatch):
     )
 
     assert resp["accepted"] == 1
-    assert resp["stored"] == 1
+    assert resp["stored"] == 0
     assert resp["saved"] == 0
     assert resp["deduped"] is True
+    assert resp["failed"] is False
     assert resp["reject_stats"] == {"duplicate_content_id": 1}
     assert events == [
         (
@@ -1216,13 +1218,19 @@ def test_browser_upload_duplicate_counts_as_accepted(monkeypatch):
             "alice",
             {
                 "observed_count": 1,
-                "stored_count": 1,
+                "stored_count": 0,
+                "collection_surface": "unknown",
+                "deduped_count": 1,
+                "failed_count": 0,
+                "outcome": "success",
+                "error_class": None,
                 "metadata": {
                     "extension_version": "1.21.42",
                     "ingest_mode": "browser_upload",
                     "accepted": True,
                     "saved": False,
                     "deduped": True,
+                    "failed": False,
                     "content_id": "story_abc123",
                     "file_size": 12345,
                     "mime_type": "image/jpeg",
@@ -1273,6 +1281,11 @@ def test_drain_propagates_extension_version_to_media_and_telemetry(monkeypatch):
             {
                 "observed_count": 1,
                 "stored_count": 1,
+                "collection_surface": "unknown",
+                "deduped_count": 0,
+                "failed_count": 0,
+                "outcome": "success",
+                "error_class": None,
                 "metadata": {"extension_version": "1.21.35"},
             },
         )
@@ -1303,7 +1316,7 @@ def test_ingest_records_explicit_empty_media_probe(monkeypatch):
         )
     )
 
-    assert resp == {"accepted": 0, "platform": "x"}
+    assert resp == {"accepted": 0, "queued": False, "stored": 0, "platform": "x"}
     assert events == [
         (
             "x",
@@ -1312,6 +1325,8 @@ def test_ingest_records_explicit_empty_media_probe(monkeypatch):
             {
                 "observed_count": 0,
                 "stored_count": 0,
+                "collection_surface": "unknown",
+                "outcome": "empty",
                 "metadata": {
                     "extension_version": "1.21.38",
                     "probe_reason": "no_dom_media_candidates",
@@ -1408,7 +1423,7 @@ def test_browser_heartbeat_handler_records_platform_loop():
     query, args = pool.conn.executes[0]
     assert "browser_ingest_events" in query
     assert args[:5] == ("x", "browser_heartbeat", "123", 1, 0)
-    assert "1.21.29" in args[5]
+    assert "1.21.29" in args[10]
 
 
 def test_browser_heartbeat_handler_records_scraper_tab_summary_metadata():
@@ -1438,7 +1453,7 @@ def test_browser_heartbeat_handler_records_scraper_tab_summary_metadata():
     query, args = pool.conn.executes[0]
     assert "browser_ingest_events" in query
     assert args[:5] == ("bridge", "browser_heartbeat", "scraper_tabs", 1, 0)
-    metadata = json.loads(args[5])
+    metadata = json.loads(args[10])
     assert metadata["health_status"] == "scraper_heartbeat_degraded"
     assert metadata["scraper_tabs_seen"] == 7
     assert metadata["scraper_tabs_sent"] == 2
@@ -1474,7 +1489,7 @@ def test_browser_heartbeat_handler_records_page_recovery_metadata():
     query, args = pool.conn.executes[0]
     assert "browser_ingest_events" in query
     assert args[:5] == ("tiktok", "browser_heartbeat", "321", 1, 0)
-    metadata = json.loads(args[5])
+    metadata = json.loads(args[10])
     assert metadata["health_status"] == "recoverable_error_shell"
     assert metadata["health_reason"] == "sorry_could_not_show_page"
     assert metadata["recovery_scheduled"] is True
@@ -1514,7 +1529,7 @@ def test_browser_heartbeat_handler_records_forced_cycle_metadata():
     query, args = pool.conn.executes[0]
     assert "browser_ingest_events" in query
     assert args[:5] == ("threads", "browser_heartbeat", "456", 1, 0)
-    metadata = json.loads(args[5])
+    metadata = json.loads(args[10])
     assert metadata["health_status"] == "forced_cycle_finished"
     assert metadata["cycle_reason"] == "browser_content_stale"
     assert metadata["cycle_targets"] == 1
@@ -1550,7 +1565,7 @@ def test_browser_heartbeat_handler_records_bridge_diagnostic_platform():
     query, args = pool.conn.executes[0]
     assert "browser_ingest_events" in query
     assert args[:5] == ("bridge", "browser_heartbeat", "service_worker", 1, 0)
-    metadata = json.loads(args[5])
+    metadata = json.loads(args[10])
     assert metadata["health_status"] == "service_worker_active"
     assert metadata["health_reason"] == "warm_start"
     assert metadata["extension_version"] == "1.21.37"
@@ -1672,7 +1687,7 @@ def test_posts_handler_queues_structured_ingest_without_waiting(monkeypatch):
 
     assert resp.status == 200
     payload = json.loads(resp.text)
-    assert payload == {"ok": True, "queued": True, "observed": 1, "saved": 0}
+    assert payload == {"ok": True, "queued": True, "observed": 1, "excluded_verified": 0, "saved": 0}
     assert scheduled[0][0] == "browser_posts_ingest"
 
 
@@ -1755,11 +1770,11 @@ def test_posts_background_ingest_keeps_archive_save_event_and_author_writes(monk
     async def fake_archive(pool, platform, kind, body):
         calls.append(("archive", platform, kind, body["username"]))
 
-    async def fake_save(pool, platform, posts):
+    async def fake_save(pool, platform, posts, *_args):
         calls.append(("save", platform, [p["platform_post_id"] for p in posts]))
         return len(posts)
 
-    async def fake_event(pool, platform, endpoint, username, observed_count, stored_count):
+    async def fake_event(pool, platform, endpoint, username, observed_count, stored_count, **_kwargs):
         calls.append(("event", platform, endpoint, username, observed_count, stored_count))
 
     async def fake_users(pool, platform, users, context, owner=None):

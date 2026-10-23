@@ -1957,7 +1957,13 @@ async def _ingest(app, platform, body):
     surface = normalize_collection_surface(body.get("collection_surface") or body.get("surface"))
     items = body.get("items") or []
     if platform in _VERIFIED_FILTER_PLATFORMS and _explicitly_verified_capture(body):
-        return {"accepted": 0, "platform": platform, "excluded_verified": True}
+        return {
+            "accepted": 0,
+            "queued": False,
+            "stored": 0,
+            "platform": platform,
+            "excluded_verified": True,
+        }
     if isinstance(items, list):
         if platform in _VERIFIED_FILTER_PLATFORMS:
             items = [item for item in items if not _explicitly_verified_capture(item)]
@@ -1986,7 +1992,14 @@ async def _ingest(app, platform, body):
             outcome="empty",
             metadata=meta or None,
         )
-    return {"accepted": len(items), "platform": platform}
+    # Outcome states: queued = drain task scheduled below; stored is always 0
+    # here because _drain persists after this response is already sent.
+    return {
+        "accepted": len(items),
+        "queued": bool(items),
+        "stored": 0,
+        "platform": platform,
+    }
 
 
 async def _ingest_uploaded_media(app, platform, body):
@@ -1999,7 +2012,15 @@ async def _ingest_uploaded_media(app, platform, body):
     if platform in _VERIFIED_FILTER_PLATFORMS and (
         _explicitly_verified_capture(body) or _explicitly_verified_capture(item)
     ):
-        return {"saved": False, "excluded_verified": True}
+        return {
+            "accepted": 0,
+            "stored": 0,
+            "saved": 0,
+            "deduped": False,
+            "failed": False,
+            "platform": platform,
+            "excluded_verified": True,
+        }
     item["collection_surface"] = normalize_collection_surface(
         item.get("collection_surface") or surface
     )
@@ -2023,8 +2044,24 @@ async def _ingest_uploaded_media(app, platform, body):
     if upload_sem is None:
         upload_sem = asyncio.Semaphore(SOCIAL_INGEST_UPLOAD_CONCURRENCY)
         app["upload_sem"] = upload_sem
-    async with upload_sem:
-        saved = await _download_and_save(app["pool"], app["session"], platform, username, item, reject_stats)
+    saved = False
+    save_error: BaseException | None = None
+    try:
+        async with upload_sem:
+            saved = await _download_and_save(app["pool"], app["session"], platform, username, item, reject_stats)
+    except Exception as exc:
+        # The HTTP response already reported queued=true/stored=0; letting this
+        # raise would die in _schedule_app_task's debug log with no event row,
+        # hiding the failure behind an accepted-as-queued 200.
+        save_error = exc
+        saved = False
+        logger.warning(
+            "browser-upload[%s] %s: save failed: %s",
+            platform,
+            username,
+            exc.__class__.__name__,
+            exc_info=True,
+        )
     await _record_browser_media_candidate(
         app["pool"],
         platform,
@@ -2036,18 +2073,26 @@ async def _ingest_uploaded_media(app, platform, body):
         extension_version=extension_version,
     )
     dedupe_reasons = {"duplicate_content_id", "duplicate_sha256"}
-    deduped = any(_reject_count(reject_stats.get(reason)) > 0 for reason in dedupe_reasons)
+    deduped = save_error is None and any(
+        _reject_count(reject_stats.get(reason)) > 0 for reason in dedupe_reasons
+    )
     accepted = bool(saved or deduped)
+    failed = not accepted
     reason = None
     if not accepted and reject_stats:
         reason = max(reject_stats.items(), key=lambda kv: _reject_count(kv[1]))[0]
+    if save_error is not None:
+        reason = reason or save_error.__class__.__name__
     event_meta = {
         "extension_version": extension_version,
         "ingest_mode": "browser_upload",
         "accepted": accepted,
         "saved": bool(saved),
         "deduped": deduped,
+        "failed": failed,
     }
+    if save_error is not None:
+        event_meta["error_class"] = save_error.__class__.__name__
     if item.get("content_id"):
         event_meta["content_id"] = str(item.get("content_id"))[:200]
     if body.get("file_size") is not None:
@@ -2067,25 +2112,28 @@ async def _ingest_uploaded_media(app, platform, body):
         stored_count=1 if saved else 0,
         collection_surface=surface,
         deduped_count=1 if deduped else 0,
-        failed_count=0 if accepted else 1,
-        outcome="success" if saved or deduped else "failed",
+        failed_count=1 if failed else 0,
+        outcome="success" if accepted else "failed",
         error_class=None if accepted else str(reason or "media_rejected").split(":", 1)[0],
         metadata=event_meta,
     )
     logger.info(
-        "browser-upload[%s] %s: accepted=%d saved=%d deduped=%d reason=%s",
+        "browser-upload[%s] %s: accepted=%d saved=%d deduped=%d failed=%d reason=%s",
         platform,
         username,
         1 if accepted else 0,
         1 if saved else 0,
         1 if deduped else 0,
+        1 if failed else 0,
         reason or "ok",
     )
+    # Dedupe is its own terminal state: it never counts as stored.
     return {
         "accepted": 1 if accepted else 0,
-        "stored": 1 if accepted else 0,
+        "stored": 1 if saved else 0,
         "saved": 1 if saved else 0,
         "deduped": deduped,
+        "failed": failed,
         "platform": platform,
         "reason": reason,
         "reject_stats": reject_stats,
