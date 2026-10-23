@@ -1071,7 +1071,7 @@ async def claim_native_target(pool: Any, platform: str) -> dict[str, Any] | None
                 platform,
                 _MAX_ATTEMPTS,
                 _FOLLOWED_TARGET_SOURCES[platform],
-                _public_discovery_enabled(),
+                _public_discovery_enabled(platform),
                 list(_FOLLOW_ONLY_QUEUE_SOURCES[platform]),
                 uuid.uuid4(),
             )

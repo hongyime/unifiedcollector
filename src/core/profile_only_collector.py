@@ -42,6 +42,7 @@ _VERIFIED_BADGE_HTML_RE = re.compile(
 _FOLLOW_GRAPH_PROBE_SOURCES = frozenset({"snapchat", "pinterest"})
 _PUBLIC_DISCOVERY_PLATFORMS = frozenset({"airbnb", "pinterest", "snapchat"})
 _FOLLOW_GRAPH_TARGET_BATCH = 10
+_TRUTHY_FLAGS = frozenset({"1", "true", "yes", "on"})
 
 _FOLLOW_GRAPH_SOURCE_SQL = """
     WITH followed AS (
@@ -119,7 +120,9 @@ class ProfileOnlyCollector(BaseCollector):
       - ``<SOURCE>_PROBE_BATCH``    default 10
       - ``<SOURCE>_PROBE_QPS``      default 0.5
       - ``<SOURCE>_PROBE_STALE_DAYS`` default 30
-      - ``NATIVE_PUBLIC_DISCOVERY_ENABLED`` default 0 for Airbnb/Pinterest/Snapchat
+      - ``NATIVE_PUBLIC_DISCOVERY_ENABLED`` default 0 for Airbnb/Pinterest/Snapchat;
+        the source-scoped ``<SOURCE>_PROBE_NATIVE_PUBLIC_DISCOVERY_ENABLED``
+        overrides it when explicitly set.
     """
 
     PROFILE_TABLE: str = ""
@@ -154,6 +157,21 @@ class ProfileOnlyCollector(BaseCollector):
             return float(self._env("QPS", str(self.PROBE_QPS_DEFAULT)))
         except ValueError:
             return self.PROBE_QPS_DEFAULT
+
+    def _native_public_discovery_enabled(self) -> bool:
+        """Public-discovery gate with one precedence for all readers:
+        explicit ``<SOURCE>_PROBE_NATIVE_PUBLIC_DISCOVERY_ENABLED`` wins,
+        then the global ``NATIVE_PUBLIC_DISCOVERY_ENABLED``, else disabled.
+        """
+        scoped = os.getenv(
+            f"{self.SOURCE_NAME.upper()}_PROBE_NATIVE_PUBLIC_DISCOVERY_ENABLED"
+        )
+        if scoped is not None:
+            return scoped.strip().lower() in _TRUTHY_FLAGS
+        return (
+            os.getenv("NATIVE_PUBLIC_DISCOVERY_ENABLED", "0").strip().lower()
+            in _TRUTHY_FLAGS
+        )
 
     # --- required abstract interface (from BaseCollector) is not used
     #     for profile-only; provide no-op implementations. ---
@@ -198,8 +216,7 @@ class ProfileOnlyCollector(BaseCollector):
 
         allow_public_discovery = (
             self.SOURCE_NAME not in _PUBLIC_DISCOVERY_PLATFORMS
-            or self._env("NATIVE_PUBLIC_DISCOVERY_ENABLED", "0").strip().lower()
-            in {"1", "true", "yes", "on"}
+            or self._native_public_discovery_enabled()
         )
 
         async with self.pool.acquire() as conn:
