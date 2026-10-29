@@ -89,7 +89,7 @@ class WhatsappStagingMergeHandler:
         1. Read the oldest batch_max rows from staging.
         2. INSERT ... ON CONFLICT into whatsapp_users (user-JID rows only).
         3. INSERT ... ON CONFLICT into whatsapp_lid_map (rows with both lid + phone_jid).
-        4. DELETE the processed rows by id range.
+        4. DELETE the processed rows by their exact ids.
 
         Using DELETE by id (not TRUNCATE) so concurrent writers to staging
         are safe: rows written after we read the batch are left intact.
@@ -110,7 +110,6 @@ class WhatsappStagingMergeHandler:
                 return 0, 0
 
             ids = [r["id"] for r in rows]
-            min_id, max_id = ids[0], ids[-1]
 
             # --- whatsapp_users merge: rows that look like user JIDs ----------
             user_rows = [
@@ -198,13 +197,12 @@ class WhatsappStagingMergeHandler:
                 )
                 lid_merged = len(lid_rows)
 
-            # --- Delete processed rows by id range ---------------------------
-            # WHERE id BETWEEN min AND max matches the exact rows we read
-            # (ids are sequential for this batch, no gaps in our selection).
-            # Rows written by concurrent inserts above max_id are unaffected.
+            # --- Delete the exact rows read --------------------------------
+            # Ids are passed explicitly: collected_at ordering is not id
+            # ordering, so a min/max range would delete unread rows.
             await conn.execute(
-                "DELETE FROM wa_staging_contacts WHERE id >= $1 AND id <= $2",
-                min_id, max_id,
+                "DELETE FROM wa_staging_contacts WHERE id = ANY($1::bigint[])",
+                ids,
             )
 
         return user_merged, lid_merged
