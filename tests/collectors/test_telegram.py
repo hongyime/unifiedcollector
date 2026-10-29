@@ -575,20 +575,17 @@ async def test_handle_flood_wait_can_pin_without_sleep(monkeypatch):
     assert event_call.args[5] == 77
 
 
-def test_collect_chat_checkpoints_seen_messages_not_only_media():
-    # After PERF-004 sub-plan 4C step 10 the ``_collect_chat`` body lives in
-    # ``src/collectors/telegram/collector.py`` rather than ``__init__.py``.
-    # ``inspect.getsource`` resolves the method wherever it currently lives,
-    # so this regression check no longer depends on a fixed file layout.
+def test_collect_chat_does_not_use_global_cursor_for_min_id():
+    # The resume cursor is one row per service (service_cursors), so using it as
+    # iter_messages(min_id=...) made every chat after the first resume from the
+    # previous chat's newest message. min_id now comes from this chat's own
+    # stored messages; the chat loop must not touch the global cursor.
     import inspect
     block = inspect.getsource(tg_mod.TelegramCollector._collect_chat)
 
-    assert "seen_count += 1" in block
-    assert "last_seen_message_id = int(message.id)" in block
-    assert "if seen_count % self._batch_size == 0" in block
-    assert "if last_seen_message_id is not None:" in block
-    assert "save_progress(str(last_seen_message_id))" in block
-    assert "if count % self._batch_size" not in block
+    assert "last_processed_id" not in block
+    assert "save_progress" not in block
+    assert "split_part(m.platform_message_id, ':', 2)" in block
 
 
 @pytest.mark.asyncio
@@ -1720,3 +1717,51 @@ async def test_cleanup_swallows_hub_and_bot_errors(monkeypatch):
     coll._workers = []
     # Must not propagate.
     await coll.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_collect_chat_resumes_from_per_chat_newest_stored_id(monkeypatch):
+    coll = _make_collector(monkeypatch)
+    worker = _make_worker(coll)
+    coll._workers = [worker]
+
+    entities = {
+        "a": SimpleNamespace(id=111, title="A", username=None, broadcast=False),
+        "b": SimpleNamespace(id=222, title="B", username=None, broadcast=False),
+        "empty": SimpleNamespace(id=333, title="Empty", username=None, broadcast=False),
+    }
+    max_by_chat = {"111": 50000, "222": 120}
+
+    async def _resolve(_worker, target):
+        return worker, entities[target]
+
+    coll._resolve_entity_any_worker = _resolve
+    coll._upsert_chat = AsyncMock()
+    coll._collect_profile_photo = AsyncMock()
+    coll._upsert_message = AsyncMock()
+    coll._enqueue_forward_edges = AsyncMock()
+    coll._download_any_message_media = AsyncMock(return_value=False)
+    coll.collect_chat_members = AsyncMock()
+    coll.mark_target_collected = AsyncMock()
+    coll._admin_log_enabled = False
+
+    calls = []
+
+    def _iter_messages(entity, **kwargs):
+        calls.append((entity.id, kwargs.get("min_id")))
+        return _aiter([])
+
+    worker.client.iter_messages = _iter_messages
+
+    async def _fetchval(sql, *args):
+        if "split_part" in sql:
+            return max_by_chat.get(args[0], 0)
+        return True
+
+    coll.pool.conn.fetchval = AsyncMock(side_effect=_fetchval)
+
+    await coll._collect_chat(worker, "a")
+    await coll._collect_chat(worker, "b")
+    await coll._collect_chat(worker, "empty")
+
+    assert calls == [(111, 50000), (222, 120), (333, 0)]
