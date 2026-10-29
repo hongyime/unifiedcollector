@@ -61,13 +61,14 @@ async def backfill_equilibrium(_user: dict = Depends(require_role("viewer"))):
 
     queue_tables = {
         "github": "github_spider_queue",
-        "instagram": "instagram_spider_queue",
+        "instagram": "spider_queue",
         "lemon8": "lemon8_spider_queue",
         "strava": "strava_spider_queue",
         "telegram": "telegram_spider_queue",
         "tiktok": "tiktok_spider_queue",
         "youtube": "youtube_spider_queue",
     }
+    queue_filters = {"instagram": "platform = 'instagram'"}
     terminal_statuses = {"completed", "done", "failed", "unresolvable"}
     completed_statuses = {"completed", "done"}
     running_statuses = {"pending", "processing", "in_progress"}
@@ -78,7 +79,7 @@ async def backfill_equilibrium(_user: dict = Depends(require_role("viewer"))):
     async def table_exists(conn, name: str) -> bool:
         return bool(await conn.fetchval("SELECT to_regclass($1)", f"public.{name}"))
 
-    async def status_counts(conn, table: str, platform: str) -> dict:
+    async def status_counts(conn, table: str, platform: str, where_sql: str = "") -> dict:
         if not await table_exists(conn, table):
             return {"platform": platform, "queue_table": table, "missing_table": True}
         approximate = False
@@ -86,11 +87,12 @@ async def backfill_equilibrium(_user: dict = Depends(require_role("viewer"))):
             "SELECT COALESCE(reltuples, 0)::bigint FROM pg_class WHERE oid = to_regclass($1)",
             f"public.{table}",
         ) or 0)
-        if row_estimate > 500_000:
+        if row_estimate > 500_000 and not where_sql:
             # Large queues are usually dominated by pending rows. Exact pending
             # counts seq-scan the table and can hang the dashboard. Count the
             # small non-pending buckets exactly via the status index and infer an
-            # estimated pending/total from pg_class.reltuples.
+            # estimated pending/total from pg_class.reltuples. A platform filter
+            # always forces the exact branch (reltuples counts the whole table).
             counts = {}
             for status in ("completed", "done", "failed", "unresolvable", "processing", "in_progress"):
                 n = await conn.fetchval(f"SELECT COUNT(*)::int FROM {table} WHERE status = $1", status)
@@ -99,7 +101,8 @@ async def backfill_equilibrium(_user: dict = Depends(require_role("viewer"))):
             counts["pending"] = max(row_estimate - sum(counts.values()), 0)
             approximate = True
         else:
-            rows = await conn.fetch(f"SELECT status, COUNT(*)::int AS n FROM {table} GROUP BY status")
+            where = f" WHERE {where_sql}" if where_sql else ""
+            rows = await conn.fetch(f"SELECT status, COUNT(*)::int AS n FROM {table}{where} GROUP BY status")
             counts = {str(r["status"] or "unknown"): int(r["n"] or 0) for r in rows}
         total = sum(counts.values())
         queue_depth = sum(counts.get(s, 0) for s in running_statuses)
@@ -141,7 +144,9 @@ async def backfill_equilibrium(_user: dict = Depends(require_role("viewer"))):
     platforms: dict[str, dict] = {}
     async with pool.acquire() as conn:
         for platform, table in queue_tables.items():
-            platforms[platform] = await status_counts(conn, table, platform)
+            platforms[platform] = await status_counts(
+                conn, table, platform, queue_filters.get(platform, "")
+            )
 
         if await table_exists(conn, "spider_queue"):
             rows = await conn.fetch(
