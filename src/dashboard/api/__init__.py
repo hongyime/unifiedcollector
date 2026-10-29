@@ -393,6 +393,9 @@ from src.dashboard.api.observability import (  # noqa: E402,F401
     metrics,
     ws_health,
 )
+from src.dashboard.api.source_controls import (  # noqa: E402,F401
+    router as _source_controls_router,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -431,6 +434,7 @@ app.include_router(_misc_router)
 app.include_router(_collectors_core_router)
 app.include_router(_platform_content_router)
 app.include_router(_observability_router)
+app.include_router(_source_controls_router)
 app.add_exception_handler(Exception, verbose_exception_handler)
 
 
