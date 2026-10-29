@@ -19,6 +19,8 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from src.collectors.search import SearchCollector
 
+from .well_known_scanner import run_well_known_scan
+
 
 logger = logging.getLogger(__name__)
 DEFAULT_DORKS_FILE = (
@@ -226,6 +228,9 @@ class ExposureCollector(SearchCollector):
         return out
 
     async def collect(self, targets: list[str]):
+        # Independent of EXPOSURE_ENABLED; the scanner gates itself.
+        if self.pool is not None:
+            await run_well_known_scan(self.pool)
         if os.getenv("EXPOSURE_ENABLED", "0") != "1":
             logger.info("exposure disabled; set EXPOSURE_ENABLED=1 to run")
             return
