@@ -2156,7 +2156,7 @@ class YoutubeCollector(BaseCollector):
             return 0
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT platform_channel_id FROM youtube_channels ORDER BY updated_at ASC NULLS FIRST LIMIT $1",
+                "SELECT platform_channel_id FROM youtube_channels ORDER BY last_community_scan_at ASC NULLS FIRST LIMIT $1",
                 batch_size,
             )
         total = 0
@@ -2792,6 +2792,8 @@ class YoutubeCollector(BaseCollector):
                     WHERE NOT EXISTS (
                         SELECT 1 FROM youtube_transcripts t WHERE t.video_id = v.id
                     )
+                    AND (v.last_transcript_attempt_at IS NULL
+                         OR v.last_transcript_attempt_at < NOW() - INTERVAL '24 hours')
                     ORDER BY v.platform_published_at DESC NULLS LAST
                     LIMIT $1
                     """,
@@ -2821,6 +2823,8 @@ class YoutubeCollector(BaseCollector):
                     WHERE NOT EXISTS (
                         SELECT 1 FROM youtube_comments c WHERE c.video_id = v.id
                     )
+                    AND (v.last_comments_attempt_at IS NULL
+                         OR v.last_comments_attempt_at < NOW() - INTERVAL '24 hours')
                     ORDER BY v.platform_published_at DESC NULLS LAST
                     LIMIT $1
                     """,
