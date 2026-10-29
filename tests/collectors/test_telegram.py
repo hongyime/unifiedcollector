@@ -1354,9 +1354,12 @@ async def test_download_media_refreshes_expired_file_reference(monkeypatch, tmp_
 
 @pytest.mark.asyncio
 async def test_on_message_deleted_retries_transient_db_timeout(monkeypatch):
+    from src.collectors.telegram.mixins import realtime as realtime_mod
+
     coll = _make_collector(monkeypatch)
     coll._realtime_write_retry_delay = 0
     worker = _make_worker(coll)
+    monkeypatch.setattr(realtime_mod.archive_fallback, "enqueue", AsyncMock())
     coll.pool.conn.execute.side_effect = [TimeoutError(), "UPDATE 1"]
     event = SimpleNamespace(chat_id=12345, deleted_ids=[99])
 
@@ -1804,3 +1807,42 @@ async def test_on_new_message_normalizes_marked_chat_id_to_bare(monkeypatch):
         for call in conn.fetchrow.await_args_list
     ), conn.fetchrow.await_args_list
     assert all("-100" not in repr(call.args) for call in calls), calls
+
+
+@pytest.mark.asyncio
+async def test_on_message_deleted_enqueues_archive_fallback(monkeypatch):
+    from src.collectors.telegram.mixins import realtime as realtime_mod
+
+    coll = _make_collector(monkeypatch)
+    worker = _make_worker(coll)
+    enqueue = AsyncMock()
+    monkeypatch.setattr(realtime_mod.archive_fallback, "enqueue", enqueue)
+    event = SimpleNamespace(chat_id=12345, deleted_ids=[99])
+
+    await coll._on_message_deleted(worker, event)
+
+    enqueue.assert_awaited_once_with(
+        coll.pool,
+        source_table="telegram_messages",
+        source_record_id="12345:99",
+        target_url="https://t.me/c/12345/99",
+    )
+
+
+@pytest.mark.asyncio
+async def test_on_message_deleted_swallows_enqueue_failure(monkeypatch):
+    from src.collectors.telegram.mixins import realtime as realtime_mod
+
+    coll = _make_collector(monkeypatch)
+    worker = _make_worker(coll)
+    monkeypatch.setattr(
+        realtime_mod.archive_fallback,
+        "enqueue",
+        AsyncMock(side_effect=RuntimeError("queue down")),
+    )
+    event = SimpleNamespace(chat_id=12345, deleted_ids=[99])
+
+    await coll._on_message_deleted(worker, event)
+
+    # Deletion still committed: the UPDATE ran exactly once.
+    coll.pool.conn.execute.assert_awaited_once()

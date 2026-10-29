@@ -25,6 +25,7 @@ from src.collectors.telegram.helpers import (
     _tg_json,
     _tg_jsonb,
 )
+from src.core import archive_fallback
 from src.core.discovered_links import persist_discovered_links
 
 if TYPE_CHECKING:  # pragma: no cover — forward-ref hints only
@@ -489,6 +490,21 @@ class RealtimeMixin:
                                 SET metadata = COALESCE(metadata,'{}'::jsonb) || $2::jsonb
                                 WHERE platform_message_id = $1
                             """, f"{chat_id}:{msg_id}", patch)
+                    # Best-effort archive fallback: a queue failure must never
+                    # undo or fail the deletion we just persisted.
+                    for msg_id in deleted_ids:
+                        try:
+                            await archive_fallback.enqueue(
+                                self.pool,
+                                source_table="telegram_messages",
+                                source_record_id=f"{chat_id}:{msg_id}",
+                                target_url=f"https://t.me/c/{chat_id}/{msg_id}",
+                            )
+                        except Exception as exc:
+                            logger.warning(
+                                "telegram delete archive enqueue failed; chat=%s msg=%s error=%s",
+                                chat_id, msg_id, _format_exception(exc),
+                            )
                     return
                 except Exception as exc:
                     if attempt >= attempts or not _is_transient_realtime_write_error(exc):
