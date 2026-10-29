@@ -18,13 +18,15 @@ checksum=$dump.sha256
 temporary=$dump.in-progress
 writers=(collector_paypal collector_whatsapp wa-bridge-1 wa-bridge-2 recon_egress_guard collector_spiderfoot)
 writer_containers=(unifiedcollector_collector_paypal unifiedcollector_collector_whatsapp unifiedcollector_wa_bridge_1 unifiedcollector_wa_bridge_2 unifiedcollector_recon_egress_guard unifiedcollector_spiderfoot)
-resume_order=(wa-bridge-1 wa-bridge-2 collector_whatsapp collector_paypal recon_egress_guard collector_spiderfoot)
+resume_containers=(unifiedcollector_wa_bridge_1 unifiedcollector_wa_bridge_2 unifiedcollector_collector_whatsapp unifiedcollector_collector_paypal unifiedcollector_recon_egress_guard unifiedcollector_spiderfoot)
 writers_may_be_stopped=false
 
 resume_writers() {
-  local service rc=0
-  for service in "${resume_order[@]}"; do
-    "${compose[@]}" start "$service" || rc=1
+  local container rc=0
+  for container in "${resume_containers[@]}"; do
+    if [[ $(docker inspect --format '{{.State.Running}}' "$container") != true ]]; then
+      docker start "$container" >/dev/null || rc=1
+    fi
   done
   writers_may_be_stopped=false
   return "$rc"

@@ -21,7 +21,8 @@ def test_fresh_capture_guard_resumes_only_approved_writers_on_every_exit() -> No
     assert 'trap cleanup EXIT' in text
     assert 'writers_may_be_stopped' in text
     assert 'unifiedcollector_spiderfoot' in text
-    assert 'resume_order=(wa-bridge-1 wa-bridge-2 collector_whatsapp collector_paypal recon_egress_guard collector_spiderfoot)' in text
+    assert 'resume_containers=(unifiedcollector_wa_bridge_1 unifiedcollector_wa_bridge_2 unifiedcollector_collector_whatsapp unifiedcollector_collector_paypal unifiedcollector_recon_egress_guard unifiedcollector_spiderfoot)' in text
+    assert 'docker start "$container"' in text
     assert 'pg_dump --format=custom --compress=0' in text
     assert 'pg_restore --list /task-53-forward.dump' in text
     assert 'complete_task53_forward_capture.sh' in text
