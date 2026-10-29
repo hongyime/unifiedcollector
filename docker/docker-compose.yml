@@ -1198,10 +1198,12 @@ services:
     container_name: unifiedcollector_dashboard
     mem_limit: 256m
     ports:
-      # Keep the original local dashboard URL alive while 8700 remains the
-      # canonical service port.
-      - "8001:8700"
-      - "8700:8700"
+      # Publish on loopback only: this is a single-user local deployment and the
+      # dashboard has auth disabled below, so it must never bind a public
+      # interface. Keep the original local dashboard URL alive while 8700
+      # remains the canonical service port.
+      - "127.0.0.1:8001:8700"
+      - "127.0.0.1:8700:8700"
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
@@ -1211,9 +1213,13 @@ services:
       STRAVA_ROUTE_STREAM_SHARED_COOLDOWN: "true"
       STRAVA_BROWSER_ROUTE_QUEUE_CANDIDATE_LIMIT: "50"
       STRAVA_BROWSER_ROUTE_QUEUE_IMPORTANT_CANDIDATE_LIMIT: "100"
-      # Localhost-only single-user deployment: skip bearer-token auth so the
-      # dashboard works without a login flow. Remove/false for network exposure.
-      DASHBOARD_AUTH_DISABLED: "true"
+      # Localhost-only single-user deployment: default to skipping bearer-token
+      # auth so the dashboard works without a login flow. Override to "false"
+      # to require auth before exposing anything beyond loopback.
+      # NOTE: compose interpolation reads the compose project env (`docker/.env`
+      # or a shell export), NOT ./env/dashboard.env -- env_file only feeds the
+      # container at runtime and cannot drive this substitution.
+      DASHBOARD_AUTH_DISABLED: "${DASHBOARD_AUTH_DISABLED:-true}"
       DB_POOL_MIN_SIZE: "2"
       DB_POOL_MAX_SIZE: "16"
       DASHBOARD_DB_ACQUIRE_TIMEOUT_SECONDS: "15"
