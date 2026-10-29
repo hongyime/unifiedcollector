@@ -2481,7 +2481,8 @@ class GithubCollector(BaseCollector):
         async with self.pool.acquire() as conn:
             await conn.execute(
                 "INSERT INTO github_readmes (repo_id, content, sha, size, collected_at) "
-                "VALUES ($1, $2, $3, $4, NOW())",
+                "VALUES ($1, $2, $3, $4, NOW()) "
+                "ON CONFLICT (repo_id, sha) DO UPDATE SET collected_at = NOW()",
                 repo_uuid, content, sha, size,
             )
 
