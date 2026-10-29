@@ -631,145 +631,102 @@ class BaseCollector(ABC):
         # sources, skip storing bytes we already have under a different content_id
         # (the two paths key content_ids differently). Messaging sources are EXCLUDED
         # — the same media legitimately appears in multiple chats there.
-        async with self.pool.acquire() as conn:
-            if sha256 and self.SOURCE_NAME in (
-                "instagram", "tiktok", "lemon8", "threads", "facebook", "x",
-                "search", "website", "github", "strava",
-            ):
-                try:
-                    dup = await conn.fetchval(
-                        "SELECT 1 FROM media_items WHERE source=$1 AND sha256=$2 LIMIT 1",
-                        self.SOURCE_NAME, sha256,
-                    )
-                    if dup:
-                        _unlink_duplicate_media_file(file_path)
-                        try:
-                            from src.notifications import realtime_delivery
-                            await realtime_delivery.record_with_conn(
-                                conn,
-                                source=self.SOURCE_NAME,
-                                content_id=content_id,
-                                status="deduped",
-                                reason="duplicate_suppressed",
-                                file_size=file_size,
-                                content_type=content_type,
-                            )
-                        except Exception:
-                            logger.debug(
-                                "realtime delivery duplicate ledger failed for %s/%s",
-                                self.SOURCE_NAME,
-                                content_id,
-                                exc_info=True,
-                            )
-                        logger.debug("cross-collector dup skipped: %s sha=%s", self.SOURCE_NAME, sha256[:12])
-                        return False
-                except Exception:
-                    pass
+        # Sidecar I/O is synchronous (vault probe write + fsync). Write it before
+        # taking a pooled connection so DB pool slots are not pinned on disk I/O.
+        sidecar = write_media_sidecar(
+            source=self.SOURCE_NAME,
+            entity_id=entity_id,
+            entity_name=entity_name,
+            content_type=content_type,
+            content_id=content_id,
+            filename=filename,
+            file_path=file_path,
+            file_size=file_size,
+            width=width,
+            height=height,
+            sha256=sha256,
+            source_url=source_url,
+            metadata=metadata,
+            ingest_path=self.INGEST_PATH,
+            kind=kind,
+        )
+        sidecar_meta = {
+            "vault_sidecar": {
+                "enabled": sidecar.enabled,
+                "ok": sidecar.ok,
+                "path": sidecar.relative_path,
+                "error": sidecar.error,
+            }
+        }
+        unlink_duplicate_after_release = False
+        try:
+            async with self.pool.acquire() as conn:
+                if sha256 and self.SOURCE_NAME in (
+                    "instagram", "tiktok", "lemon8", "threads", "facebook", "x",
+                    "search", "website", "github", "strava",
+                ):
+                    try:
+                        dup = await conn.fetchval(
+                            "SELECT 1 FROM media_items WHERE source=$1 AND sha256=$2 LIMIT 1",
+                            self.SOURCE_NAME, sha256,
+                        )
+                        if dup:
+                            unlink_duplicate_after_release = True
+                            try:
+                                from src.notifications import realtime_delivery
+                                await realtime_delivery.record_with_conn(
+                                    conn,
+                                    source=self.SOURCE_NAME,
+                                    content_id=content_id,
+                                    status="deduped",
+                                    reason="duplicate_suppressed",
+                                    file_size=file_size,
+                                    content_type=content_type,
+                                )
+                            except Exception:
+                                logger.debug(
+                                    "realtime delivery duplicate ledger failed for %s/%s",
+                                    self.SOURCE_NAME,
+                                    content_id,
+                                    exc_info=True,
+                                )
+                            logger.debug("cross-collector dup skipped: %s sha=%s", self.SOURCE_NAME, sha256[:12])
+                            return False
+                    except Exception:
+                        pass
 
-            # ATOMIC dedup (P2 review §3): `ON CONFLICT DO NOTHING` (no target) skips on
-            # ANY unique violation — both the (source, content_id) index and the partial
-            # unique (source, sha256) index (uq_media_source_sha256, in-scope sources).
-            # This replaces the old racy SELECT-then-INSERT sha256 pre-check + the
-            # UniqueViolationError catch: two concurrent tasks can no longer both insert
-            # the same bytes under different content_ids. The advisory sha256 pre-check
-            # above still runs first to delete the redundant blob in the common case;
-            # the DB constraint is the backstop for the race it couldn't close.
-            surface = normalize_collection_surface(
-                collection_surface,
-                context=(metadata or {}).get("collection_surface") or (metadata or {}).get("surface"),
-            )
-            status = await conn.execute(
-                """
-                INSERT INTO media_items
-                    (source, entity_id, entity_name, content_type, content_id,
-                     filename, file_path, file_size, width, height,
-                     sha256, source_url, metadata, ingest_path, kind, collection_surface)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14,
-                        COALESCE($15, 'post'),$16)
-                ON CONFLICT DO NOTHING
-                """,
-                self.SOURCE_NAME, entity_id, entity_name, content_type, content_id,
-                filename, file_path, file_size, width, height,
-                sha256, source_url, json.dumps(metadata, default=str) if metadata is not None else None,
-                self.INGEST_PATH, kind, surface,
-            )
-            
-            # asyncpg returns the command tag, e.g. "INSERT 0 1" (stored) / "INSERT 0 0"
-            # (a unique conflict skipped it).
-            if status.endswith(" 1"):
-                sidecar = write_media_sidecar(
-                    source=self.SOURCE_NAME,
-                    entity_id=entity_id,
-                    entity_name=entity_name,
-                    content_type=content_type,
-                    content_id=content_id,
-                    filename=filename,
-                    file_path=file_path,
-                    file_size=file_size,
-                    width=width,
-                    height=height,
-                    sha256=sha256,
-                    source_url=source_url,
-                    metadata=metadata,
-                    ingest_path=self.INGEST_PATH,
-                    kind=kind,
+                # ATOMIC dedup (P2 review §3): `ON CONFLICT DO NOTHING` (no target) skips on
+                # ANY unique violation — both the (source, content_id) index and the partial
+                # unique (source, sha256) index (uq_media_source_sha256, in-scope sources).
+                # This replaces the old racy SELECT-then-INSERT sha256 pre-check + the
+                # UniqueViolationError catch: two concurrent tasks can no longer both insert
+                # the same bytes under different content_ids. The advisory sha256 pre-check
+                # above still runs first to delete the redundant blob in the common case;
+                # the DB constraint is the backstop for the race it couldn't close.
+                surface = normalize_collection_surface(
+                    collection_surface,
+                    context=(metadata or {}).get("collection_surface") or (metadata or {}).get("surface"),
                 )
-                sidecar_meta = {
-                    "vault_sidecar": {
-                        "enabled": sidecar.enabled,
-                        "ok": sidecar.ok,
-                        "path": sidecar.relative_path,
-                        "error": sidecar.error,
-                    }
-                }
-                try:
-                    await conn.execute(
-                        """
-                        UPDATE media_items
-                        SET metadata = COALESCE(metadata, '{}'::jsonb) || $3::jsonb
-                        WHERE source = $1 AND content_id = $2
-                        """,
-                        self.SOURCE_NAME,
-                        content_id,
-                        json.dumps(sidecar_meta, default=str),
-                    )
-                    if sidecar.enabled and not sidecar.ok:
-                        await conn.execute(
-                            """
-                            INSERT INTO dead_letter_queue (source, entity_id, content_id, error_message)
-                            VALUES ($1, $2, $3, $4)
-                            """,
-                            self.SOURCE_NAME,
-                            entity_id,
-                            content_id,
-                            f"vault sidecar write failed: {sidecar.error}",
-                        )
-                except Exception:
-                    logger.warning(
-                        "vault sidecar status update failed for %s/%s",
-                        self.SOURCE_NAME,
-                        content_id,
-                        exc_info=True,
-                    )
-                
-                try:
-                    timeout_ms = _media_db_consistency_timeout_ms()
-                    async def record_consistency() -> None:
-                        consistency = await verify_media_item_db_consistency(
-                            conn,
-                            source=self.SOURCE_NAME,
-                            content_id=content_id,
-                            file_path=file_path,
-                            file_size=file_size,
-                            sha256=sha256,
-                            sidecar_path=sidecar.relative_path if sidecar.enabled else None,
-                        )
-                        consistency_meta = {
-                            "vault_artifact_db_consistency": {
-                                "ok": consistency.ok,
-                                "errors": list(consistency.errors),
-                            }
-                        }
+                status = await conn.execute(
+                    """
+                    INSERT INTO media_items
+                        (source, entity_id, entity_name, content_type, content_id,
+                         filename, file_path, file_size, width, height,
+                         sha256, source_url, metadata, ingest_path, kind, collection_surface)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14,
+                            COALESCE($15, 'post'),$16)
+                    ON CONFLICT DO NOTHING
+                    """,
+                    self.SOURCE_NAME, entity_id, entity_name, content_type, content_id,
+                    filename, file_path, file_size, width, height,
+                    sha256, source_url, json.dumps(metadata, default=str) if metadata is not None else None,
+                    self.INGEST_PATH, kind, surface,
+                )
+            
+                # asyncpg returns the command tag, e.g. "INSERT 0 1" (stored) / "INSERT 0 0"
+                # (a unique conflict skipped it).
+                if status.endswith(" 1"):
+                    try:
                         await conn.execute(
                             """
                             UPDATE media_items
@@ -778,9 +735,9 @@ class BaseCollector(ABC):
                             """,
                             self.SOURCE_NAME,
                             content_id,
-                            json.dumps(consistency_meta, default=str),
+                            json.dumps(sidecar_meta, default=str),
                         )
-                        if not consistency.ok:
+                        if sidecar.enabled and not sidecar.ok:
                             await conn.execute(
                                 """
                                 INSERT INTO dead_letter_queue (source, entity_id, content_id, error_message)
@@ -789,101 +746,151 @@ class BaseCollector(ABC):
                                 self.SOURCE_NAME,
                                 entity_id,
                                 content_id,
-                                "vault artifact db consistency failed: "
-                                + "; ".join(consistency.errors),
+                                f"vault sidecar write failed: {sidecar.error}",
                             )
+                    except Exception:
+                        logger.warning(
+                            "vault sidecar status update failed for %s/%s",
+                            self.SOURCE_NAME,
+                            content_id,
+                            exc_info=True,
+                        )
+                
+                    try:
+                        timeout_ms = _media_db_consistency_timeout_ms()
+                        async def record_consistency() -> None:
+                            consistency = await verify_media_item_db_consistency(
+                                conn,
+                                source=self.SOURCE_NAME,
+                                content_id=content_id,
+                                file_path=file_path,
+                                file_size=file_size,
+                                sha256=sha256,
+                                sidecar_path=sidecar.relative_path if sidecar.enabled else None,
+                            )
+                            consistency_meta = {
+                                "vault_artifact_db_consistency": {
+                                    "ok": consistency.ok,
+                                    "errors": list(consistency.errors),
+                                }
+                            }
+                            await conn.execute(
+                                """
+                                UPDATE media_items
+                                SET metadata = COALESCE(metadata, '{}'::jsonb) || $3::jsonb
+                                WHERE source = $1 AND content_id = $2
+                                """,
+                                self.SOURCE_NAME,
+                                content_id,
+                                json.dumps(consistency_meta, default=str),
+                            )
+                            if not consistency.ok:
+                                await conn.execute(
+                                    """
+                                    INSERT INTO dead_letter_queue (source, entity_id, content_id, error_message)
+                                    VALUES ($1, $2, $3, $4)
+                                    """,
+                                    self.SOURCE_NAME,
+                                    entity_id,
+                                    content_id,
+                                    "vault artifact db consistency failed: "
+                                    + "; ".join(consistency.errors),
+                                )
 
-                    if timeout_ms > 0 and callable(getattr(conn, "transaction", None)):
-                        async with conn.transaction():
-                            await conn.execute(f"SET LOCAL statement_timeout = {timeout_ms}")
+                        if timeout_ms > 0 and callable(getattr(conn, "transaction", None)):
+                            async with conn.transaction():
+                                await conn.execute(f"SET LOCAL statement_timeout = {timeout_ms}")
+                                await record_consistency()
+                        elif timeout_ms > 0:
                             await record_consistency()
-                    elif timeout_ms > 0:
-                        await record_consistency()
-                    else:
-                        logger.debug(
-                            "vault artifact db consistency check disabled for %s/%s",
+                        else:
+                            logger.debug(
+                                "vault artifact db consistency check disabled for %s/%s",
+                                self.SOURCE_NAME,
+                                content_id,
+                            )
+                    except (asyncio.TimeoutError, TimeoutError, QueryCanceledError):
+                        logger.info(
+                            "vault artifact db consistency check timed out for %s/%s; media row kept",
                             self.SOURCE_NAME,
                             content_id,
                         )
-                except (asyncio.TimeoutError, TimeoutError, QueryCanceledError):
-                    logger.info(
-                        "vault artifact db consistency check timed out for %s/%s; media row kept",
-                        self.SOURCE_NAME,
-                        content_id,
+                    except Exception:
+                        logger.warning(
+                            "vault artifact db consistency check failed for %s/%s",
+                            self.SOURCE_NAME,
+                            content_id,
+                            exc_info=True,
+                        )
+                else:
+                    try:
+                        from src.notifications import realtime_delivery
+                        await realtime_delivery.record_with_conn(
+                            conn,
+                            source=self.SOURCE_NAME,
+                            content_id=content_id,
+                            status="deduped",
+                            reason="duplicate_suppressed",
+                            file_size=file_size,
+                            content_type=content_type,
+                        )
+                    except Exception:
+                        logger.debug(
+                            "realtime delivery duplicate ledger failed for %s/%s",
+                            self.SOURCE_NAME,
+                            content_id,
+                            exc_info=True,
+                        )
+                    logger.debug("Duplicate skipped (content_id or sha256): %s/%s", self.SOURCE_NAME, content_id)
+                    return False
+
+                self._progress_count += 1
+                # Real-time post feed: fire-and-forget enqueue. Never raises, never
+                # blocks. Disabled/no-Redis is a silent no-op. See
+                # src/notifications/realtime_feed.py.
+                enqueue_result = {"status": "stored_only", "reason": "enqueue_not_attempted"}
+                try:
+                    from src.notifications import realtime_feed
+                    enqueue_result = realtime_feed.enqueue_from_insert(
+                        source=self.SOURCE_NAME,
+                        entity_name=entity_name,
+                        content_id=content_id,
+                        file_path=file_path,
+                        source_url=source_url,
+                        sha256=sha256,
+                        metadata=metadata,
+                        kind=kind,
+                        content_type=content_type,
+                        file_size=file_size,
                     )
                 except Exception:
-                    logger.warning(
-                        "vault artifact db consistency check failed for %s/%s",
-                        self.SOURCE_NAME,
-                        content_id,
-                        exc_info=True,
+                    logger.debug(
+                        "realtime_feed enqueue failed for %s/%s",
+                        self.SOURCE_NAME, content_id, exc_info=True,
                     )
-            else:
+                    enqueue_result = {"status": "stored_only", "reason": "enqueue_failed"}
                 try:
                     from src.notifications import realtime_delivery
                     await realtime_delivery.record_with_conn(
                         conn,
                         source=self.SOURCE_NAME,
                         content_id=content_id,
-                        status="deduped",
-                        reason="duplicate_suppressed",
+                        status=str(enqueue_result.get("status") or "stored_only"),
+                        reason=enqueue_result.get("reason"),
                         file_size=file_size,
                         content_type=content_type,
                     )
                 except Exception:
                     logger.debug(
-                        "realtime delivery duplicate ledger failed for %s/%s",
+                        "realtime delivery enqueue ledger failed for %s/%s",
                         self.SOURCE_NAME,
                         content_id,
                         exc_info=True,
                     )
-                logger.debug("Duplicate skipped (content_id or sha256): %s/%s", self.SOURCE_NAME, content_id)
-                return False
-
-            self._progress_count += 1
-            # Real-time post feed: fire-and-forget enqueue. Never raises, never
-            # blocks. Disabled/no-Redis is a silent no-op. See
-            # src/notifications/realtime_feed.py.
-            enqueue_result = {"status": "stored_only", "reason": "enqueue_not_attempted"}
-            try:
-                from src.notifications import realtime_feed
-                enqueue_result = realtime_feed.enqueue_from_insert(
-                    source=self.SOURCE_NAME,
-                    entity_name=entity_name,
-                    content_id=content_id,
-                    file_path=file_path,
-                    source_url=source_url,
-                    sha256=sha256,
-                    metadata=metadata,
-                    kind=kind,
-                    content_type=content_type,
-                    file_size=file_size,
-                )
-            except Exception:
-                logger.debug(
-                    "realtime_feed enqueue failed for %s/%s",
-                    self.SOURCE_NAME, content_id, exc_info=True,
-                )
-                enqueue_result = {"status": "stored_only", "reason": "enqueue_failed"}
-            try:
-                from src.notifications import realtime_delivery
-                await realtime_delivery.record_with_conn(
-                    conn,
-                    source=self.SOURCE_NAME,
-                    content_id=content_id,
-                    status=str(enqueue_result.get("status") or "stored_only"),
-                    reason=enqueue_result.get("reason"),
-                    file_size=file_size,
-                    content_type=content_type,
-                )
-            except Exception:
-                logger.debug(
-                    "realtime delivery enqueue ledger failed for %s/%s",
-                    self.SOURCE_NAME,
-                    content_id,
-                    exc_info=True,
-                )
-            return True
+                return True
+        finally:
+            if unlink_duplicate_after_release:
+                _unlink_duplicate_media_file(file_path)
         logger.debug("Duplicate skipped (content_id or sha256): %s/%s", self.SOURCE_NAME, content_id)
         return False
 
