@@ -910,7 +910,6 @@ async def test_collect_refreshes_profiles_during_local_tool_cooldown(monkeypatch
     c._local_tool_cooldown_until = 9_999_999_999
     c.checkpoint = MagicMock()
     c.checkpoint.save_progress = AsyncMock()
-    monkeypatch.setattr(c, "_load_tracker_state", AsyncMock())
     monkeypatch.setattr(c, "_sync_persisted_local_tool_cooldown", AsyncMock())
     monkeypatch.setattr(c, "collect_user_profile", AsyncMock(side_effect=["p1", None, "p3"]))
     monkeypatch.setattr(c, "_collect_user", AsyncMock())
@@ -934,7 +933,6 @@ async def test_collect_stops_profile_refresh_when_profile_metadata_cools_down(mo
     c._local_tool_cooldown_until = 9_999_999_999
     c.checkpoint = MagicMock()
     c.checkpoint.save_progress = AsyncMock()
-    monkeypatch.setattr(c, "_load_tracker_state", AsyncMock())
     monkeypatch.setattr(c, "_sync_persisted_local_tool_cooldown", AsyncMock())
     monkeypatch.setattr(c, "_collect_user", AsyncMock())
     monkeypatch.setattr(tiktok_mod.asyncio, "sleep", AsyncMock())
@@ -1049,30 +1047,6 @@ async def test_spider_related_creators_runs_spider(monkeypatch):
     out = await c.spider_related_creators("bryan", max_hops=2)
     assert out == 7
     fake_spider.run.assert_awaited_once_with(seeds=["bryan"])
-
-
-# ── _load_tracker_state ───────────────────────────────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_load_tracker_state_pulls_known_ids():
-    with patch.object(TiktokCollector, "_check_tool", staticmethod(lambda *_: False)):
-        c = TiktokCollector()
-    c.pool = _make_pool(fetch_returns=[
-        {"platform_post_id": "p1"},
-        {"platform_post_id": "p2"},
-    ])
-    await c._load_tracker_state()
-    assert c._tracked_ids == {"p1", "p2"}
-
-
-@pytest.mark.asyncio
-async def test_load_tracker_state_no_pool_is_noop():
-    with patch.object(TiktokCollector, "_check_tool", staticmethod(lambda *_: False)):
-        c = TiktokCollector()
-    c.pool = None
-    await c._load_tracker_state()
-    assert c._tracked_ids == set()
 
 
 # ── download_media ───────────────────────────────────────────────────────
@@ -1291,3 +1265,29 @@ def test_validation_result_dataclass_defaults():
     assert vr.is_network_error is False
     assert vr.invalid_reason is None
     assert vr.should_retry is False
+
+
+@pytest.mark.asyncio
+async def test_collect_never_queries_tiktok_posts(monkeypatch):
+    monkeypatch.setenv("TIKTOK_SPIDER_ENABLED", "false")
+    with patch.object(TiktokCollector, "_check_tool", staticmethod(lambda *_: False)):
+        c = TiktokCollector()
+    c.pool = _make_pool()
+    queries: list[str] = []
+
+    def _record(sql, *_a, **_kw):
+        queries.append(str(sql))
+        return []
+
+    c.pool._conn.fetch = AsyncMock(side_effect=_record)
+    c.pool._conn.execute = AsyncMock(side_effect=lambda sql, *a, **kw: queries.append(str(sql)))
+    c.pool._conn.fetchrow = AsyncMock(side_effect=lambda sql, *a, **kw: queries.append(str(sql)))
+    c.pool._conn.fetchval = AsyncMock(side_effect=lambda sql, *a, **kw: queries.append(str(sql)))
+    c.checkpoint = MagicMock()
+    c.checkpoint.save_progress = AsyncMock()
+    monkeypatch.setattr(c, "_collect_user", AsyncMock())
+    monkeypatch.setattr(tiktok_mod.asyncio, "sleep", AsyncMock())
+
+    await c.collect(["alice"])
+
+    assert not any("tiktok_posts" in sql for sql in queries), queries
