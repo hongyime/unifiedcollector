@@ -295,6 +295,7 @@ class YoutubeCollector(BaseCollector):
         self._max_refs_per_record = int(os.getenv("YOUTUBE_MAX_REFS_PER_RECORD", "8"))
         self._max_comment_author_enqueues = int(os.getenv("YOUTUBE_MAX_COMMENT_AUTHOR_ENQUEUES", "25"))
         self._spider_queue_batch = int(os.getenv("YOUTUBE_SPIDER_QUEUE_BATCH", "5"))
+        self._spider_queue_recovered = False
         self._discovered_target_priority = int(os.getenv("YOUTUBE_DISCOVERED_TARGET_PRIORITY", "1"))
         self._skip_channel_fallback_after_api_empty: set[str] = set()
         # FAMOUS-FILTER (Bryan): skip channels at or above this subscriber count,
@@ -491,7 +492,29 @@ class YoutubeCollector(BaseCollector):
         if os.getenv("YOUTUBE_SPIDER_ENABLED", "true").lower() == "true":
             await self._process_spider_queue(limit=self._spider_queue_batch)
 
+    async def _reclaim_stranded_spider_queue(self):
+        """Return stranded 'processing' rows to 'pending' once per process."""
+        if self.pool is None or self._spider_queue_recovered:
+            return
+        self._spider_queue_recovered = True
+        try:
+            async with self.pool.acquire() as conn:
+                result = await conn.execute(
+                    "UPDATE youtube_spider_queue SET status = 'pending' "
+                    "WHERE status = 'processing'"
+                )
+            count = int(result.rsplit(" ", 1)[-1]) if isinstance(result, str) else 0
+            if count:
+                logger.warning(
+                    "youtube spider: recovered %d interrupted queue item(s)", count,
+                )
+        except Exception as exc:
+            logger.warning(
+                "youtube spider: queue recovery failed: %s", type(exc).__name__,
+            )
+
     async def _process_spider_queue(self, limit: int | None = None):
+        await self._reclaim_stranded_spider_queue()
         processed = 0
         max_items = max(1, int(limit if limit is not None else self._spider_queue_batch))
         while not self._stop.is_set() and processed < max_items:

@@ -1802,3 +1802,34 @@ def test_get_last_scrape_time_parses_iso(monkeypatch, tmp_path):
 def test_module_exposes_collector_class():
     assert hasattr(youtube_mod, "YoutubeCollector")
     assert youtube_mod.YoutubeCollector.SOURCE_NAME == "youtube"
+
+
+# ── startup reclaim ──────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_reclaim_stranded_spider_queue_once(monkeypatch):
+    coll = _new_collector(monkeypatch)
+    conn = coll.pool._conn
+    table = {"stranded": "processing", "queued": "pending"}
+
+    async def _execute(sql, *args):
+        if "SET status = 'pending'" in sql and "processing" in sql:
+            n = 0
+            for key, status in table.items():
+                if status == "processing":
+                    table[key] = "pending"
+                    n += 1
+            return f"UPDATE {n}"
+        return "UPDATE 0"
+
+    conn.execute = AsyncMock(side_effect=_execute)
+
+    await coll._reclaim_stranded_spider_queue()
+
+    assert table == {"stranded": "pending", "queued": "pending"}
+    conn.execute.assert_awaited_once()
+    assert "youtube_spider_queue" in conn.execute.await_args.args[0]
+
+    await coll._reclaim_stranded_spider_queue()
+    conn.execute.assert_awaited_once()
