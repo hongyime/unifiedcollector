@@ -17,6 +17,17 @@ class ReadOnlyTelegramClient:
         "kick_participant", "edit_admin", "edit_permissions",
     })
 
+    # Raw TL requests that mutate chat membership (GAP-6). ``__call__`` is the
+    # generic ``client(request)`` RPC escape hatch the method-name guard above
+    # cannot see, so these are rejected by request class name. Fail closed:
+    # raising, never log-and-forward. ``CheckChatInviteRequest`` stays allowed
+    # (read-only invite probe).
+    FORBIDDEN_REQUESTS = frozenset({
+        "JoinChannelRequest",
+        "ImportChatInviteRequest",
+        "LeaveChannelRequest",
+    })
+
     def __init__(self, client):
         object.__setattr__(self, "_client", client)
 
@@ -32,6 +43,14 @@ class ReadOnlyTelegramClient:
         setattr(object.__getattribute__(self, "_client"), name, value)
 
     def __call__(self, *args, **kwargs):
+        request = args[0] if args else None
+        if request is not None and (
+            type(request).__name__ in ReadOnlyTelegramClient.FORBIDDEN_REQUESTS
+        ):
+            raise RuntimeError(
+                f"Membership write blocked: {type(request).__name__}() "
+                f"is forbidden in read-only collector mode"
+            )
         return object.__getattribute__(self, "_client")(*args, **kwargs)
 
     def __aenter__(self):

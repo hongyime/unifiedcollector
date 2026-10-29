@@ -5,7 +5,7 @@ import os
 from typing import Any
 from urllib.parse import urlparse
 
-from src.core.recon import queue_recon_target
+from src.core.recon import normalize_recon_target, queue_recon_target
 
 
 DEFAULT_SOURCE_LIMIT = 25
@@ -28,12 +28,23 @@ def _target_host(target_value: str) -> str | None:
 
 
 def _sample_preview(row: dict[str, Any]) -> dict[str, Any]:
-    preview = {key: value for key, value in row.items() if key not in {"target_value", "source_record_id"}}
+    preview = {key: value for key, value in row.items() if key not in {"target_value", "source_record_id", "source_evidence"}}
     target_value = str(row.get("target_value") or "")
     preview["target_hash"] = hashlib.sha256(target_value.encode("utf-8")).hexdigest()[:12]
     source_record_id = str(row.get("source_record_id") or "")
     if source_record_id:
         preview["source_record_hash"] = hashlib.sha256(source_record_id.encode("utf-8")).hexdigest()[:12]
+    if row.get("source_evidence"):
+        preview["source_evidence"] = [
+            {
+                "collector_source": item.get("collector_source"),
+                "source_table": item.get("source_table"),
+                "source_record_hash": hashlib.sha256(
+                    str(item.get("source_record_id") or "").encode("utf-8")
+                ).hexdigest()[:12],
+            }
+            for item in row["source_evidence"]
+        ]
     if row.get("target_type") in {"domain", "url", "email"}:
         preview["target_host"] = _target_host(target_value)
     return preview
@@ -47,6 +58,39 @@ def _module_scope_for(row: dict[str, Any]) -> list[str] | None:
     return modules or None
 
 
+def _source_selected(source_filter: list[str], *names: str) -> bool:
+    return not source_filter or any(name.lower() in source_filter for name in names)
+
+
+async def _append_source_rows(
+    conn,
+    candidates: list[dict[str, Any]],
+    *,
+    table: str,
+    query: str,
+    target_type: str,
+    per_source_limit: int,
+    collector_sources: tuple[str, ...],
+    source_filter: list[str],
+) -> None:
+    if not _source_selected(source_filter, *collector_sources) or not await _table_exists(conn, table):
+        return
+    rows = await conn.fetch(query, per_source_limit)
+    for row in rows:
+        value = str(row.get("target_value") or "").strip()
+        if not value:
+            continue
+        candidates.append({
+            "target_type": target_type,
+            "target_value": value,
+            "collector_source": str(row.get("collector_source") or collector_sources[0]),
+            "source_table": table,
+            "source_record_id": str(row.get("source_record_id") or ""),
+            "seen_at": row.get("seen_at"),
+            **({"platform": row["platform"]} if row.get("platform") else {}),
+        })
+
+
 async def seed_recon_targets_from_collector(
     conn,
     *,
@@ -58,6 +102,7 @@ async def seed_recon_targets_from_collector(
     total_limit: int = DEFAULT_TOTAL_LIMIT,
     priority: int = 7,
     dry_run: bool = False,
+    approved_source_identities: list[str] | None = None,
 ) -> dict[str, Any]:
     source_filter = _source_list(sources)
     per_source_limit = max(1, per_source_limit)
@@ -172,7 +217,134 @@ async def seed_recon_targets_from_collector(
                 "seen_at": row["seen_at"],
             })
 
-    candidates = candidates[:total_limit]
+    # Durable source snapshots. These tables are written by the Website,
+    # Search, Exposure, native-platform, and shared collector target paths.
+    # They are only read here; recon_targets remains the visible work queue.
+    if include_domains:
+        await _append_source_rows(
+            conn, candidates, table="website_targets", target_type="domain",
+            collector_sources=("website",), source_filter=source_filter,
+            per_source_limit=per_source_limit,
+            query="""
+                SELECT id::text AS source_record_id, 'website' AS collector_source,
+                       NULLIF(domain, '') AS target_value,
+                       COALESCE(updated_at, collected_at) AS seen_at
+                FROM website_targets WHERE NULLIF(domain, '') IS NOT NULL
+                ORDER BY COALESCE(updated_at, collected_at) DESC NULLS LAST LIMIT $1
+            """,
+        )
+        await _append_source_rows(
+            conn, candidates, table="search_results", target_type="domain",
+            collector_sources=("search", "waterfall"), source_filter=source_filter,
+            per_source_limit=per_source_limit,
+            query="""
+                SELECT id::text AS source_record_id, 'search' AS collector_source,
+                       NULLIF(domain, '') AS target_value, collected_at AS seen_at
+                FROM search_results WHERE NULLIF(domain, '') IS NOT NULL
+                ORDER BY collected_at DESC NULLS LAST LIMIT $1
+            """,
+        )
+        await _append_source_rows(
+            conn, candidates, table="exposure_findings", target_type="domain",
+            collector_sources=("exposure",), source_filter=source_filter,
+            per_source_limit=per_source_limit,
+            query="""
+                SELECT id::text AS source_record_id, 'exposure' AS collector_source,
+                       NULLIF(domain, '') AS target_value, collected_at AS seen_at
+                FROM exposure_findings WHERE NULLIF(domain, '') IS NOT NULL
+                ORDER BY collected_at DESC NULLS LAST LIMIT $1
+            """,
+        )
+
+    if include_usernames:
+        await _append_source_rows(
+            conn, candidates, table="browser_native_scrape_queue", target_type="username",
+            collector_sources=("pinterest", "snapchat", "airbnb"), source_filter=source_filter,
+            per_source_limit=per_source_limit,
+            query="""
+                SELECT id::text AS source_record_id, platform AS collector_source,
+                       platform, NULLIF(username, '') AS target_value,
+                       updated_at AS seen_at
+                FROM browser_native_scrape_queue
+                WHERE NULLIF(username, '') IS NOT NULL
+                ORDER BY updated_at DESC NULLS LAST, id DESC LIMIT $1
+            """,
+        )
+
+    # Existing collection_targets cover collector queues whose resolved
+    # identities have not yet produced a social_users/discovered_links row.
+    if include_usernames and await _table_exists(conn, "collection_targets"):
+        rows = await conn.fetch(
+            """
+            SELECT id::text AS source_record_id, source AS collector_source,
+                   target_type, NULLIF(target_id, '') AS target_value, created_at AS seen_at
+            FROM collection_targets
+            WHERE target_type IN ('user', 'username', 'channel', 'domain')
+              AND NULLIF(target_id, '') IS NOT NULL
+              AND ($2::text[] = '{}'::text[] OR source = ANY($2::text[]))
+            ORDER BY COALESCE(last_collection_at, created_at) DESC NULLS LAST, id DESC
+            LIMIT $1
+            """,
+            per_source_limit,
+            source_filter,
+        )
+        for row in rows:
+            raw_type = str(row["target_type"] or "username").lower()
+            candidates.append({
+                "target_type": raw_type,
+                "target_value": row["target_value"],
+                "collector_source": row["collector_source"],
+                "source_table": "collection_targets",
+                "source_record_id": row["source_record_id"],
+                "seen_at": row["seen_at"],
+            })
+
+    if approved_source_identities is not None:
+        approved_sources = set(approved_source_identities)
+        candidates = [
+            row for row in candidates
+            if f"collector:{row.get('source_table')}" in approved_sources
+        ]
+
+    # Collapse duplicate identities from overlapping sources before admission.
+    # Keep all provenance references so later seed cycles remain auditable.
+    deduped: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in candidates:
+        try:
+            identity = normalize_recon_target(row["target_type"], row["target_value"])
+        except ValueError:
+            continue
+        row["target_type"], row["target_value"] = identity
+        existing = deduped.get(identity)
+        provenance = {
+            "collector_source": row.get("collector_source"),
+            "source_table": row.get("source_table"),
+            "source_record_id": row.get("source_record_id"),
+        }
+        if existing is None:
+            row["source_evidence"] = [provenance]
+            deduped[identity] = row
+        elif provenance not in existing["source_evidence"]:
+            existing["source_evidence"].append(provenance)
+    # Rotate across source tables before applying the total cap so a large
+    # discovered_links/social_users backlog cannot starve newer durable feeds.
+    by_table: dict[str, list[dict[str, Any]]] = {}
+    for row in deduped.values():
+        by_table.setdefault(str(row.get("source_table") or "other"), []).append(row)
+    fair_candidates: list[dict[str, Any]] = []
+    depth = 0
+    while len(fair_candidates) < total_limit:
+        added = False
+        for rows in by_table.values():
+            if depth < len(rows):
+                fair_candidates.append(rows[depth])
+                added = True
+                if len(fair_candidates) >= total_limit:
+                    break
+        if not added:
+            break
+        depth += 1
+    candidates = fair_candidates
     if dry_run:
         return {
             "dry_run": True,
@@ -188,6 +360,7 @@ async def seed_recon_targets_from_collector(
 
     queued = 0
     skipped = 0
+    queued_by_source: dict[str, int] = {}
     for row in candidates:
         modules = _module_scope_for(row)
         scope = {
@@ -196,19 +369,26 @@ async def seed_recon_targets_from_collector(
             "source_table": row["source_table"],
             "source_record_id": row["source_record_id"],
             "seen_at": row["seen_at"].isoformat() if row.get("seen_at") else None,
+            "source_evidence": row.get("source_evidence", []),
         }
+        if row.get("platform"):
+            scope["platform"] = row["platform"]
         if modules:
             scope["modules"] = modules
         try:
-            await queue_recon_target(
+            result = await queue_recon_target(
                 conn,
                 target_type=row["target_type"],
                 target_value=row["target_value"],
                 source=f"collector:{row['source_table']}",
                 priority=priority,
                 scope=scope,
+                reset_existing=False,
             )
-            queued += 1
+            inserted = bool(result.get("inserted"))
+            queued += int(inserted)
+            if inserted:
+                queued_by_source[row["source_table"]] = queued_by_source.get(row["source_table"], 0) + 1
         except ValueError:
             skipped += 1
 
@@ -217,6 +397,7 @@ async def seed_recon_targets_from_collector(
         "candidates": len(candidates),
         "queued": queued,
         "skipped": skipped,
+        "queued_by_source": queued_by_source,
         "sources": sorted({str(row["collector_source"]) for row in candidates if row.get("collector_source")}),
         "types": {
             target_type: sum(1 for row in candidates if row["target_type"] == target_type)

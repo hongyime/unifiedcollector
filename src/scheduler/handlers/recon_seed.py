@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 import time as _time
 
+from src.core.recon_rollout import AdmissionPolicyError, admission_snapshot
 from src.scheduler.handlers.base import SchedulerContext
 
 logger = logging.getLogger(__name__)
@@ -45,6 +46,14 @@ class ReconSeedHandler:
 
     async def run(self, ctx: SchedulerContext) -> None:
         self._last_run = _time.monotonic()
+        try:
+            policy, _state, block = admission_snapshot()
+        except AdmissionPolicyError:
+            logger.warning("recon_seed skipped: admission gate unavailable")
+            return
+        if block:
+            logger.info("recon_seed skipped by admission gate (%s)", block)
+            return
         per_source = ctx.get_env_int("RECON_SEED_PER_SOURCE_LIMIT", 200, min_value=1)
         total = ctx.get_env_int("RECON_SEED_TOTAL_LIMIT", 2000, min_value=1)
         try:
@@ -52,13 +61,14 @@ class ReconSeedHandler:
             async with ctx.pool.acquire() as conn:
                 report = await seed_recon_targets_from_collector(
                     conn,
-                    include_domains=False,
+                    include_domains=True,
                     include_urls=False,
                     include_usernames=True,
                     per_source_limit=per_source,
                     total_limit=total,
                     priority=7,
                     dry_run=False,
+                    approved_source_identities=policy["approved_source_identities"],
                 )
             logger.info(
                 "recon_seed tick: candidates=%s queued=%s skipped=%s",

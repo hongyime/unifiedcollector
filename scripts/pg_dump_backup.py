@@ -13,7 +13,7 @@ PostgreSQL 18 utility container from Bryan's user crontab.
 Env vars (all optional, defaults sensible for this deployment):
 
     BACKUP_ENABLED             "1" = run, "0" = exit 0 immediately (kill switch)
-    BACKUP_DIR                 target dir, default /media/seagate-expansion/unifiedcollector/backups/db
+    BACKUP_DIR                 target dir, default /media/sg-ultra/unifiedcollector/backups/db
                                 (falls back to Z:/unifiedcollector/backups/db only when that path exists)
     BACKUP_SKIP_IF_FRESH_HOURS default 20 — skip if newest .dump is younger
     BACKUP_ADVISORY_LOCK_KEY   default hashtext('unifiedcollector_pg_dump')
@@ -64,7 +64,7 @@ logging.basicConfig(
 logger = logging.getLogger("pg_dump_backup")
 
 
-LINUX_BACKUP_DIR = pathlib.Path("/media/seagate-expansion/unifiedcollector/backups/db")
+LINUX_BACKUP_DIR = pathlib.Path("/media/sg-ultra/unifiedcollector/backups/db")
 WINDOWS_BACKUP_DIR = pathlib.Path("Z:/unifiedcollector/backups/db")
 if LINUX_BACKUP_DIR.parent.parent.exists():
     DEFAULT_BACKUP_DIR = LINUX_BACKUP_DIR

@@ -1,0 +1,206 @@
+{
+  "schema_version": 1,
+  "policy": "zero-spend; no paid or uncertain-charge fallback",
+  "inventory_source": "Compose services with collector/browser/recon roles plus their source/env provider references",
+  "providers": [
+    {
+      "service": "collector_spiderfoot",
+      "provider": "SpiderFoot modules: sfp_dnsresolve,sfp_whois,sfp_names,sfp_dnsbrute,sfp_portscan_tcp",
+      "charge_status": "No direct paid API in default metadata; network/resource use is capped",
+      "credentials_required": "No module API credential; DB credential for persistence",
+      "effective_enablement": "enabled by Compose default",
+      "zero_spend_reason": "Default module set contains no paid API integration; allowlist-by-default; paid/uncertain modules explicitly rejected."
+    },
+    {
+      "service": "collector_spiderfoot",
+      "provider": "Maigret public site checks",
+      "charge_status": "Public HTTP; no paid provider in configured OSS client",
+      "credentials_required": "None",
+      "effective_enablement": "enabled for username target routing",
+      "zero_spend_reason": "Self-hosted OSS client; only public HTTP checks; bounded top-sites/requests/deadline/egress."
+    },
+    {
+      "service": "collector_spiderfoot",
+      "provider": "GHunt unofficial Google endpoints",
+      "charge_status": "No direct price stated by client; legal/ToS and account risk; not a commercial paid API",
+      "credentials_required": "GHUNT_CREDS authenticated session",
+      "effective_enablement": "explicit target opt-in only; otherwise disabled",
+      "zero_spend_reason": "No paid fallback; offline by default without explicit module/credential; isolated private evidence and bounded rate/deadline/egress."
+    },
+    {
+      "service": "collector_spiderfoot",
+      "provider": "Paid/uncertain SpiderFoot modules (Shodan, Censys, HIBP, Whoxy, etc.)",
+      "charge_status": "Paid or uncertain",
+      "credentials_required": "Provider-specific keys may be needed",
+      "effective_enablement": "disabled and rejected by PAID_OR_UNCERTAIN_MODULES",
+      "zero_spend_reason": "Code-level explicit rejection regardless of credential presence."
+    },
+    {
+      "service": "collector_search",
+      "provider": "DuckDuckGo and Bing HTML search",
+      "charge_status": "Public web endpoints; no per-request billing capability in this client",
+      "credentials_required": "None",
+      "effective_enablement": "enabled; DDG then Bing waterfall",
+      "zero_spend_reason": "Self-hosted public HTTP clients; no paid fallback; bounded requests/cycle and pacing."
+    },
+    {
+      "service": "collector_search",
+      "provider": "Serper Google SERP API",
+      "charge_status": "Paid credit product after free trial",
+      "credentials_required": "SERPER_API_KEY (legacy key may remain in local env, ignored)",
+      "effective_enablement": "disabled and explicit engine requests rejected",
+      "zero_spend_reason": "Key is never read; not in default engines; no request implementation remains.",
+      "reference": "https://serper.dev/"
+    },
+    {
+      "service": "collector_youtube",
+      "provider": "YouTube Data API v3 and public YouTube endpoints",
+      "charge_status": "Quota-metered API; official docs describe quota units/limits, no request price in this integration",
+      "credentials_required": "YOUTUBE_API_KEY / GOOGLE_API_KEY optional",
+      "effective_enablement": "enabled with quota checks; no paid API fallback",
+      "zero_spend_reason": "Quota is a request limit, not a spend fallback; API calls are limited to read methods. Does not request quota extensions.",
+      "reference": "https://developers.google.com/youtube/data/determine_quota_cost"
+    },
+    {
+      "service": "collector_github",
+      "provider": "GitHub REST API and public web",
+      "charge_status": "Rate-limited API; no per-request charge in this client",
+      "credentials_required": "GITHUB_TOKEN/GITHUB_PAT optional",
+      "effective_enablement": "enabled; authenticated token only raises API rate allowance",
+      "zero_spend_reason": "No commercial fallback or purchase path; stop/backoff on provider rate limits.",
+      "reference": "https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api"
+    },
+    {
+      "service": "collector_strava",
+      "provider": "Strava API v3 and public website",
+      "charge_status": "Developer API quota/rate limited; no paid fallback configured",
+      "credentials_required": "STRAVA_CLIENT_ID/SECRET/REFRESH_TOKEN optional",
+      "effective_enablement": "enabled when user OAuth/session exists",
+      "zero_spend_reason": "Uses owner's existing application/session; no purchased enrichment or paid map tile service."
+    },
+    {
+      "service": "collector_tiktok",
+      "provider": "TikTok public/mobile endpoints",
+      "charge_status": "No direct API billing path in configured client; platform rate/terms risk",
+      "credentials_required": "Existing user session cookies optional",
+      "effective_enablement": "enabled",
+      "zero_spend_reason": "Self-hosted collector; no paid data vendor or fallback."
+    },
+    {
+      "service": "collector_instagram",
+      "provider": "Instagram public/web/mobile endpoints",
+      "charge_status": "No direct API billing path in configured client; platform rate/terms risk",
+      "credentials_required": "Existing user session cookies for authenticated views",
+      "effective_enablement": "enabled",
+      "zero_spend_reason": "Self-hosted collector; no paid data vendor or fallback."
+    },
+    {
+      "service": "collector_snapchat",
+      "provider": "Snapchat public web endpoints",
+      "charge_status": "No direct API billing path in configured client; platform terms risk",
+      "credentials_required": "None for public pages",
+      "effective_enablement": "enabled",
+      "zero_spend_reason": "Public HTTP only; no paid data vendor or fallback."
+    },
+    {
+      "service": "collector_lemon8",
+      "provider": "Lemon8 web/app API endpoints",
+      "charge_status": "No direct API billing path in configured client; platform terms/rate risk",
+      "credentials_required": "Existing user session may be used",
+      "effective_enablement": "enabled",
+      "zero_spend_reason": "Self-hosted client; no paid data vendor or fallback."
+    },
+    {
+      "service": "collector_paypal",
+      "provider": "PayPal public profile/web endpoints",
+      "charge_status": "No direct per-request billing path in configured client",
+      "credentials_required": "Public pages; user session where available",
+      "effective_enablement": "enabled",
+      "zero_spend_reason": "No transaction or paid API operation is invoked by collection."
+    },
+    {
+      "service": "collector_airbnb",
+      "provider": "Airbnb public web/client API",
+      "charge_status": "No external paid data provider configured; provider API terms/rate risk remains",
+      "credentials_required": "AIRBNB_PUBLIC_API_KEY optional client parameter",
+      "effective_enablement": "enabled",
+      "zero_spend_reason": "Direct provider requests only; no purchased API/proxy fallback."
+    },
+    {
+      "service": "collector_bluesky",
+      "provider": "Bluesky AT Protocol public/PDS endpoints",
+      "charge_status": "Public protocol endpoints; no paid fallback configured",
+      "credentials_required": "App password optional for authenticated account data",
+      "effective_enablement": "enabled",
+      "zero_spend_reason": "Self-hosted protocol client; no purchased data vendor."
+    },
+    {
+      "service": "collector_pinterest",
+      "provider": "Pinterest web/native public endpoints",
+      "charge_status": "No direct API billing path in configured client; platform terms/rate risk",
+      "credentials_required": "Existing user browser/session state when available",
+      "effective_enablement": "enabled",
+      "zero_spend_reason": "Self-hosted client; no paid data vendor or fallback."
+    },
+    {
+      "service": "collector_telegram",
+      "provider": "Telegram MTProto and Bot API",
+      "charge_status": "No paid API fallback configured; messaging/payment operations excluded",
+      "credentials_required": "Existing Telegram user API credentials; bot token for notifications",
+      "effective_enablement": "enabled",
+      "zero_spend_reason": "Collection uses reads; notifier sends only configured operational notifications; no paid bulk messaging."
+    },
+    {
+      "service": "collector_beeper",
+      "provider": "Local Beeper Desktop API",
+      "charge_status": "Local service; subscription cost is outside collector request path",
+      "credentials_required": "BEEPER_DESKTOP_API_TOKEN",
+      "effective_enablement": "enabled when local Beeper is available",
+      "zero_spend_reason": "No external paid API fallback; collector calls the local user's existing desktop service."
+    },
+    {
+      "service": "collector_whatsapp",
+      "provider": "WhatsApp linked-device bridges",
+      "charge_status": "No paid API fallback configured; account/service plan outside collector request path",
+      "credentials_required": "Existing linked-device sessions",
+      "effective_enablement": "enabled",
+      "zero_spend_reason": "Self-hosted bridge; no purchased data provider."
+    },
+    {
+      "service": "collector_website",
+      "provider": "Public website HTTP fetches",
+      "charge_status": "No direct API charge; third-party bandwidth/proxy terms may vary",
+      "credentials_required": "None; Tor proxy is self-hosted",
+      "effective_enablement": "enabled",
+      "zero_spend_reason": "Direct public HTTP/Tor only; no paid crawling/search fallback."
+    },
+    {
+      "service": "collector_exposure",
+      "provider": "DuckDuckGo/Bing + public-site exposure checks",
+      "charge_status": "Public HTTP endpoints; no paid fallback",
+      "credentials_required": "None",
+      "effective_enablement": "enabled",
+      "zero_spend_reason": "Shares free Search providers; Serper is disabled in SearchCollector."
+    },
+    {
+      "service": "browser_ingest",
+      "provider": "User-operated browser pages and local CDP",
+      "charge_status": "No direct provider API charge; normal user connectivity applies",
+      "credentials_required": "Existing browser login sessions",
+      "effective_enablement": "enabled",
+      "zero_spend_reason": "Ingests pages already open in the user's browser; does not purchase external data."
+    }
+  ],
+  "data_use_owner": {
+    "status": "user-designated",
+    "owner": "the user (repository operator)"
+  },
+  "prohibited_conduct": [
+    "No access-control bypass, credential theft, account takeover, or use of leaked credentials.",
+    "No scans of private, non-global, or otherwise unauthorized network destinations.",
+    "No paid or uncertain-charge provider/module, even when credentials or free credits are present.",
+    "No harassment, coercion, doxxing, or contact with subjects based solely on automated findings.",
+    "No use of collected data for decisions about employment, housing, credit, insurance, or other eligibility.",
+    "Honor provider rate limits, opt-outs, applicable terms, and data-protection/retention obligations."
+  ]
+}

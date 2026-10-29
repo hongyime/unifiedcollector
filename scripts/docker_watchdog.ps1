@@ -12,7 +12,13 @@
 # engine is already responsive.
 $ErrorActionPreference = "SilentlyContinue"
 $log = "C:\unifiedcollector\backups\docker_watchdog.log"
+$pauseFile = "C:\unifiedcollector\cutover.pause"
 function Log($m) { "$([DateTime]::Now.ToString('yyyy-MM-dd HH:mm:ss')) $m" | Out-File -FilePath $log -Append -Encoding utf8 }
+
+if (Test-Path -LiteralPath $pauseFile -PathType Leaf) {
+    Log "cutover pause marker present; Docker Desktop recovery suppressed"
+    exit 0
+}
 
 # Is the engine responding? (cheap, ~2s)
 $null = & docker version --format '{{if .Server}}1{{end}}' 2>$null

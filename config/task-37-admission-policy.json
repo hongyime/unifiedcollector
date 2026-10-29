@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "policy_id": "collector-production-recovery-2026-10-23-domain-remediation-r2",
+  "enabled": true,
+  "approved_source_identities": [
+    "collector:discovered_links",
+    "collector:social_users",
+    "collector:website_targets",
+    "collector:search_results",
+    "collector:exposure_findings",
+    "collector:browser_native_scrape_queue",
+    "collector:collection_targets",
+    "collector:github_users",
+    "collector:github_commits"
+  ],
+  "approved_account_identities": [],
+  "approved_target_types": ["domain"],
+  "cohorts": [5, 25, 100, 250],
+  "limits": {
+    "max_claims": 250,
+    "max_egress_bytes": 1073741824,
+    "deadline_seconds": 1800
+  },
+  "stage_gates": {
+    "max_queue_age_seconds": 86400,
+    "max_error_rate": 0.2,
+    "min_storage_success_rate": 0.95,
+    "max_third_party_failures": 0,
+    "min_useful_observations": 1,
+    "max_unresolved_targets": 0
+  },
+  "paid_or_uncertain_modules_excluded": [
+    "sfp_badpackets", "sfp_c99", "sfp_censys", "sfp_dehashed",
+    "sfp_fsecure_riddler", "sfp_haveibeenpwned", "sfp_projectdiscovery",
+    "sfp_seon", "sfp_shodan", "sfp_sociallinks", "sfp_spur",
+    "sfp_whoisology", "sfp_whoxy", "serper"
+  ],
+  "sibling_work": {
+    "maigret_fp_refresh": {
+      "enabled": false,
+      "max_claims": 0
+    }
+  }
+}

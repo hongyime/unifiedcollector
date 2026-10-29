@@ -104,6 +104,16 @@ def _beeper_backfill_query_timeout() -> float:
         return 20.0
 
 
+def _beeper_chat_pages_per_cycle() -> int:
+    """Per-chat API page budget for tail and backfill (clamp 1-10, default 3)."""
+    raw = os.getenv("BEEPER_CHAT_PAGES_PER_CYCLE", "3")
+    try:
+        return max(1, min(10, int(raw)))
+    except ValueError:
+        logger.warning("Invalid BEEPER_CHAT_PAGES_PER_CYCLE=%r; using 3", raw)
+        return 3
+
+
 def _beeper_chat_sync_timeout() -> float:
     raw = os.getenv("BEEPER_CHAT_SYNC_TIMEOUT_SECONDS", "120")
     try:
@@ -354,6 +364,50 @@ class BeeperClient:
             seen_cursors.add(next_cursor)
             cursor = next_cursor
 
+    async def iter_message_pages(
+        self,
+        chat_id: str,
+        *,
+        start_cursor: Optional[str] = None,
+        direction: str = "before",
+        page_size: int = _BEEPER_PAGE_SIZE,
+        max_pages: int | None = None,
+    ) -> AsyncIterator[tuple[list, dict]]:
+        """Yield (items, page_meta) per API page.
+
+        page_meta carries `oldestCursor` / `newestCursor` / `hasMore` so the
+        caller can persist sync state per chat after the WHOLE page is durably
+        processed. `max_pages` budgets API pages, never messages.
+        """
+        cursor = start_cursor
+        seen_cursors: set[str] = set()
+        if cursor:
+            seen_cursors.add(cursor)
+        page_count = 0
+        while True:
+            page = await self.messages(
+                chat_id, cursor=cursor, direction=direction, limit=page_size
+            )
+            page_count += 1
+            items = page.get("items", []) if isinstance(page, dict) else page
+            meta = {
+                "oldestCursor": page.get("oldestCursor") if isinstance(page, dict) else None,
+                "newestCursor": page.get("newestCursor") if isinstance(page, dict) else None,
+                "hasMore": page.get("hasMore", False) if isinstance(page, dict) else False,
+            }
+            yield items, meta
+            next_cursor = meta["oldestCursor"] if direction == "before" else meta["newestCursor"]
+            if (
+                (max_pages is not None and page_count >= max(1, int(max_pages)))
+                or not meta["hasMore"]
+                or not items
+                or not next_cursor
+                or next_cursor in seen_cursors
+            ):
+                return
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+
     async def iter_messages(
         self,
         chat_id: str,
@@ -362,29 +416,12 @@ class BeeperClient:
         direction: str = "before",
         page_size: int = _BEEPER_PAGE_SIZE,
     ) -> AsyncIterator[tuple[dict, dict]]:
-        """Yield (message, page_meta) pairs.
-
-        page_meta carries `oldestCursor` / `newestCursor` / `hasMore` so the
-        caller can persist sync state per chat.
-        """
-        cursor = start_cursor
-        while True:
-            page = await self.messages(
-                chat_id, cursor=cursor, direction=direction, limit=page_size
-            )
-            items = page.get("items", []) if isinstance(page, dict) else page
-            meta = {
-                "oldestCursor": page.get("oldestCursor") if isinstance(page, dict) else None,
-                "newestCursor": page.get("newestCursor") if isinstance(page, dict) else None,
-                "hasMore": page.get("hasMore", False) if isinstance(page, dict) else False,
-            }
+        """Yield (message, page_meta) pairs across every page of a chat."""
+        async for items, meta in self.iter_message_pages(
+            chat_id, start_cursor=start_cursor, direction=direction, page_size=page_size
+        ):
             for msg in items:
                 yield msg, meta
-            if not meta["hasMore"]:
-                return
-            cursor = meta["oldestCursor"] if direction == "before" else meta["newestCursor"]
-            if not cursor or not items:
-                return
 
 
 # ── helpers ───────────────────────────────────────────────────────────────
@@ -947,7 +984,7 @@ class BeeperCollector(BaseCollector):
                       cursor=newest_cursor) and persist them
 
     The full backfill of 2055 rooms is not done in one cycle — each `collect()`
-    pulls a bounded slice (BEEPER_BACKFILL_PAGES_PER_CYCLE per chat by default).
+    pulls a bounded slice (BEEPER_CHAT_PAGES_PER_CYCLE pages per chat by default).
     """
 
     SOURCE_NAME = "beeper"
@@ -1534,7 +1571,7 @@ class BeeperCollector(BaseCollector):
         if w is None:
             return 0
 
-        max_pages = int(os.environ.get("BEEPER_BACKFILL_PAGES_PER_CYCLE", "3"))
+        max_pages = _beeper_chat_pages_per_cycle()
         max_chats = int(os.environ.get("BEEPER_MAX_CHATS_PER_CYCLE", "50"))
         chat_timeout = _beeper_chat_sync_timeout()
 
@@ -1787,7 +1824,13 @@ class BeeperCollector(BaseCollector):
         max_pages: int,
         w: BeeperWriter,
     ) -> int:
-        """Tail fresh messages first, then perform bounded historical backfill."""
+        """Tail fresh messages first, then perform bounded historical backfill.
+
+        `max_pages` budgets API pages (not messages) per phase. The stored
+        cursor advances only after every item on a page is durably upserted; a
+        mid-page failure leaves sync_state untouched so the whole page retries
+        from the prior boundary (upserts make the replay idempotent).
+        """
         inserted = 0
         try:
             # Phase A: freshness. If we have a newest cursor, tail it before
@@ -1796,21 +1839,22 @@ class BeeperCollector(BaseCollector):
             tail_inserted = 0
             new_newest = newest_cursor
             if newest_cursor:
-                async for msg, meta in self.client.iter_messages(
+                async for items, meta in self.client.iter_message_pages(
                     chat_id,
                     start_cursor=newest_cursor,
                     direction="after",
                     page_size=_BEEPER_PAGE_SIZE,
+                    max_pages=max_pages,
                 ):
-                    msg.setdefault("network", network)
-                    is_new = await w.upsert_message(msg)
-                    if is_new:
-                        tail_inserted += 1
-                        self._progress_count += 1
-                        await self._download_attachments(msg)
+                    for msg in items:
+                        msg.setdefault("network", network)
+                        is_new = await w.upsert_message(msg)
+                        if is_new:
+                            tail_inserted += 1
+                            self._progress_count += 1
+                            await self._download_attachments(msg)
+                    # Whole page durably processed: only now advance the tail cursor.
                     new_newest = meta.get("newestCursor") or new_newest
-                    if tail_inserted >= max_pages * 50:
-                        break
 
                 # Always bump last_synced_at for chats with a freshness cursor so
                 # the round-robin continues rotating through active chats.
@@ -1819,26 +1863,25 @@ class BeeperCollector(BaseCollector):
 
             # Phase B: bounded historical backfill.
             if not backfill_complete:
-                pages = 0
                 cursor = oldest_cursor
                 latest_oldest = oldest_cursor
                 final_oldest = oldest_cursor
                 latest_newest = new_newest
-                async for msg, meta in self.client.iter_messages(
-                    chat_id, start_cursor=cursor, direction="before", page_size=_BEEPER_PAGE_SIZE
+                async for items, meta in self.client.iter_message_pages(
+                    chat_id, start_cursor=cursor, direction="before", page_size=_BEEPER_PAGE_SIZE,
+                    max_pages=max_pages,
                 ):
-                    msg.setdefault("network", network)
-                    is_new = await w.upsert_message(msg)
-                    if is_new:
-                        inserted += 1
-                        self._progress_count += 1
-                        await self._download_attachments(msg)
+                    for msg in items:
+                        msg.setdefault("network", network)
+                        is_new = await w.upsert_message(msg)
+                        if is_new:
+                            inserted += 1
+                            self._progress_count += 1
+                            await self._download_attachments(msg)
+                    # Whole page durably processed: only now advance the backfill cursor.
                     final_oldest = meta.get("oldestCursor") or final_oldest
                     if meta.get("newestCursor") and not latest_newest:
                         latest_newest = meta["newestCursor"]
-                    pages += 1
-                    if pages >= max_pages:
-                        break
 
                 done = final_oldest == latest_oldest and latest_oldest is not None
                 await w.update_sync_state(

@@ -33,6 +33,7 @@ $tmp = Join-Path $repo "tmp"
 if (-not (Test-Path $tmp)) { New-Item -ItemType Directory -Path $tmp | Out-Null }
 $log = Join-Path $tmp "browser_autorecover.log"
 $statusPath = Join-Path $tmp "browser_autorecover_status.json"
+$pauseFile = Join-Path $repo "cutover.pause"
 
 function Log($m) {
     $s = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
@@ -121,6 +122,12 @@ function Invoke-Recovery {
 }
 
 function Invoke-Cycle {
+    if (Test-Path -LiteralPath $pauseFile -PathType Leaf) {
+        $health = @{ reachable = $false; healthy = $true; reason = "cutover_paused"; recent_events = -1 }
+        Log "CUTOVER PAUSE: browser recovery suppressed"
+        Write-Status $health "cutover_paused"
+        return
+    }
     $health = Get-ExtHealth
     if ($health.healthy) {
         Log "NO RECOVERY: $($health.reason) (recent_events=$($health.recent_events))"

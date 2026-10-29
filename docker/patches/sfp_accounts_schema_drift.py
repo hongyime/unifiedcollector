@@ -14,9 +14,8 @@ idempotent (looks for the OLD token; no-op if already patched).
 
 This does NOT enable sfp_accounts anywhere. It only makes the module
 functional IF an operator later sets SPIDERFOOT_MODULES or
-RECON_USERNAME_MODULES to include sfp_accounts. The existing policy gate
-(SPIDERFOOT_ALLOW_INTRUSIVE, RECON_ALLOWLIST, per-target scope) is
-unchanged.
+RECON_USERNAME_MODULES to include sfp_accounts. Module selection remains
+explicit, with paid/uncertain modules rejected by the application.
 """
 from __future__ import annotations
 

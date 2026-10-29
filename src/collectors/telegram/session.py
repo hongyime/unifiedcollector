@@ -268,7 +268,10 @@ class TelegramWorker:
                 await self.breaker.call(
                     lambda t=target: self.parent._collect_chat(self, t)
                 )
-                await self.parent.checkpoint.save_progress(target)
+                # Chat progress is persisted inside _collect_chat (chat-scoped
+                # numeric cursors); the target string must never reach
+                # last_processed_id, so only heartbeat the service row here.
+                await self.parent.checkpoint.touch()
                 self.parent.account_pool.record_success(self.account.name)
             except CircuitOpenError as e:
                 logger.warning(

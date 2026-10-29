@@ -1163,19 +1163,18 @@ class YoutubeCollector(BaseCollector):
                     UPDATE collection_targets
                     SET collection_count = collection_count + 1,
                         last_collection_at = NOW(),
-                        status = $3,
-                        error_message = $4,
+                        status = $2::text,
+                        error_message = $3,
                         metadata = COALESCE(metadata, '{}'::jsonb)
                                    || jsonb_build_object(
-                                        'youtube_last_status', $3::text,
-                                        'youtube_last_reason', $4::text,
+                                        'youtube_last_status', $2::text,
+                                        'youtube_last_reason', $3::text,
                                         'youtube_last_result_at', NOW()
                                       )
-                                   || $5::jsonb
+                                   || $4::jsonb
                     WHERE source = 'youtube' AND target_id = $1
                     """,
                     target,
-                    self.SOURCE_NAME,
                     status,
                     reason,
                     payload,

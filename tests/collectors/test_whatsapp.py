@@ -344,19 +344,43 @@ def test_session_success_recovers_risk(configured_collector):
 @pytest.mark.asyncio
 async def test_is_duplicate_uses_redis_when_available(collector):
     redis_mock = MagicMock()
-    # nx=True returns truthy on first set, None on duplicate
-    redis_mock.set = AsyncMock(return_value=True)
+    # Read-only check: exists returns 0 for unseen keys.
+    redis_mock.exists = AsyncMock(return_value=0)
     collector._redis = redis_mock
     assert await collector._is_duplicate("msg-1", "chat@s.whatsapp.net") is False
-    redis_mock.set.assert_awaited_once()
+    redis_mock.exists.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_is_duplicate_redis_returns_none_means_dup(collector):
+async def test_is_duplicate_redis_exists_means_dup(collector):
     redis_mock = MagicMock()
-    redis_mock.set = AsyncMock(return_value=None)
+    redis_mock.exists = AsyncMock(return_value=1)
     collector._redis = redis_mock
     assert await collector._is_duplicate("msg-1", "chat@s.whatsapp.net") is True
+
+
+@pytest.mark.asyncio
+async def test_is_duplicate_is_read_only(collector):
+    """Regression (GAP-4): the check must never claim the marker — claiming
+    before persistence stranded markers over unpersisted messages."""
+    redis_mock = MagicMock()
+    redis_mock.exists = AsyncMock(return_value=0)
+    redis_mock.set = AsyncMock()
+    collector._redis = redis_mock
+    assert await collector._is_duplicate("msg-1", "chat@s.whatsapp.net") is False
+    redis_mock.set.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_mark_dedupe_complete_writes_marker(collector):
+    redis_mock = MagicMock()
+    redis_mock.set = AsyncMock(return_value=True)
+    collector._redis = redis_mock
+    await collector._mark_dedupe_complete("m1", "chat@s.whatsapp.net")
+    redis_mock.set.assert_awaited_once_with(
+        "collector:dedup:m1:chat@s.whatsapp.net", "1", ex=collector._dedup_ttl,
+    )
+    assert "wa_m1" in collector._known_ids
 
 
 @pytest.mark.asyncio
@@ -369,7 +393,7 @@ async def test_is_duplicate_falls_back_to_known_set(collector):
 @pytest.mark.asyncio
 async def test_is_duplicate_redis_failure_falls_back(collector):
     redis_mock = MagicMock()
-    redis_mock.set = AsyncMock(side_effect=RuntimeError("redis dead"))
+    redis_mock.exists = AsyncMock(side_effect=RuntimeError("redis dead"))
     collector._redis = redis_mock
     # falls through to is_known check
     assert await collector._is_duplicate("msg-99", "chat@s.whatsapp.net") is False
@@ -451,12 +475,18 @@ async def test_handle_message_event_dedupes(collector):
 async def test_handle_message_event_archives_raw_payload_before_duplicate(collector, monkeypatch):
     monkeypatch.setenv("COLLECTOR_TIER1_RAW_PAYLOADS_ENABLED", "1")
     calls = []
+    thread_calls = []
 
     def fake_write_raw_payload(**kwargs):
         calls.append(kwargs)
         return MagicMock(ok=True)
 
+    async def fake_to_thread(func, *args, **kwargs):
+        thread_calls.append(func)
+        return func(*args, **kwargs)
+
     monkeypatch.setattr(wa_mod, "write_raw_payload", fake_write_raw_payload)
+    monkeypatch.setattr(wa_mod.asyncio, "to_thread", fake_to_thread)
     event = {
         "message_id": "m1",
         "chat_jid": "111@s.whatsapp.net",
@@ -468,11 +498,53 @@ async def test_handle_message_event_archives_raw_payload_before_duplicate(collec
     await collector._handle_message_event(event, [])
 
     assert calls
+    assert thread_calls == [fake_write_raw_payload]
     assert calls[0]["source"] == "whatsapp"
     assert calls[0]["artifact_id"] == "messages/111@s.whatsapp.net/m1"
     assert calls[0]["target_tables"] == ["whatsapp_messages"]
     assert calls[0]["metadata"]["platform_message_id"] == "m1"
     collector._test_conn.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_raw_archive_serializes_slow_vault_writes(collector, monkeypatch):
+    monkeypatch.setenv("COLLECTOR_TIER1_RAW_PAYLOADS_ENABLED", "1")
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+
+    async def slow_to_thread(_func, *_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            entered.set()
+            await release.wait()
+        return MagicMock(ok=True)
+
+    monkeypatch.setattr(wa_mod.asyncio, "to_thread", slow_to_thread)
+    first = asyncio.create_task(collector._archive_raw_event(
+        artifact_id="messages/chat/one", payload={}, target_tables=["whatsapp_messages"],
+    ))
+    await entered.wait()
+    second = asyncio.create_task(collector._archive_raw_event(
+        artifact_id="messages/chat/two", payload={}, target_tables=["whatsapp_messages"],
+    ))
+    await asyncio.sleep(0)
+    assert calls == 1
+    release.set()
+    await asyncio.gather(first, second)
+    assert calls == 2
+
+
+def test_raw_archive_root_defaults_to_vault_and_accepts_durable_spool(tmp_path, monkeypatch):
+    monkeypatch.delenv("WHATSAPP_RAW_ARCHIVE_ROOT", raising=False)
+    default = WhatsappCollector()
+    assert default._raw_archive_root == wa_mod.VAULT_ROOT
+
+    spool = tmp_path / "spool"
+    monkeypatch.setenv("WHATSAPP_RAW_ARCHIVE_ROOT", str(spool))
+    staged = WhatsappCollector()
+    assert staged._raw_archive_root == spool
 
 
 @pytest.mark.asyncio
@@ -1059,11 +1131,11 @@ async def test_download_via_bridge_marks_non_retryable_media_unavailable(
     })
     _patch_async_client(monkeypatch, response=health, post_response=resp)
 
-    out = await configured_collector._download_via_bridge(
-        "sess1", "m-expired", "key", "/path",
-    )
+    with pytest.raises(wa_mod._MediaUnavailable):
+        await configured_collector._download_via_bridge(
+            "sess1", "m-expired", "key", "/path",
+        )
 
-    assert out is None
     calls = _rate_limit_calls(configured_collector._test_conn)
     assert calls == []
     sql_calls = [
@@ -1081,6 +1153,20 @@ async def test_download_via_bridge_marks_non_retryable_media_unavailable(
         410,
         "sess1",
     ]
+
+
+@pytest.mark.asyncio
+async def test_download_via_bridge_marks_unpaired_session_media_unavailable(
+    configured_collector, monkeypatch,
+):
+    health = MagicMock(status_code=200, content=b"", raise_for_status=MagicMock())
+    health.json = MagicMock(return_value={"status": "ok", "whatsapp_ready": True})
+    resp = MagicMock(status_code=503, content=b"", raise_for_status=MagicMock())
+    resp.json = MagicMock(return_value={"code": "bridge_unpaired", "retryable": True})
+    _patch_async_client(monkeypatch, response=health, post_response=resp)
+
+    with pytest.raises(wa_mod._MediaUnavailable):
+        await configured_collector._download_via_bridge("sess1", "m-unpaired", "key", "/path")
 
 
 @pytest.mark.asyncio
@@ -1114,6 +1200,310 @@ async def test_download_direct_records_http_status_error(collector, monkeypatch)
         collector._session_cooldown,
         "WhatsApp direct media download failed: HTTP 429",
     )
+
+
+# ── dedupe-after-persistence / nack-on-failure (GAP-4) ────────────────────
+
+
+def _media_event(msg_id="m-media"):
+    return {
+        "message_id": msg_id,
+        "chat_jid": "111@s.whatsapp.net",
+        "pushName": "Bob",
+        "media_type": "imageMessage",
+        "mediaKey": "k",
+        "directPath": "/p",
+        "session_name": "sess1",
+    }
+
+
+def _redis_mock(exists_return=0):
+    redis_mock = MagicMock()
+    redis_mock.exists = AsyncMock(return_value=exists_return)
+    redis_mock.set = AsyncMock(return_value=True)
+    return redis_mock
+
+
+def _dlq_sqls(collector):
+    return [
+        c.args[0]
+        for c in collector._test_conn.execute.await_args_list
+        if c.args and "dead_letter_queue" in c.args[0]
+    ]
+
+
+def _mock_pipeline(collector, redis_mock):
+    collector._redis = redis_mock
+    collector._upsert_chat = AsyncMock()
+    collector._track_user_profile = AsyncMock(return_value=None)
+    collector._upsert_message = AsyncMock()
+    collector._extract_wa_location = AsyncMock()
+    collector._discover_links = AsyncMock()
+
+
+@pytest.mark.asyncio
+async def test_db_failure_leaves_no_dedupe_marker_and_raises(collector):
+    event = {
+        "message_id": "m-db-fail",
+        "chat_jid": "111@s.whatsapp.net",
+        "body": "hello",
+    }
+    redis_mock = _redis_mock()
+    _mock_pipeline(collector, redis_mock)
+    collector._upsert_message = AsyncMock(side_effect=RuntimeError("db down"))
+
+    with pytest.raises(RuntimeError, match="db down"):
+        await collector._handle_message_event(event, [])
+
+    redis_mock.set.assert_not_awaited()
+    assert "wa_m-db-fail" not in collector._known_ids
+
+
+@pytest.mark.asyncio
+async def test_second_delivery_suppressed_after_terminal_completion(collector):
+    event = {
+        "message_id": "m-dup",
+        "chat_jid": "111@s.whatsapp.net",
+        "body": "hello",
+    }
+    redis_mock = _redis_mock()
+    _mock_pipeline(collector, redis_mock)
+
+    await collector._handle_message_event(event, [])
+
+    redis_mock.set.assert_awaited_once()
+    redis_mock.exists = AsyncMock(return_value=1)
+
+    await collector._handle_message_event(event, [])
+
+    collector._upsert_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_crash_after_message_commit_leaves_pending_media_work_item(collector):
+    event = _media_event("m-crash")
+    redis_mock = _redis_mock()
+    _mock_pipeline(collector, redis_mock)
+    collector._ensure_media_work_item = AsyncMock()
+    # Simulate a hard crash right after the message row committed.
+    collector._download_via_bridge = AsyncMock(side_effect=RuntimeError("process died"))
+
+    with pytest.raises(RuntimeError, match="process died"):
+        await collector._handle_message_event(event, [])
+
+    collector._upsert_message.assert_awaited_once()
+    work_conn = collector._ensure_media_work_item.await_args.args[0]
+    assert work_conn is collector._upsert_message.await_args.kwargs["conn"]
+    redis_mock.set.assert_not_awaited()
+    assert "wa_m-crash" not in collector._known_ids
+
+
+@pytest.mark.asyncio
+async def test_media_download_none_raises_pending_and_keeps_work_item(collector):
+    event = _media_event("m-none")
+    redis_mock = _redis_mock()
+    _mock_pipeline(collector, redis_mock)
+    collector._download_via_bridge = AsyncMock(return_value=None)
+
+    with pytest.raises(wa_mod._MediaPending):
+        await collector._handle_message_event(event, [])
+
+    sqls = _dlq_sqls(collector)
+    assert any("INSERT INTO dead_letter_queue" in s for s in sqls)
+    assert not any("status='failed'" in s for s in sqls)
+    redis_mock.set.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_media_without_retrievable_locator_terminalizes(collector):
+    event = _media_event("m-no-locator")
+    event.pop("mediaKey")
+    event.pop("directPath")
+    redis_mock = _redis_mock()
+    _mock_pipeline(collector, redis_mock)
+    collector._mark_media_unavailable = AsyncMock()
+    collector._fail_media_work_item = AsyncMock()
+
+    await collector._handle_message_event(event, [])
+
+    collector._mark_media_unavailable.assert_awaited_once_with(
+        msg_id="m-no-locator", session="sess1", status_code=0,
+        code="missing_media_locator",
+        reason="WhatsApp event has no media locator for archival",
+    )
+    collector._fail_media_work_item.assert_awaited_once_with(
+        "m-no-locator", "media locator unavailable",
+    )
+    redis_mock.set.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_media_download_none_terminalizes_after_durable_retry_cap(collector):
+    event = _media_event("m-retry-cap")
+    redis_mock = _redis_mock()
+    _mock_pipeline(collector, redis_mock)
+    collector._download_via_bridge = AsyncMock(return_value=None)
+    collector._media_retry_exhausted = AsyncMock(return_value=True)
+    collector._mark_media_unavailable = AsyncMock()
+
+    await collector._handle_message_event(event, [])
+
+    collector._media_retry_exhausted.assert_awaited_once_with(
+        "m-retry-cap", "media download returned no data",
+    )
+    collector._mark_media_unavailable.assert_awaited_once_with(
+        msg_id="m-retry-cap", session="sess1", status_code=0,
+        code="retry_exhausted",
+        reason="media download unavailable after bounded retries",
+    )
+    redis_mock.set.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_media_retry_cap_marks_work_item_failed(collector):
+    collector._test_conn.fetchval = AsyncMock(return_value="failed")
+
+    assert await collector._media_retry_exhausted("m-retry-cap", "no data") is True
+
+    sql, source, content_id, reason, cap = collector._test_conn.fetchval.await_args.args
+    assert "status=CASE WHEN retry_count+1 >= $4 THEN 'failed'" in sql
+    assert (source, content_id, reason, cap) == (
+        "whatsapp", "wa_m-retry-cap", "no data", wa_mod.MEDIA_MAX_DELIVERY_RETRIES,
+    )
+
+
+@pytest.mark.asyncio
+async def test_media_save_failure_raises_pending_and_keeps_work_item(collector):
+    event = _media_event("m-savefail")
+    redis_mock = _redis_mock()
+    _mock_pipeline(collector, redis_mock)
+    collector._download_via_bridge = AsyncMock(return_value=b"jpg")
+    collector._save_media = AsyncMock(return_value=False)
+
+    with pytest.raises(wa_mod._MediaPending):
+        await collector._handle_message_event(event, [])
+
+    sqls = _dlq_sqls(collector)
+    assert any("INSERT INTO dead_letter_queue" in s for s in sqls)
+    redis_mock.set.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_media_success_completes_work_item_and_marks_dedupe(collector):
+    event = _media_event("m-ok")
+    redis_mock = _redis_mock()
+    _mock_pipeline(collector, redis_mock)
+    collector._download_via_bridge = AsyncMock(return_value=b"jpg")
+    collector._save_media = AsyncMock(return_value=True)
+
+    await collector._handle_message_event(event, [])
+
+    sqls = _dlq_sqls(collector)
+    assert any("INSERT INTO dead_letter_queue" in s for s in sqls)
+    assert any("DELETE FROM dead_letter_queue" in s for s in sqls)
+    redis_mock.set.assert_awaited_once()
+    assert "wa_m-ok" in collector._known_ids
+
+
+@pytest.mark.asyncio
+async def test_media_permanently_unavailable_fails_work_item_and_completes(collector):
+    event = _media_event("m-gone")
+    redis_mock = _redis_mock()
+    _mock_pipeline(collector, redis_mock)
+    collector._download_via_bridge = AsyncMock(
+        side_effect=wa_mod._MediaUnavailable("gone")
+    )
+
+    await collector._handle_message_event(event, [])
+
+    sqls = _dlq_sqls(collector)
+    assert any("INSERT INTO dead_letter_queue" in s for s in sqls)
+    assert any("status='failed'" in s for s in sqls)
+    redis_mock.set.assert_awaited_once()
+    assert "wa_m-gone" in collector._known_ids
+
+
+def _broker_message(body: bytes):
+    message = MagicMock()
+    message.body = body
+    message.nack = AsyncMock()
+    message.reject = AsyncMock()
+    return message
+
+
+@pytest.mark.asyncio
+async def test_process_broker_delivery_nacks_on_persistence_failure(collector):
+    body = json.dumps({
+        "message_id": "m1", "chat_jid": "111@s.whatsapp.net", "body": "hi",
+    }).encode()
+    message = _broker_message(body)
+    collector._handle_message_event = AsyncMock(side_effect=RuntimeError("db down"))
+
+    await collector._process_broker_delivery(message, [])
+
+    message.nack.assert_awaited_once_with(requeue=True)
+    message.reject.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_process_broker_delivery_nacks_on_media_pending(collector):
+    body = json.dumps({
+        "message_id": "m1", "chat_jid": "111@s.whatsapp.net",
+        "media_type": "imageMessage", "mediaKey": "k", "directPath": "/p",
+    }).encode()
+    message = _broker_message(body)
+    collector._handle_message_event = AsyncMock(
+        side_effect=wa_mod._MediaPending("media pending")
+    )
+
+    await collector._process_broker_delivery(message, [])
+
+    message.nack.assert_awaited_once_with(requeue=True)
+
+
+@pytest.mark.asyncio
+async def test_process_broker_delivery_nacks_whole_batch_on_failure(collector):
+    body = json.dumps({
+        "sync_type": "history",
+        "session_name": "sess1",
+        "messages": [
+            {"message_id": "b1", "chat_jid": "c1@s.whatsapp.net"},
+            {"message_id": "b2", "chat_jid": "c2@s.whatsapp.net"},
+        ],
+    }).encode()
+    message = _broker_message(body)
+    collector._handle_message_event = AsyncMock(
+        side_effect=[None, RuntimeError("boom")]
+    )
+
+    await collector._process_broker_delivery(message, [])
+
+    assert collector._handle_message_event.await_count == 2
+    message.nack.assert_awaited_once_with(requeue=True)
+
+
+@pytest.mark.asyncio
+async def test_process_broker_delivery_success_does_not_nack(collector):
+    body = json.dumps({
+        "message_id": "m1", "chat_jid": "111@s.whatsapp.net", "body": "hi",
+    }).encode()
+    message = _broker_message(body)
+    collector._handle_message_event = AsyncMock()
+
+    await collector._process_broker_delivery(message, [])
+
+    message.nack.assert_not_awaited()
+    message.reject.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_process_broker_delivery_rejects_malformed_body(collector):
+    message = _broker_message(b"not json")
+
+    await collector._process_broker_delivery(message, [])
+
+    message.reject.assert_awaited_once_with(requeue=False)
+    message.nack.assert_not_awaited()
 
 
 # ── download_media ────────────────────────────────────────────────────────

@@ -1411,67 +1411,28 @@ class TelegramCollector(
         discussion_platform_id: str,
         visit_id,
     ) -> None:
-        from telethon.tl.functions.channels import LeaveChannelRequest
+        """Close out a historical ``pending_leave`` row without a Telegram write.
 
-        account_key = str(worker.account.name).strip().lower()
-        leave_lock = self._discussion_leave_locks.setdefault(account_key, asyncio.Lock())
-        while not self._stop.is_set():
-            if not self._worker_can_resolve(worker):
-                await asyncio.sleep(5)
-                continue
-            try:
-                # Multiple interrupted visits can belong to one account. Keep
-                # its cooldown recovery from issuing concurrent Telegram RPCs.
-                async with leave_lock:
-                    if self._stop.is_set():
-                        return
-                    if not self._worker_can_resolve(worker):
-                        continue
-                    entity = await worker.client.get_entity(int(discussion_platform_id))
-                    await worker.client(LeaveChannelRequest(entity))
-            except Exception as exc:
-                if _is_flood_wait(exc):
-                    await self._handle_flood_wait(worker, exc, sleep=False)
-                    continue
-                if _is_transient(exc):
-                    await asyncio.sleep(5)
-                    continue
-                if self._is_not_participant_error(exc):
-                    async with self.pool.acquire() as conn:
-                        await conn.execute(
-                            """
-                            UPDATE telegram_discussion_visits
-                               SET left_at=NOW(), abort_reason='already_left'
-                             WHERE id=$1 AND abort_reason='pending_leave' AND left_at IS NULL
-                            """,
-                            visit_id,
-                        )
-                    logger.info(
-                        "[telegram.collect] deferred discussion leave already complete for worker=%d",
-                        worker.worker_id,
-                    )
-                    return
-                logger.debug(
-                    "deferred discussion leave will retry for worker=%d (%s)",
-                    worker.worker_id,
-                    type(exc).__name__,
-                )
-                await asyncio.sleep(5 if _is_transient(exc) else 60)
-                continue
-            async with self.pool.acquire() as conn:
-                await conn.execute(
-                    """
-                    UPDATE telegram_discussion_visits
-                       SET left_at=NOW(), abort_reason='flood_wait'
-                     WHERE id=$1 AND abort_reason='pending_leave' AND left_at IS NULL
-                    """,
-                    visit_id,
-                )
-            logger.info(
-                "[telegram.collect] deferred discussion leave completed for worker=%d",
-                worker.worker_id,
+        GAP-6 fail-closed membership guard: leaving is a membership write and
+        is disabled. The account stays in the discussion; the row is
+        relabelled so the recovery scan stops re-scheduling it, and the
+        residual gap is logged instead of papered over with a leave that
+        never ran.
+        """
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE telegram_discussion_visits
+                   SET abort_reason='membership_writes_disabled'
+                 WHERE id=$1 AND abort_reason='pending_leave' AND left_at IS NULL
+                """,
+                visit_id,
             )
-            return
+        logger.warning(
+            "[telegram.collect] inaccessible content: membership writes disabled; "
+            "deferred discussion leave for visit=%s chat=%s worker=%d was NOT sent",
+            visit_id, discussion_platform_id, worker.worker_id,
+        )
 
     async def _process_spider_queue(self, worker: "TelegramWorker"):
         """Process telegram_spider_queue jobs using the given worker's client."""
@@ -1982,6 +1943,34 @@ class TelegramCollector(
             return "transient"
         return "dead"
 
+    async def _resolve_chat_min_id(self, chat_id: str) -> int:
+        """Resume min_id for one chat, seeded only from its own cursor.
+
+        The chat-scoped row (``telegram:chat:<chat_id>``) always holds a
+        numeric message id. The legacy service-level ``last_processed_id`` is
+        chat-ambiguous and is never used as a seed: a non-numeric
+        (target-string) value is ignored with a warning and a full safe
+        backfill is scheduled for this chat instead of a silent min_id=0.
+        """
+        cursor = await self.checkpoint.load_chat_progress(chat_id)
+        if cursor is not None:
+            return cursor
+        legacy = self.checkpoint.last_processed_id
+        if legacy is not None and str(legacy) != "":
+            logger.warning(
+                "telegram/chat-%s: ignoring legacy non-chat cursor %r; "
+                "scheduling full safe backfill for this chat",
+                chat_id,
+                str(legacy)[:50],
+            )
+        else:
+            logger.info(
+                "telegram/chat-%s: no chat cursor yet; "
+                "scheduling full safe backfill for this chat",
+                chat_id,
+            )
+        return 0
+
     async def _collect_chat(self, worker: "TelegramWorker", target: str):
         # Use whichever account is actually in this chat (cross-account routing).
         worker, entity = await self._resolve_entity_any_worker(worker, target)
@@ -2011,31 +2000,33 @@ class TelegramCollector(
                         type(exc).__name__,
                     )
 
-        min_id = 0
-        if self.pool is not None:
-            try:
-                async with self.pool.acquire() as conn:
-                    min_id = int(await conn.fetchval(
-                        """
-                        SELECT COALESCE(MAX(CAST(split_part(m.platform_message_id, ':', 2) AS BIGINT)), 0)
-                        FROM telegram_messages m
-                        JOIN telegram_chats c ON c.id = m.chat_id
-                        WHERE c.platform_chat_id = $1
-                        """,
-                        chat_id,
-                    ) or 0)
-            except Exception:
-                logger.debug(
-                    "telegram/%s: per-chat min_id lookup failed", chat_name, exc_info=True
-                )
-                min_id = 0
+        min_id = await self._resolve_chat_min_id(chat_id)
         count = 0
+        seen_count = 0
+        last_seen_message_id: int | None = None
 
-        async for message in client.iter_messages(entity, min_id=min_id, limit=None):
+        # Full-history traversal contract (GAP-4): oldest→newest via
+        # ``reverse=True``, bounded below by the chat-scoped cursor. Telethon
+        # defaults to newest-first; paired with a rising ``min_id`` checkpoint
+        # that order permanently skips every id below the last save after an
+        # interruption (the iterator's range is (min_id, ∞), so descending
+        # order strands the tail). Ascending order keeps the saved id
+        # monotonic: resume yields exactly the ids above the cursor — no
+        # gaps, no duplicates (``min_id`` is exclusive). ``offset_id`` is
+        # deliberately unused: it is redundant once ``min_id`` bounds the
+        # stream and interacts with the paging direction. ``limit`` stays
+        # unset because the cursor is the bound; a cursor-less chat performs
+        # one full ascending backfill by design and never rescans on later
+        # cycles.
+        async for message in client.iter_messages(
+            entity, min_id=min_id, reverse=True, limit=None
+        ):
             if self._stop.is_set():
                 break
 
             await self.wait_rate_limit("telegram.org")
+            seen_count += 1
+            last_seen_message_id = int(message.id)
 
             sender_uuid = None
             if message.sender_id:
@@ -2064,6 +2055,21 @@ class TelegramCollector(
                 worker, message, chat_id, chat_name, chat_username
             ):
                 count += 1
+
+            if seen_count % self._batch_size == 0 and seen_count > 0:
+                await self.checkpoint.save_chat_progress(chat_id, last_seen_message_id)
+
+        # P3-6: flush the final partial batch. The per-batch save above only
+        # fires on exact _batch_size multiples, so the trailing remainder
+        # (up to _batch_size-1 messages) was never checkpointed — a SIGTERM or
+        # normal completion mid-remainder lost that cursor progress and forced
+        # re-collection on restart. Persist the last seen id unconditionally.
+        if last_seen_message_id is not None:
+            try:
+                await self.checkpoint.save_chat_progress(chat_id, last_seen_message_id)
+            except Exception:
+                logger.warning("telegram/%s: final checkpoint flush failed",
+                               chat_name, exc_info=True)
 
         if count > 0:
             logger.info(
@@ -2185,15 +2191,13 @@ class TelegramCollector(
           1. Check if channel has `linked_chat_id`; if not, return early.
           2. Check if we've already visited this discussion group recently
              (within 24h) — if so, skip to avoid churn.
-          3. If not already joined, call `JoinChannelRequest(linked_chat)`.
-          4. Wait a random human-like dwell time (60-180s default).
-          5. Run `collect_chat_members()` + read a bounded recent message window.
-          6. Call `LeaveChannelRequest` only if this pass joined the discussion.
-          7. Record the visit in `telegram_discussion_visits`.
+          3. If the account is not already a member, record an explicit
+             residual gap (``membership_writes_disabled``) — joining is a
+             membership write and is disabled; the content stays inaccessible.
+          4. Run `collect_chat_members()` + a bounded recent message window
+             using the membership the account already holds.
+          5. Record the visit in `telegram_discussion_visits`.
         """
-        import random
-        from telethon.tl.functions.channels import JoinChannelRequest, LeaveChannelRequest
-
         client = worker.client
 
         # Resolve channel UUID for FK.
@@ -2247,9 +2251,9 @@ class TelegramCollector(
             )
             discussion_uuid = disc_row["id"] if disc_row else None
 
-        # Check if we're already a member; if not, join.
+        # Check if we're already a member; scraping only ever uses membership
+        # the account already holds — joining is disabled (GAP-6).
         already_member = False
-        joined_this_pass = False
         try:
             # `get_participants` returns an empty iterator if not a member (for
             # supergroups you can't read). Alternatively, check left/banned flags.
@@ -2273,144 +2277,109 @@ class TelegramCollector(
                 else min(message_limit, startup_message_limit)
             )
 
-        try:
-            if not already_member:
-                if not await self._consume_join_budget():
-                    abort_reason = "join_budget"
-                    record_visit = False
-                    return False
-                logger.info(
-                    "[worker=%d] Joining discussion group %s (%s) for channel %s",
-                    worker.worker_id, discussion_title, discussion_platform_id, channel_platform_id,
-                )
-                await client(JoinChannelRequest(discussion_entity))
-                joined_this_pass = True
-
-                # Human-like dwell before scraping.
-                dwell = random.randint(self._discussion_dwell_min, self._discussion_dwell_max)
-                logger.debug("Dwelling %ds before scraping discussion group", dwell)
-                await asyncio.sleep(dwell)
-
-            # Scrape members.
-            members_collected = await self.collect_chat_members(
-                discussion_entity.id,
-                worker=worker,
-                max_participants=100 if startup_limits else None,
-                sleep_on_flood_wait=not startup_limits,
+        if not already_member:
+            # GAP-6 fail-closed membership guard: joining is a membership
+            # write and is disabled. The linked discussion of a channel the
+            # account has not joined is inaccessible content; log the
+            # residual gap and record the visit (the 24h gate then keeps
+            # this from warning every cycle). Never send JoinChannelRequest.
+            abort_reason = "membership_writes_disabled"
+            logger.warning(
+                "[worker=%d] inaccessible content: membership writes disabled; "
+                "cannot join discussion group %s (%s) for channel %s — "
+                "recorded as residual gap, no join attempted",
+                worker.worker_id, discussion_title, discussion_platform_id,
+                channel_platform_id,
             )
-            if startup_limits and not self._worker_can_resolve(worker):
-                abort_reason = "flood_wait"
-                return discussion_uuid is not None
-            if self._admin_log_enabled and not startup_limits:
-                try:
-                    await self._poll_admin_logs(worker, discussion_entity)
-                except Exception as exc:
-                    logger.debug("discussion admin log pass failed: %s", exc)
-
-            # Scrape discussion messages. None means all available history.
-            msg_count = 0
-            async for message in client.iter_messages(
-                discussion_entity,
-                limit=message_limit,
-            ):
-                if self._stop.is_set():
-                    abort_reason = "stop_signal"
-                    break
-                sender_uuid = None
-                if message.sender_id:
-                    sender_uuid = await self._upsert_sender(worker, message.sender_id)
-                await self._upsert_message(message, discussion_platform_id, sender_uuid, worker=worker)
-                try:
-                    await self._enqueue_forward_edges(message, discussion_platform_id)
-                except Exception:
-                    pass
-                try:
-                    await self._download_any_message_media(
-                        worker,
-                        message,
-                        discussion_platform_id,
-                        discussion_title,
-                        getattr(discussion_entity, "username", None),
-                    )
-                except Exception as exc:
-                    logger.debug("discussion media download failed: %s", exc)
-                msg_count += 1
-            messages_collected = msg_count
-
-        except Exception as exc:
-            if _is_flood_wait(exc):
-                await self._handle_flood_wait(worker, exc, sleep=not startup_limits)
-                abort_reason = "flood_wait"
-            else:
-                logger.error("Discussion spider failed for %s: %s", discussion_platform_id, exc)
-                abort_reason = str(type(exc).__name__)[:64]
-
-        finally:
-            left_at = None
-            pending_leave_retry = False
-            if joined_this_pass:
-                if startup_limits and not self._worker_can_resolve(worker):
-                    pending_leave_retry = True
-                    abort_reason = "pending_leave"
-                else:
-                    try:
-                        logger.info(
-                            "[worker=%d] Leaving discussion group %s",
-                            worker.worker_id, discussion_title,
-                        )
-                        await client(LeaveChannelRequest(discussion_entity))
-                        left_at = datetime.now(timezone.utc)
-                    except Exception as leave_exc:
-                        if startup_limits and self._is_not_participant_error(leave_exc):
-                            left_at = datetime.now(timezone.utc)
-                        elif startup_limits:
-                            if _is_flood_wait(leave_exc):
-                                await self._handle_flood_wait(worker, leave_exc, sleep=False)
-                            pending_leave_retry = True
-                            abort_reason = "pending_leave"
-                        else:
-                            logger.debug(
-                                "LeaveChannelRequest failed (%s)",
-                                type(leave_exc).__name__,
-                            )
-            else:
-                logger.debug(
-                    "[worker=%d] Keeping existing discussion membership for %s",
-                    worker.worker_id, discussion_title,
+        else:
+            logger.debug(
+                "[worker=%d] Keeping existing discussion membership for %s",
+                worker.worker_id, discussion_title,
+            )
+            try:
+                # Scrape members.
+                members_collected = await self.collect_chat_members(
+                    discussion_entity.id,
+                    worker=worker,
+                    max_participants=100 if startup_limits else None,
+                    sleep_on_flood_wait=not startup_limits,
                 )
+                if startup_limits and not self._worker_can_resolve(worker):
+                    abort_reason = "flood_wait"
+                else:
+                    if self._admin_log_enabled and not startup_limits:
+                        try:
+                            await self._poll_admin_logs(worker, discussion_entity)
+                        except Exception as exc:
+                            logger.debug("discussion admin log pass failed: %s", exc)
 
-            # Record the visit.
-            if discussion_uuid is not None and record_visit:
-                async with self.pool.acquire() as conn:
-                    visit_id = await conn.fetchval(
-                        """
-                        INSERT INTO telegram_discussion_visits (
-                            channel_chat_id, discussion_chat_id,
-                            account_name, joined_at, left_at,
-                            members_collected, messages_collected, abort_reason
-                        ) VALUES ($1, $2, $3, NOW(), $4, $5, $6, $7)
-                        RETURNING id
-                        """,
-                        channel_uuid,
-                        discussion_uuid,
-                        worker.account.name,
-                        left_at,
-                        members_collected,
-                        messages_collected,
-                        abort_reason,
-                    )
-                    visit_recorded = True
-                    if pending_leave_retry:
-                        self._schedule_discussion_leave_retry(
-                            worker, discussion_platform_id, visit_id
-                        )
+                    # Scrape discussion messages. None means all available history.
+                    msg_count = 0
+                    async for message in client.iter_messages(
+                        discussion_entity,
+                        limit=message_limit,
+                    ):
+                        if self._stop.is_set():
+                            abort_reason = "stop_signal"
+                            break
+                        sender_uuid = None
+                        if message.sender_id:
+                            sender_uuid = await self._upsert_sender(worker, message.sender_id)
+                        await self._upsert_message(message, discussion_platform_id, sender_uuid, worker=worker)
+                        try:
+                            await self._enqueue_forward_edges(message, discussion_platform_id)
+                        except Exception:
+                            pass
+                        try:
+                            await self._download_any_message_media(
+                                worker,
+                                message,
+                                discussion_platform_id,
+                                discussion_title,
+                                getattr(discussion_entity, "username", None),
+                            )
+                        except Exception as exc:
+                            logger.debug("discussion media download failed: %s", exc)
+                        msg_count += 1
+                    messages_collected = msg_count
+
+            except Exception as exc:
+                if _is_flood_wait(exc):
+                    await self._handle_flood_wait(worker, exc, sleep=not startup_limits)
+                    abort_reason = "flood_wait"
+                else:
+                    logger.error("Discussion spider failed for %s: %s", discussion_platform_id, exc)
+                    abort_reason = str(type(exc).__name__)[:64]
+
+        # Record the visit. ``left_at`` stays NULL: without membership writes
+        # the collector never joins, so it never leaves either.
+        if discussion_uuid is not None and record_visit:
+            async with self.pool.acquire() as conn:
+                await conn.fetchval(
+                    """
+                    INSERT INTO telegram_discussion_visits (
+                        channel_chat_id, discussion_chat_id,
+                        account_name, joined_at, left_at,
+                        members_collected, messages_collected, abort_reason
+                    ) VALUES ($1, $2, $3, NOW(), $4, $5, $6, $7)
+                    RETURNING id
+                    """,
+                    channel_uuid,
+                    discussion_uuid,
+                    worker.account.name,
+                    None,
+                    members_collected,
+                    messages_collected,
+                    abort_reason,
+                )
+            visit_recorded = True
 
         logger.info(
-            "[worker=%d] Discussion spider done: channel=%s discussion=%s members=%d msgs=%d limit=%s joined=%s left=%s abort=%s",
+            "[worker=%d] Discussion spider done: channel=%s discussion=%s members=%d msgs=%d limit=%s membership_writes=disabled abort=%s",
             worker.worker_id, channel_platform_id, discussion_platform_id,
             members_collected, messages_collected,
             "all" if message_limit is None else message_limit,
-            joined_this_pass, left_at is not None, abort_reason,
+            abort_reason,
         )
         return visit_recorded
 
@@ -4170,16 +4139,12 @@ class TelegramCollector(
         return chat_uuid, members_collected, messages_collected
 
     async def _visit_telegram_link(self, worker: "TelegramWorker", row, parsed: dict) -> None:
-        from telethon.tl.functions.channels import JoinChannelRequest, LeaveChannelRequest
-        from telethon.tl.functions.messages import CheckChatInviteRequest, ImportChatInviteRequest
+        from telethon.tl.functions.messages import CheckChatInviteRequest
 
         url = row["url"]
         source_link_id = row["id"]
         account_name = getattr(worker.account, "name", None)
         entity = None
-        joined_this_pass = False
-        joined_at = None
-        left_at = None
         resolved_chat_uuid = None
         members_collected = 0
         messages_collected = 0
@@ -4190,18 +4155,24 @@ class TelegramCollector(
             if parsed.get("kind") == "invite":
                 invite_hash = parsed.get("invite_hash")
                 try:
+                    # Read-only probe: CheckChatInviteRequest reveals whether
+                    # the account already holds this membership.
                     checked = await worker.client(CheckChatInviteRequest(invite_hash))
                     entity = self._joined_chat_from_result(checked)
                 except Exception:
                     entity = None
                 if entity is None:
-                    if not await self._consume_join_budget():
-                        status = "join_budget"
-                        return
-                    result = await worker.client(ImportChatInviteRequest(invite_hash))
-                    entity = self._joined_chat_from_result(result)
-                    joined_this_pass = True
-                    joined_at = datetime.now(timezone.utc)
+                    # GAP-6 fail-closed membership guard: importing an invite
+                    # is a membership write and is disabled. The linked chat
+                    # is inaccessible content; record the residual gap.
+                    status = "membership_writes_disabled"
+                    logger.warning(
+                        "[worker=%d] inaccessible content: membership writes disabled; "
+                        "invite %s not imported — recorded as residual gap, "
+                        "no ImportChatInviteRequest sent",
+                        worker.worker_id, url,
+                    )
+                    return
             else:
                 username = parsed.get("username")
                 entity = await worker.client.get_entity(username)
@@ -4211,12 +4182,16 @@ class TelegramCollector(
                     return
                 already_member = await self._is_member_of_chat(worker, entity)
                 if not already_member:
-                    if not await self._consume_join_budget():
-                        status = "join_budget"
-                        return
-                    await worker.client(JoinChannelRequest(entity))
-                    joined_this_pass = True
-                    joined_at = datetime.now(timezone.utc)
+                    # GAP-6 fail-closed membership guard: joining is a
+                    # membership write and is disabled; record the residual gap.
+                    status = "membership_writes_disabled"
+                    logger.warning(
+                        "[worker=%d] inaccessible content: membership writes disabled; "
+                        "channel %s not joined — recorded as residual gap, "
+                        "no JoinChannelRequest sent",
+                        worker.worker_id, url,
+                    )
+                    return
 
             if entity is None:
                 status = "unresolved"
@@ -4240,22 +4215,14 @@ class TelegramCollector(
                 error = f"{type(exc).__name__}: {exc}"
                 logger.debug("telegram link visit failed for %s: %s", url, error)
         finally:
-            if joined_this_pass and entity is not None:
-                try:
-                    await worker.client(LeaveChannelRequest(entity))
-                    left_at = datetime.now(timezone.utc)
-                except Exception as leave_exc:
-                    logger.debug("telegram link leave failed for %s: %s", url, leave_exc)
-                    error = error or f"leave_failed: {leave_exc}"
+            # ``joined_this_pass`` is always False now: without membership
+            # writes there is nothing to undo, so no LeaveChannelRequest.
             await self._record_invite_visit(
                 source_link_id=source_link_id,
                 url=url,
                 parsed=parsed,
                 account_name=account_name,
                 resolved_chat_uuid=resolved_chat_uuid,
-                joined_this_pass=joined_this_pass,
-                joined_at=joined_at,
-                left_at=left_at,
                 members_collected=members_collected,
                 messages_collected=messages_collected,
                 status=status,

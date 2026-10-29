@@ -41,6 +41,7 @@ _VERIFIED_BADGE_HTML_RE = re.compile(
 _FOLLOW_GRAPH_PROBE_SOURCES = frozenset({"snapchat", "pinterest"})
 _PUBLIC_DISCOVERY_PLATFORMS = frozenset({"airbnb", "pinterest", "snapchat"})
 _FOLLOW_GRAPH_TARGET_BATCH = 10
+_TRUTHY_FLAGS = frozenset({"1", "true", "yes", "on"})
 
 PROFILE_PROBE_MAX_ATTEMPTS_DEFAULT = 5
 PROFILE_PROBE_BACKOFF_BASE_SECONDS_DEFAULT = 3600
@@ -208,6 +209,18 @@ class ProfileOnlyCollector(BaseCollector):
             )
         except ValueError:
             return PROFILE_PROBE_BACKOFF_BASE_SECONDS_DEFAULT
+
+    def _native_public_discovery_enabled(self) -> bool:
+        """Use an explicit source override before the global discovery gate."""
+        scoped = os.getenv(
+            f"{self.SOURCE_NAME.upper()}_PROBE_NATIVE_PUBLIC_DISCOVERY_ENABLED"
+        )
+        if scoped is not None:
+            return scoped.strip().lower() in _TRUTHY_FLAGS
+        return (
+            os.getenv("NATIVE_PUBLIC_DISCOVERY_ENABLED", "0").strip().lower()
+            in _TRUTHY_FLAGS
+        )
 
     # --- required abstract interface (from BaseCollector) is not used
     #     for profile-only; provide no-op implementations. ---

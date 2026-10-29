@@ -667,12 +667,18 @@ async def test_airbnb_listing_seed_respects_remaining_active_queue_capacity(
             return Transaction()
 
         async def execute(self, query, *args):
-            if "'airbnb_listings'" in query:
+            if (
+                query.lstrip().startswith("INSERT INTO browser_native_scrape_queue")
+                and "'airbnb_listings'" in query
+            ):
                 self.listing_limit = args[0]
                 self.seeded_count = min(5, args[0])
 
         async def fetchval(self, query, *args):
-            if "source='airbnb_listings'" in query:
+            if (
+                "WHERE platform='airbnb'" in query
+                and "status IN ('pending','claimed')" in query
+            ):
                 assert "status IN ('pending','claimed')" in query
                 return active_count
             assert args == ("airbnb", "followed_account_link")
@@ -789,6 +795,7 @@ async def test_airbnb_empty_calendar_preserves_stored_availability_and_check_tim
             "id": 7,
             "target_url": "https://www.airbnb.com/rooms/123456",
             "attempts": 1,
+            "claim_token": "00000000-0000-0000-0000-000000000001",
         }),
     )
     monkeypatch.setattr(native_scrape, "finish_native_target", AsyncMock())

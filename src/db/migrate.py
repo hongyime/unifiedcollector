@@ -66,6 +66,8 @@ MIGRATION_DEPENDENCIES: dict[str, tuple[str, ...]] = {
     "20260802_limit_media_rollup_trigger_updates.sql": ("add_media_source_rollups.sql",),
     "20260906_backfill_telegram_is_bot_from_username.sql": ("add_telegram_is_bot.sql",),
     "20260906_recreate_dashboard_matrix_aggregate_indexes.sql": ("add_media_items_ingest_path.sql",),
+    "20260930_add_follow_edges_position.sql": ("add_follow_edges.sql",),
+    "20261016_add_telegram_poll_voter_refresh.sql": ("add_telegram_phase1.sql",),
     "add_beeper_attachment_backfill_index.sql": ("add_beeper_shadow_tables.sql",),
     "add_beeper_liveness_ingested_network_index.sql": ("add_beeper_shadow_tables.sql",),
     "add_beeper_network_message_index.sql": ("add_beeper_shadow_tables.sql",),

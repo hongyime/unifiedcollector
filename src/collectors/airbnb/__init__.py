@@ -1370,7 +1370,8 @@ class AirbnbCollector(ProfileOnlyCollector):
                         json.dumps({"source": "airbnb_user_profile_graphql"}),
                     )
                 await finish_native_target(
-                    self.pool, self.SOURCE_NAME, int(target["id"]), success=True,
+                    self.pool, self.SOURCE_NAME, int(target["id"]),
+                    claim_token=target["claim_token"], success=True,
                 )
                 summary["hosts"] = 1
                 return summary
@@ -1474,7 +1475,7 @@ class AirbnbCollector(ProfileOnlyCollector):
                             review["review_date"], review["rating"], review["comments"],
                             review["language"], json.dumps({"source": "airbnb_graphql"}),
                         )
-            await finish_native_target(self.pool, self.SOURCE_NAME, int(target["id"]), success=True)
+            await finish_native_target(self.pool, self.SOURCE_NAME, int(target["id"]), claim_token=target["claim_token"], success=True)
             summary.update(
                 listings=1,
                 hosts=1 if listing["host_id"] else 0,
@@ -1496,6 +1497,7 @@ class AirbnbCollector(ProfileOnlyCollector):
                 self.pool,
                 self.SOURCE_NAME,
                 int(target["id"]),
+                claim_token=target["claim_token"],
                 success=False,
                 error=error_code,
                 retry_after_seconds=retry_after_seconds,

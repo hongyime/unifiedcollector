@@ -191,8 +191,8 @@ services:
     cap_add:
       - SYS_PTRACE
     volumes:
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/media"
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}:/vault"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -248,8 +248,8 @@ services:
     cap_add:
       - SYS_PTRACE
     volumes:
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/media"
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}:/vault"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -317,8 +317,8 @@ services:
     extra_hosts:
       - "host.docker.internal:172.20.0.1"
     volumes:
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/media"
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}:/vault"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -382,8 +382,8 @@ services:
     cap_add:
       - SYS_PTRACE
     volumes:
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/media"
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}:/vault"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -429,8 +429,8 @@ services:
     cap_add:
       - SYS_PTRACE
     volumes:
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/media"
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}:/vault"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -544,8 +544,8 @@ services:
     cap_add:
       - SYS_PTRACE
     volumes:
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/media"
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}:/vault"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -600,8 +600,8 @@ services:
     cap_add:
       - SYS_PTRACE
     volumes:
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/media"
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}:/vault"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -646,8 +646,8 @@ services:
     cap_add:
       - SYS_PTRACE
     volumes:
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/media"
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}:/vault"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -776,8 +776,8 @@ services:
     cap_add:
       - SYS_PTRACE
     volumes:
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/media"
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}:/vault"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -851,8 +851,8 @@ services:
     cap_add:
       - SYS_PTRACE
     volumes:
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/media"
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}:/vault"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -913,8 +913,8 @@ services:
     cap_add:
       - SYS_PTRACE
     volumes:
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/media"
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}:/vault"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -973,8 +973,8 @@ services:
     cap_add:
       - SYS_PTRACE
     volumes:
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/media"
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}:/vault"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -1028,8 +1028,8 @@ services:
       BROWSER_CONTENT_HINT_RESPONSE_TIMEOUT_SECONDS: "2.0"
       UC_EXTENSION_EXPECTED_VERSION: "1.23.126"
     volumes:
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/media"
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}:/vault"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}:/vault"
       - ../credentials:/app/credentials   # so /social/cookies can write live sessions
       - ../src:/app/src
     depends_on:
@@ -1086,8 +1086,8 @@ services:
       WA_STAGING_MERGE_INTERVAL_MS: "${WA_STAGING_MERGE_INTERVAL_MS:-5000}"
       WA_STAGING_BATCH_MAX: "${WA_STAGING_BATCH_MAX:-1000}"
     volumes:
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/media"
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}:/vault"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       # live src mount so scheduler code (e.g. identity reconciliation) applies on
@@ -1169,8 +1169,8 @@ services:
     volumes:
       # The vault mount lets the drain read local media files instead of
       # relying on Telegram to fetch a URL (which fails for auth-gated media).
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/media"
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}:/vault"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}:/vault"
       - ../src:/app/src
     depends_on:
       redis:
@@ -1214,12 +1214,8 @@ services:
       STRAVA_ROUTE_STREAM_SHARED_COOLDOWN: "true"
       STRAVA_BROWSER_ROUTE_QUEUE_CANDIDATE_LIMIT: "50"
       STRAVA_BROWSER_ROUTE_QUEUE_IMPORTANT_CANDIDATE_LIMIT: "100"
-      # Localhost-only single-user deployment: default to skipping bearer-token
-      # auth so the dashboard works without a login flow. Override to "false"
-      # to require auth before exposing anything beyond loopback.
-      # NOTE: compose interpolation reads the compose project env (`docker/.env`
-      # or a shell export), NOT ./env/dashboard.env -- env_file only feeds the
-      # container at runtime and cannot drive this substitution.
+      # Keep the operator-controlled toggle explicit. The dashboard is
+      # loopback-only; setting this to false enables bearer-token auth.
       DASHBOARD_AUTH_DISABLED: "${DASHBOARD_AUTH_DISABLED:-true}"
       DB_POOL_MIN_SIZE: "2"
       DB_POOL_MAX_SIZE: "16"
@@ -1232,8 +1228,8 @@ services:
       GITHUB_QUOTA_PUSHER_MAX_CONCURRENT: "12"
       GITHUB_QUOTA_PUSHER_BATCH_SIZE: "100"
     volumes:
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/media"
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}:/vault"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - ../tmp:/app/tmp
       - ../src:/app/src
@@ -1311,10 +1307,10 @@ services:
       AUTH_STORAGE_PATH: /app/auth_info/account1
       WHATSAPP_RABBITMQ_URL: amqp://${RABBITMQ_USER:-wac_user}:${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD required}@rabbitmq:5672/
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-wac_user}:${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD required}@rabbitmq:5672/
-      SYNC_FULL_HISTORY: "true"
-      # On-demand deep history: actively pull older messages per chat (was stuck
-      # ~9 days). Paced; 36500d = effectively all the phone still holds.
-      WHATSAPP_DEEP_BACKFILL: "true"
+      # Keep passive/realtime sync without requesting a large phone history on
+      # every connection; it destabilizes the companion session.
+      SYNC_FULL_HISTORY: "false"
+      WHATSAPP_DEEP_BACKFILL: "false"
       WHATSAPP_BACKFILL_REQ_PER_MIN: "24"
       WHATSAPP_FETCH_COUNT: "100"
       WHATSAPP_MAX_BACKFILL_AGE_DAYS: "36500"
@@ -1329,7 +1325,7 @@ services:
       # live-mount compiled build/ so code changes apply on recreate (no image
       # rebuild — vhdx must not grow).
       - ../src/bridges/whatsapp/build:/app/build
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/data/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}/media:/data/media"
     depends_on:
       rabbitmq:
         condition: service_started
@@ -1353,9 +1349,10 @@ services:
       AUTH_STORAGE_PATH: /app/auth_info/account2
       WHATSAPP_RABBITMQ_URL: amqp://${RABBITMQ_USER:-wac_user}:${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD required}@rabbitmq:5672/
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-wac_user}:${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD required}@rabbitmq:5672/
-      SYNC_FULL_HISTORY: "true"
-      # On-demand deep history (see wa-bridge-1).
-      WHATSAPP_DEEP_BACKFILL: "true"
+      # Keep passive/realtime sync without requesting a large phone history on
+      # every connection; it destabilizes the companion session.
+      SYNC_FULL_HISTORY: "false"
+      WHATSAPP_DEEP_BACKFILL: "false"
       WHATSAPP_BACKFILL_REQ_PER_MIN: "24"
       WHATSAPP_FETCH_COUNT: "100"
       WHATSAPP_MAX_BACKFILL_AGE_DAYS: "36500"
@@ -1368,7 +1365,7 @@ services:
     volumes:
       - ../sessions/whatsapp:/app/auth_info
       - ../src/bridges/whatsapp/build:/app/build
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/data/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}/media:/data/media"
     depends_on:
       rabbitmq:
         condition: service_started

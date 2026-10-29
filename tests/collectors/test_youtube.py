@@ -173,14 +173,11 @@ def test_module_constants():
     assert YT_API_BASE.startswith("https://")
 
 
-def test_youtube_extractor_args_include_web_clients_and_preserve_call_options():
-    assert youtube_mod._youtube_extractor_args() == [
-        "--extractor-args",
-        "youtube:player_client=web,mweb",
-    ]
+def test_youtube_extractor_args_preserve_call_options():
+    assert youtube_mod._youtube_extractor_args() == []
     assert youtube_mod._youtube_extractor_args("max_comments=20", "comment_sort=top") == [
         "--extractor-args",
-        "youtube:player_client=web,mweb;max_comments=20;comment_sort=top",
+        "youtube:max_comments=20;comment_sort=top",
     ]
 
 
@@ -1794,6 +1791,122 @@ def test_get_last_scrape_time_parses_iso(monkeypatch, tmp_path):
     out = coll._get_last_scrape_time()
     assert out is not None
     assert out.year == 2024 and out.month == 6
+
+
+# ── _mark_youtube_target (real disposable PostgreSQL) ────────────────────
+
+
+@pytest.fixture(scope="module")
+def _disposable_pg():
+    from tests.recovery.pg_harness import (
+        DisposablePostgres,
+        assert_environment_safe,
+        resolve_external_dsn,
+    )
+
+    external_dsn = resolve_external_dsn()
+    assert_environment_safe(external_dsn or "")
+    if external_dsn is not None:
+        yield DisposablePostgres.external(external_dsn)
+        return
+
+    harness = DisposablePostgres.start()
+    try:
+        assert_environment_safe(harness.dsn)
+        yield harness
+    finally:
+        harness.stop()
+
+
+_COLLECTION_TARGETS_DDL = """
+CREATE TABLE collection_targets (
+    id SERIAL PRIMARY KEY,
+    source VARCHAR(20) NOT NULL,
+    target_id VARCHAR(100) NOT NULL,
+    target_name VARCHAR(255),
+    target_type VARCHAR(50) DEFAULT 'user',
+    status VARCHAR(20) DEFAULT 'pending',
+    priority INT DEFAULT 0,
+    last_collection_at TIMESTAMP,
+    collection_count INT DEFAULT 0,
+    error_message TEXT,
+    metadata JSONB,
+    created_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(source, target_id)
+)
+"""
+
+
+@pytest.mark.asyncio
+async def test_mark_youtube_target_binds_every_sql_parameter(_disposable_pg):
+    """Regression: the UPDATE must bind status/reason/metadata, not leave $2 unused.
+
+    Before the fix the statement referenced ``$3``/``$4``/``$5`` while also
+    passing an unused ``$2``; PostgreSQL cannot infer a type for an unreferenced
+    parameter and this helper swallowed the resulting error, so the row was
+    never updated.
+    """
+    import asyncpg
+
+    dsn = _disposable_pg.driver_dsn
+    target = "UC_task15_binding"
+
+    setup_conn = await asyncpg.connect(dsn)
+    try:
+        await setup_conn.execute("DROP TABLE IF EXISTS collection_targets")
+        await setup_conn.execute(_COLLECTION_TARGETS_DDL)
+        await setup_conn.execute(
+            """
+            INSERT INTO collection_targets
+                (source, target_id, status, collection_count, error_message, metadata)
+            VALUES ('youtube', $1, 'pending', 2, NULL, $2::jsonb)
+            """,
+            target,
+            json.dumps({"keep_existing": "value"}),
+        )
+    finally:
+        await setup_conn.close()
+
+    pool = await asyncpg.create_pool(dsn, min_size=1, max_size=2)
+    try:
+        coll = YoutubeCollector()
+        coll.set_pool(pool)
+        await coll._mark_youtube_target(
+            target,
+            status="completed",
+            reason="watched_videos",
+            metadata={"youtube_result": {"videos": 3, "ok": True}},
+        )
+    finally:
+        await pool.close()
+
+    verify_conn = await asyncpg.connect(dsn)
+    try:
+        row = await verify_conn.fetchrow(
+            """
+            SELECT status, error_message, collection_count,
+                   last_collection_at, metadata
+            FROM collection_targets
+            WHERE source = 'youtube' AND target_id = $1
+            """,
+            target,
+        )
+    finally:
+        await verify_conn.close()
+
+    assert row is not None
+    assert row["status"] == "completed"
+    assert row["error_message"] == "watched_videos"
+    assert row["collection_count"] == 3
+    assert row["last_collection_at"] is not None
+
+    metadata = row["metadata"]
+    if isinstance(metadata, str):
+        metadata = json.loads(metadata)
+    assert metadata["keep_existing"] == "value"
+    assert metadata["youtube_last_status"] == "completed"
+    assert metadata["youtube_last_reason"] == "watched_videos"
+    assert metadata["youtube_result"] == {"videos": 3, "ok": True}
 
 
 # ── module surface ───────────────────────────────────────────────────────

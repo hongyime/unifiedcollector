@@ -1557,14 +1557,16 @@ class PinterestCollector(ProfileOnlyCollector):
                             }),
                         )
             await finish_native_target(
-                self.pool, self.SOURCE_NAME, int(target["id"]), success=True,
+                self.pool, self.SOURCE_NAME, int(target["id"]),
+                claim_token=target["claim_token"], success=True,
             )
             summary["boards"] = len(boards)
             summary["pins"] = len(pins)
         except Exception as exc:
             if str(exc) == "verified_account_excluded":
                 await finish_native_target(
-                    self.pool, self.SOURCE_NAME, int(target["id"]), success=True,
+                    self.pool, self.SOURCE_NAME, int(target["id"]),
+                    claim_token=target["claim_token"], success=True,
                 )
                 summary["excluded_verified"] = 1
                 return summary
@@ -1581,7 +1583,8 @@ class PinterestCollector(ProfileOnlyCollector):
                 retry_after_seconds = max(exponential_retry, 2 * 60 * 60)
             error_code = _pinterest_native_error_code(exc)
             await finish_native_target(
-                self.pool, self.SOURCE_NAME, int(target["id"]), success=False,
+                self.pool, self.SOURCE_NAME, int(target["id"]),
+                claim_token=target["claim_token"], success=False,
                 error=error_code,
                 retry_after_seconds=retry_after_seconds,
             )
