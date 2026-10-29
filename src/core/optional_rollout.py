@@ -318,11 +318,10 @@ def _feature_policy(feature: str, stage: str, target_cap: int) -> dict[str, Any]
     if feature == "spiderfoot":
         modules = [item.strip() for item in os.getenv(
             "SPIDERFOOT_MODULES",
-            "sfp_dnsresolve,sfp_whois,sfp_names",
+            "sfp_dnsresolve,sfp_whois,sfp_names,sfp_dnsbrute,sfp_portscan_tcp",
         ).split(",") if item.strip()]
         return {
             "weak_lead_only": True,
-            "passive_modules_only": os.getenv("SPIDERFOOT_ALLOW_INTRUSIVE", "0").lower() not in {"1", "true", "yes"},
             "hard_identity_links": False,
             "runtime_bounded": True,
             "compose_profile": "recon",

@@ -13,9 +13,58 @@ import shlex
 import shutil
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
-DEFAULT_MODULES = ("sfp_dnsresolve", "sfp_whois", "sfp_names")
+from src.core.recon_egress_guard import (
+    UnsafeReconTarget,
+    network_policy_installed,
+    validate_recon_target,
+)
+from src.core.recon_evidence import ensure_evidence_capacity, store_private_evidence
+from src.core.recon_rollout import (
+    AdmissionDenied,
+    AdmissionPolicyError,
+    admission_snapshot,
+    commit_claim,
+    halt_admission,
+    release_claim,
+    reserve_claim,
+    validate_zero_spend_modules,
+)
+
+DEFAULT_MODULES = (
+    "sfp_dnsresolve",
+    "sfp_whois",
+    "sfp_names",
+    "sfp_dnsbrute",
+    "sfp_portscan_tcp",
+)
+
+# SpiderFoot 4.0 (the pinned image version) does not ship this module. Fail
+# explicitly if a config requests it instead of letting the CLI ignore it.
+UNAVAILABLE_MODULES = frozenset({"sfp_portscan_udp"})
+
+# SpiderFoot 4.0 labels these sources commercial/private-only, or they have
+# explicit provider-specific billing/usage uncertainty despite a limited free
+# tier. Refuse an explicit request so a free module is never silently dropped
+# and a paid module can never enter the effective command by environment or
+# per-target override.
+PAID_OR_UNCERTAIN_MODULES = frozenset(
+    {
+        "sfp_badpackets",
+        "sfp_c99",
+        "sfp_censys",
+        "sfp_dehashed",
+        "sfp_fsecure_riddler",
+        "sfp_haveibeenpwned",
+        "sfp_projectdiscovery",
+        "sfp_seon",
+        "sfp_shodan",
+        "sfp_sociallinks",
+        "sfp_spur",
+        "sfp_whoisology",
+        "sfp_whoxy",
+    }
+)
 
 # maigret: HTTP-only OSS account-enumeration engine (MIT). Replaces the DEAD
 # sfp_accounts module for username targets. Routed here when a target's scope
@@ -31,45 +80,59 @@ DEFAULT_MAIGRET_HTTP_TIMEOUT_SECONDS = "10"
 DEFAULT_MAIGRET_TARGET_TIMEOUT_SECONDS = "420"
 SOURCE_HEALTH_NAME = "spiderfoot"
 SUPPORTED_TYPES = {"domain", "ip", "ipv4", "email", "username", "user", "url", "phone"}
-DEFAULT_INTRUSIVE_MODULES = {
-    "sfp_portscan_tcp",
-    "sfp_portscan_udp",
-    "sfp_dnsbrute",
-    "sfp_shodan",
-    "sfp_censys",
-}
-DEFAULT_COLLECTOR_SOURCES = {
-    "beeper",
-    "facebook",
-    "github",
-    "instagram",
-    "lemon8",
-    "search",
-    "strava",
-    "telegram",
-    "threads",
-    "tiktok",
-    "website",
-    "whatsapp",
-    "x",
-    "youtube",
-}
-DEFAULT_COLLECTOR_TARGET_TYPES = {"domain", "ip", "ipv4", "email", "phone", "url", "user", "username"}
-DEFAULT_COLLECTOR_SOURCE_TABLES = {
-    "collection_targets",
-    "collector_seen_targets",
-    "discovered_links",
-    "follow_edges",
-    "github_spider_queue",
-    "instagram_spider_queue",
-    "social_users",
-    "website_targets",
-    "youtube_profile_queue",
-    "youtube_spider_queue",
-}
+def allowed_modules(raw: str | None = None) -> list[str]:
+    modules = [item.strip() for item in (raw or os.getenv("SPIDERFOOT_MODULES") or "").split(",") if item.strip()]
+    modules = modules or list(DEFAULT_MODULES)
+    unavailable = sorted(set(modules) & UNAVAILABLE_MODULES)
+    if unavailable:
+        raise ValueError(
+            "modules are unavailable in the installed SpiderFoot version: "
+            + ", ".join(unavailable)
+        )
+    uncertain = sorted(set(modules) & PAID_OR_UNCERTAIN_MODULES)
+    if uncertain:
+        raise ValueError(
+            "modules excluded by zero-spend policy: " + ", ".join(uncertain)
+        )
+    try:
+        max_modules = max(1, int(os.getenv("SPIDERFOOT_MAX_MODULES", "10")))
+    except ValueError:
+        max_modules = 10
+    if len(modules) > max_modules:
+        raise ValueError(
+            f"{len(modules)} modules requested but SPIDERFOOT_MAX_MODULES is {max_modules}; "
+            "raise the limit or explicitly reduce the requested module set"
+        )
+    return modules
+
+
+def effective_modules_for_target(override: list[str] | str | None = None) -> list[str]:
+    """Add target-specific modules without letting an override narrow coverage.
+
+    Maigret and GHunt are separate engines, so their sole-engine selectors stay
+    isolated and are handled by the existing routing branches.
+    """
+    if isinstance(override, str):
+        requested = [item.strip() for item in override.split(",") if item.strip()]
+    elif isinstance(override, list):
+        requested = [str(item).strip() for item in override if str(item).strip()]
+    else:
+        requested = []
+    normalized = [item.lower() for item in requested]
+    if normalized in ([MAIGRET_MODULE], [GHUNT_MODULE]):
+        return normalized
+    if MAIGRET_MODULE in normalized or GHUNT_MODULE in normalized:
+        raise ValueError("Maigret/GHunt must be selected as the sole target engine")
+
+    modules = allowed_modules()
+    for module in requested:
+        if module not in modules:
+            modules.append(module)
+    return allowed_modules(",".join(modules))
 
 
 def _json_dict(value: Any) -> dict[str, Any]:
+    """Read per-target engine options; this is not an admission policy."""
     if isinstance(value, dict):
         return value
     if isinstance(value, str):
@@ -79,101 +142,6 @@ def _json_dict(value: Any) -> dict[str, Any]:
         except json.JSONDecodeError:
             return {}
     return {}
-
-
-def allowed_modules(raw: str | None = None) -> list[str]:
-    modules = [item.strip() for item in (raw or os.getenv("SPIDERFOOT_MODULES") or "").split(",") if item.strip()]
-    modules = modules or list(DEFAULT_MODULES)
-    allow_intrusive = os.getenv("SPIDERFOOT_ALLOW_INTRUSIVE", "").strip().lower() in {"1", "true", "yes"}
-    blocked = {
-        item.strip()
-        for item in os.getenv("SPIDERFOOT_BLOCKED_MODULES", ",".join(sorted(DEFAULT_INTRUSIVE_MODULES))).split(",")
-        if item.strip()
-    }
-    if not allow_intrusive:
-        modules = [module for module in modules if module not in blocked]
-    try:
-        max_modules = max(1, int(os.getenv("SPIDERFOOT_MAX_MODULES", "10")))
-    except ValueError:
-        max_modules = 10
-    return modules[:max_modules]
-
-
-def target_in_scope(target_value: str, allowlist: str | None = None) -> bool:
-    raw = allowlist if allowlist is not None else os.getenv("RECON_ALLOWLIST", "")
-    allowed = [item.strip().lower() for item in raw.split(",") if item.strip()]
-    if not allowed:
-        return os.getenv("RECON_ALLOW_UNSCOPED", "").strip().lower() in {"1", "true", "yes"}
-    value = (target_value or "").lower()
-    parsed = urlparse(value if "://" in value else f"//{value}")
-    host = (parsed.hostname or value.split("@")[-1]).strip(".")
-    candidates = {value, host}
-    if "@" in value:
-        candidates.add(value.split("@", 1)[1])
-    return any(candidate == item or candidate.endswith("." + item) for candidate in candidates for item in allowed)
-
-
-def _csv_set(name: str, default: set[str]) -> set[str]:
-    raw = os.getenv(name, "")
-    values = {item.strip().lower() for item in raw.split(",") if item.strip()}
-    return values or set(default)
-
-
-def _target_domain(target_value: str) -> str:
-    value = (target_value or "").strip().lower()
-    parsed = urlparse(value if "://" in value else f"//{value}")
-    if parsed.hostname:
-        return parsed.hostname.strip(".")
-    if "@" in value:
-        return value.split("@", 1)[1].strip(".")
-    return value.strip(".")
-
-
-def _suffix_allowed(target_value: str, suffixes: str | None = None) -> bool:
-    raw = suffixes if suffixes is not None else os.getenv("RECON_ALLOWED_DOMAIN_SUFFIXES", "")
-    allowed = [item.strip().lower().strip(".") for item in raw.split(",") if item.strip()]
-    if not allowed:
-        return True
-    host = _target_domain(target_value)
-    return any(host == suffix or host.endswith("." + suffix) for suffix in allowed)
-
-
-def target_allowed_by_policy(target: dict[str, Any], scope: dict[str, Any] | None = None) -> tuple[bool, str]:
-    scope = scope or _json_dict(target.get("scope_json"))
-    target_type = str(target.get("target_type") or "").lower()
-    target_value = str(target.get("target_value") or "")
-    scope_allowlist = scope.get("allowlist")
-    if isinstance(scope_allowlist, list):
-        scope_allowlist = ",".join(str(item) for item in scope_allowlist)
-    if target_in_scope(target_value, scope_allowlist):
-        return True, "target matched per-target allowlist"
-    if target_in_scope(target_value):
-        return True, "target matched RECON_ALLOWLIST"
-
-    collector_derived = bool(scope.get("collector_derived")) or str(target.get("source") or "").startswith("collector:")
-    if not collector_derived:
-        return False, "manual target outside RECON_ALLOWLIST"
-
-    allowed_types = _csv_set("RECON_COLLECTOR_TARGET_TYPES", DEFAULT_COLLECTOR_TARGET_TYPES)
-    if target_type not in allowed_types:
-        return False, f"collector-derived target type not allowed: {target_type}"
-
-    collector_source = str(scope.get("collector_source") or scope.get("platform") or "").lower()
-    allowed_sources = _csv_set("RECON_ALLOWED_SOURCES", DEFAULT_COLLECTOR_SOURCES)
-    if collector_source and collector_source not in allowed_sources:
-        return False, f"collector source not allowed: {collector_source}"
-
-    source_table = str(scope.get("source_table") or "").lower()
-    if not source_table and str(target.get("source") or "").startswith("collector:"):
-        source_table = str(target.get("source") or "").split(":", 1)[1].lower()
-    allowed_tables = _csv_set("RECON_ALLOWED_SOURCE_TABLES", DEFAULT_COLLECTOR_SOURCE_TABLES)
-    if source_table and source_table not in allowed_tables:
-        return False, f"collector source table not allowed: {source_table}"
-
-    if target_type in {"domain", "url", "email"} and not _suffix_allowed(target_value):
-        return False, "collector-derived target outside RECON_ALLOWED_DOMAIN_SUFFIXES"
-
-    return True, "collector-derived target matched source/type policy"
 
 
 def stale_target_minutes() -> int:
@@ -188,6 +156,13 @@ def spiderfoot_max_threads() -> int:
         return max(1, min(int(os.getenv("SPIDERFOOT_MAX_THREADS", "4")), 20))
     except ValueError:
         return 4
+
+
+def _bounded_timeout_seconds(name: str, default: int, maximum: int) -> int:
+    try:
+        return min(maximum, max(1, int(os.getenv(name, str(default)))))
+    except ValueError:
+        return default
 
 
 def _safe_worker_label(worker_label: int | str | None) -> str:
@@ -265,6 +240,34 @@ async def _mark_source_health(conn, status: str, error: str | None = None, *, su
     )
 
 
+async def _fail_empty_target(
+    conn,
+    target: dict[str, Any],
+    engine: str,
+    *,
+    modules: list[str] | None = None,
+) -> dict[str, Any]:
+    error = f"{engine} scan produced no useful observations"
+    await conn.execute(
+        "UPDATE recon_targets SET status = 'failed', error = $2, updated_at = NOW() WHERE id = $1::uuid",
+        target["id"],
+        error,
+    )
+    await _mark_source_health(conn, "degraded", error)
+    result: dict[str, Any] = {
+        "status": "failed",
+        "target": target,
+        "observations": 0,
+        "error": error,
+        "dry_run": False,
+    }
+    if modules is not None:
+        result["modules"] = modules
+    if engine != SOURCE_HEALTH_NAME:
+        result["engine"] = engine
+    return result
+
+
 async def _reclaim_stale_targets(conn) -> None:
     await conn.execute(
         """
@@ -300,23 +303,104 @@ def normalize_observation(target_id: str, raw: dict[str, Any]) -> dict[str, Any]
     }
 
 
-async def _claim_target(conn) -> dict[str, Any] | None:
+async def _claim_target(conn, policy: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    if policy is None:
+        policy, _state, reason = admission_snapshot()
+        if reason:
+            raise AdmissionDenied(reason)
     row = await conn.fetchrow(
         """
-        UPDATE recon_targets
-        SET status = 'in_progress', error = NULL, updated_at = NOW()
-        WHERE id = (
-            SELECT id
-            FROM recon_targets
-            WHERE status = 'pending'
-              AND target_type = ANY($1::text[])
-            ORDER BY priority, created_at
-            LIMIT 1
-            FOR UPDATE SKIP LOCKED
-        )
-        RETURNING id::text, target_type, target_value, source, priority, scope_json
+        SELECT id::text, target_type, target_value, source, priority, scope_json
+        FROM recon_targets
+        WHERE status = 'pending'
+          AND target_type = ANY($1::text[])
+          AND target_type = ANY($2::text[])
+          AND source = ANY($3::text[])
+          AND (
+              COALESCE(scope_json->>'account_identity', scope_json->>'account_id',
+                       scope_json->>'owner_account_id') IS NULL
+              OR COALESCE(scope_json->>'account_identity', scope_json->>'account_id',
+                          scope_json->>'owner_account_id') = ANY($4::text[])
+          )
+        ORDER BY priority, created_at
+        LIMIT 1
+        FOR UPDATE SKIP LOCKED
         """,
         sorted(SUPPORTED_TYPES),
+        policy["approved_target_types"],
+        policy["approved_source_identities"],
+        policy["approved_account_identities"],
+    )
+    if not row:
+        return None
+    candidate = dict(row)
+    scope = _json_dict(candidate.get("scope_json"))
+    account_identity = (
+        scope.get("account_identity") or scope.get("account_id") or scope.get("owner_account_id")
+    )
+    token = reserve_claim(
+        source_identity=str(candidate["source"]),
+        target_type=str(candidate["target_type"]),
+        account_identity=str(account_identity) if account_identity is not None else None,
+    )
+    try:
+        state = admission_snapshot(policy)[1]
+        claimed = await conn.fetchrow(
+            """
+            UPDATE recon_targets
+            SET status = 'in_progress', error = NULL, updated_at = NOW(),
+                scope_json = scope_json || jsonb_build_object(
+                    'admission_policy_id', $2::text,
+                    'admission_cohort_limit', $3::int
+                )
+            WHERE id = $1::uuid AND status = 'pending'
+            RETURNING id::text, target_type, target_value, source, priority, scope_json
+            """,
+            candidate["id"],
+            policy["policy_id"],
+            state["cohort_limit"],
+        )
+        if not claimed:
+            release_claim(token)
+            return None
+        result = dict(claimed)
+        identity_hash = hashlib.sha256(
+            f"{result['target_type']}:{result['target_value']}".encode("utf-8")
+        ).hexdigest()[:16]
+        commit_claim(token, target_identity=identity_hash)
+        return result
+    except BaseException:
+        release_claim(token)
+        raise
+
+
+async def _peek_pending_target(conn, policy: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """Read a candidate without locks or state changes for dry-run previews."""
+    if policy is None:
+        policy, _state, reason = admission_snapshot()
+        if reason:
+            raise AdmissionDenied(reason)
+    row = await conn.fetchrow(
+        """
+        SELECT id::text, target_type, target_value, source, priority, scope_json
+        FROM recon_targets
+        WHERE status = 'pending'
+          AND target_type = ANY($1::text[])
+          AND target_type = ANY($2::text[])
+          AND source = ANY($3::text[])
+          AND (
+              COALESCE(scope_json->>'account_identity', scope_json->>'account_id',
+                       scope_json->>'owner_account_id') IS NULL
+              OR COALESCE(scope_json->>'account_identity', scope_json->>'account_id',
+                          scope_json->>'owner_account_id') = ANY($4::text[])
+          )
+        ORDER BY priority, created_at
+        LIMIT 1
+        """,
+        sorted(SUPPORTED_TYPES),
+        policy["approved_target_types"],
+        policy["approved_source_identities"],
+        policy["approved_account_identities"],
     )
     return dict(row) if row else None
 
@@ -501,9 +585,20 @@ async def _run_ghunt_cli(
     if not email or "@" not in email:
         return [], {"status": "error", "reason": f"not an email: {email!r}"}
 
-    timeout = float(os.getenv("GHUNT_TARGET_TIMEOUT_SECONDS", "90"))
-    min_delay = float(os.getenv("GHUNT_MIN_DELAY_SECONDS", "8"))
-    max_jitter = float(os.getenv("GHUNT_MAX_JITTER_SECONDS", "6"))
+    try:
+        timeout = min(
+            90.0, max(1.0, float(os.getenv("GHUNT_TARGET_TIMEOUT_SECONDS", "90")))
+        )
+    except ValueError:
+        timeout = 90.0
+    try:
+        min_delay = min(60.0, max(8.0, float(os.getenv("GHUNT_MIN_DELAY_SECONDS", "8"))))
+    except ValueError:
+        min_delay = 8.0
+    try:
+        max_jitter = min(6.0, max(0.0, float(os.getenv("GHUNT_MAX_JITTER_SECONDS", "6"))))
+    except ValueError:
+        max_jitter = 6.0
     async with _GHUNT_RATE_LOCK:
         # Jittered pre-call delay so consecutive lookups don't hit Google in a
         # tight loop. Bounded so a full pilot of ~10 emails takes ~2 minutes.
@@ -716,11 +811,35 @@ async def _run_maigret_subprocess(
     executable = os.getenv("MAIGRET_CLI", "maigret")
     if shutil.which(executable) is None and not os.path.exists(executable):
         raise RuntimeError(f"MAIGRET_CLI executable not found: {executable}")
-    top_sites = os.getenv("MAIGRET_TOP_SITES", DEFAULT_MAIGRET_TOP_SITES)
-    num_requests = os.getenv("MAIGRET_NUM_REQUESTS", DEFAULT_MAIGRET_NUM_REQUESTS)
-    http_timeout = os.getenv(
-        "MAIGRET_HTTP_TIMEOUT_SECONDS", DEFAULT_MAIGRET_HTTP_TIMEOUT_SECONDS
-    )
+    try:
+        top_sites = min(100, max(1, int(os.getenv("MAIGRET_TOP_SITES", "100"))))
+    except ValueError:
+        top_sites = 100
+    try:
+        num_requests = min(10, max(1, int(os.getenv("MAIGRET_NUM_REQUESTS", "10"))))
+    except ValueError:
+        num_requests = 10
+    http_timeout = str(_bounded_timeout_seconds(
+        "MAIGRET_HTTP_TIMEOUT_SECONDS", 10, 30,
+    ))
+
+    def retain_reports(source: Path) -> None:
+        if not keep_dir:
+            return
+        dst_root = Path(keep_dir)
+        evidence = ensure_evidence_capacity()
+        if not dst_root.resolve().is_relative_to(evidence.resolve()):
+            raise RuntimeError("MAIGRET_REPORT_KEEPDIR must be inside RECON_EVIDENCE_ROOT")
+        dst_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        dst_root.chmod(0o700)
+        for path in source.glob("report_*"):
+            if not path.is_file():
+                continue
+            ensure_evidence_capacity(additional_bytes=path.stat().st_size)
+            destination = dst_root / f"{secrets.token_hex(8)}-{path.name}"
+            shutil.copy2(path, destination)
+            destination.chmod(0o600)
+
     with tempfile.TemporaryDirectory(prefix="maigret-") as tmpdir:
         cmd = [
             executable,
@@ -749,23 +868,14 @@ async def _run_maigret_subprocess(
             except (AttributeError, ProcessLookupError):
                 proc.kill()
             await proc.communicate()
+            retain_reports(Path(tmpdir))
             raise RuntimeError(
                 f"maigret timed out after {timeout_seconds}s for {username}"
             )
         # maigret exits non-zero when zero sites match; we still parse the
         # report dir. Only a missing report dir is a real failure.
         raw_rows = _parse_maigret_report_dir(Path(tmpdir))
-        if keep_dir:
-            try:
-                dst_root = Path(keep_dir)
-                dst_root.mkdir(parents=True, exist_ok=True)
-                for path in Path(tmpdir).glob("report_*"):
-                    try:
-                        shutil.copy2(path, dst_root / path.name)
-                    except OSError:
-                        pass
-            except OSError:
-                pass  # never let keepdir failures break the pipeline
+        retain_reports(Path(tmpdir))
         if not raw_rows and proc.returncode not in (0, 1):
             err_text = (stderr or stdout).decode("utf-8", errors="replace")[:500]
             raise RuntimeError(
@@ -861,7 +971,32 @@ async def refresh_maigret_fp_blocklist(
     by the manual bootstrap CLI). Control runs are SEQUENTIAL to keep RAM
     bounded to a single maigret process at a time.
     """
-    await _ensure_maigret_fp_table(conn)
+    try:
+        policy, _state, block = admission_snapshot()
+    except AdmissionPolicyError as exc:
+        return {"status": "admission_unavailable", "controls_run": 0, "controls_failed": 0, "sites": 0, "error": str(exc)}
+    sibling_policy = policy["sibling_work"].get("maigret_fp_refresh")
+    if block or not sibling_policy or not sibling_policy.get("enabled"):
+        return {
+            "status": "admission_halted" if block else "sibling_disabled",
+            "controls_run": 0,
+            "controls_failed": 0,
+            "sites": 0,
+            "error": block,
+        }
+    sibling_remaining = int(sibling_policy["max_claims"]) - int(
+        _state.get("sibling_claims", {}).get("maigret_fp_refresh", 0)
+    )
+    total_remaining = min(
+        int(_state["cohort_limit"]), int(policy["limits"]["max_claims"]),
+    ) - int(_state["claims_used"])
+    try:
+        requested_controls = max(1, int(num_controls))
+    except (TypeError, ValueError):
+        requested_controls = 1
+    num_controls = min(requested_controls, sibling_remaining, total_remaining)
+    if num_controls <= 0:
+        return {"status": "admission_halted", "controls_run": 0, "controls_failed": 0, "sites": 0, "error": "sibling or cohort allowance exhausted"}
     lock_key = MAIGRET_FP_REFRESH_LOCK_KEY
     if force:
         await conn.execute("SELECT pg_advisory_lock($1::bigint)", lock_key)
@@ -872,28 +1007,56 @@ async def refresh_maigret_fp_blocklist(
         )
     if not got_lock:
         return {"status": "skipped_locked", "controls_run": 0, "sites": 0}
+    first_token: str | None = None
     try:
+        try:
+            first_token = reserve_claim(
+                source_identity="sibling:maigret_fp_refresh",
+                target_type="username",
+                sibling_identity="maigret_fp_refresh",
+            )
+        except AdmissionDenied as exc:
+            return {"status": "admission_halted", "controls_run": 0, "controls_failed": 0, "sites": 0, "error": str(exc)}
+        await _ensure_maigret_fp_table(conn)
         if force:
             await conn.execute("TRUNCATE TABLE recon_maigret_fp_sites")
-        timeout = int(
-            os.getenv(
-                "MAIGRET_TARGET_TIMEOUT_SECONDS",
-                DEFAULT_MAIGRET_TARGET_TIMEOUT_SECONDS,
-            )
+        timeout = _bounded_timeout_seconds(
+            "MAIGRET_TARGET_TIMEOUT_SECONDS",
+            int(DEFAULT_MAIGRET_TARGET_TIMEOUT_SECONDS),
+            600,
         )
-        num_controls = max(1, int(num_controls))
         aggregate: dict[str, dict[str, Any]] = {}
         controls_run = 0
         controls_failed = 0
-        for _ in range(num_controls):
+        admission_status = "refreshed"
+        admission_error = None
+        for index in range(num_controls):
+            if index == 0:
+                admission_token = first_token
+            else:
+                try:
+                    admission_token = reserve_claim(
+                        source_identity="sibling:maigret_fp_refresh",
+                        target_type="username",
+                        sibling_identity="maigret_fp_refresh",
+                    )
+                except AdmissionDenied as exc:
+                    admission_status = "admission_halted"
+                    admission_error = str(exc)
+                    break
             control = _generate_control_username()
             try:
                 rows = await _run_maigret_subprocess(
                     control, timeout, worker_label=worker_label
                 )
             except RuntimeError:
+                commit_claim(admission_token)
                 controls_failed += 1
                 continue
+            except BaseException:
+                commit_claim(admission_token)
+                raise
+            commit_claim(admission_token)
             controls_run += 1
             for entry in rows:
                 if not isinstance(entry, dict):
@@ -950,14 +1113,17 @@ async def refresh_maigret_fp_blocklist(
                 ],
             )
         return {
-            "status": "refreshed",
+            "status": admission_status,
             "controls_requested": num_controls,
             "controls_run": controls_run,
             "controls_failed": controls_failed,
             "sites": len(aggregate),
             "forced": force,
+            "error": admission_error,
         }
     finally:
+        if first_token:
+            release_claim(first_token)
         await conn.execute("SELECT pg_advisory_unlock($1::bigint)", lock_key)
 
 
@@ -976,12 +1142,18 @@ async def _run_maigret_cli(
     per-target control from the previous revision is REMOVED — the cached
     multi-control blocklist supersedes it.
     """
-    keep_dir = (os.getenv("MAIGRET_REPORT_KEEPDIR", "") or "").strip() or None
+    root = ensure_evidence_capacity()
+    keep_dir = (os.getenv("MAIGRET_REPORT_KEEPDIR", "") or "").strip()
+    keep_path = Path(keep_dir) if keep_dir else root / "maigret"
+    if not keep_path.resolve().is_relative_to(root.resolve()):
+        raise RuntimeError("MAIGRET_REPORT_KEEPDIR must be inside RECON_EVIDENCE_ROOT")
+    keep_path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    keep_path.chmod(0o700)
     target_rows = await _run_maigret_subprocess(
         str(target["target_value"]),
         timeout_seconds,
         worker_label=worker_label,
-        keep_dir=keep_dir,
+        keep_dir=str(keep_path),
     )
     return _maigret_rows_to_observations(
         str(target["id"]),
@@ -1007,6 +1179,7 @@ async def _run_spiderfoot_cli(
     executable = command[0]
     if shutil.which(executable) is None and not os.path.exists(executable):
         raise RuntimeError(f"SPIDERFOOT_CLI executable not found: {executable}")
+    ensure_evidence_capacity()
     proc = await asyncio.create_subprocess_exec(
         *command,
         "-s",
@@ -1029,8 +1202,14 @@ async def _run_spiderfoot_cli(
             os.killpg(proc.pid, signal.SIGKILL)
         except (AttributeError, ProcessLookupError):
             proc.kill()
-        await proc.communicate()
+        partial_stdout, partial_stderr = await proc.communicate()
+        store_private_evidence("spiderfoot", ".timeout.stdout.json", partial_stdout)
+        if partial_stderr:
+            store_private_evidence("spiderfoot", ".timeout.stderr.log", partial_stderr)
         raise RuntimeError(f"SpiderFoot timed out after {timeout_seconds}s")
+    store_private_evidence("spiderfoot", ".stdout.json", stdout)
+    if stderr:
+        store_private_evidence("spiderfoot", ".stderr.log", stderr)
     if proc.returncode != 0:
         raise RuntimeError((stderr or stdout).decode("utf-8", errors="replace")[:500])
     return parse_spiderfoot_stdout(stdout)
@@ -1051,15 +1230,78 @@ async def run_spiderfoot_once(
     dry_run: bool = False,
     worker_label: int | str | None = None,
 ) -> dict[str, Any]:
-    async with conn.transaction():
-        await _reclaim_stale_targets(conn)
-        target = await _claim_target(conn)
+    # Scope admission is intentionally open. The shared network namespace's
+    # nftables output chain is the non-bypassable safety boundary; fail closed
+    # before claiming any work if that kernel policy is absent.
+    if not network_policy_installed():
+        error = "public-only recon egress policy is not installed"
+        if not dry_run:
+            await _mark_source_health(conn, "degraded", error)
+        return {"status": "guard_unavailable", "target": None, "observations": 0, "error": error, "dry_run": dry_run}
+
+    try:
+        policy, _admission_state, admission_block = admission_snapshot()
+    except AdmissionPolicyError as exc:
+        error = str(exc)
+        if not dry_run:
+            await _mark_source_health(conn, "degraded", error)
+        return {"status": "admission_unavailable", "target": None, "observations": 0, "error": error, "dry_run": dry_run}
+    configured_modules = [
+        item.strip()
+        for item in (os.getenv("SPIDERFOOT_MODULES") or ",".join(DEFAULT_MODULES)).split(",")
+        if item.strip()
+    ]
+    try:
+        validate_zero_spend_modules(configured_modules, policy=policy)
+    except AdmissionDenied as exc:
+        halt_admission("zero_spend_violation: " + str(exc))
+        return {"status": "zero_spend_rejected", "target": None, "observations": 0, "error": str(exc), "dry_run": dry_run}
+    if admission_block:
+        if not dry_run:
+            # A policy halt intentionally prevents claims; the living worker is
+            # still healthy and must heartbeat so Docker does not restart it.
+            await _mark_source_health(conn, "running", None, success=True)
+        return {
+            "status": "admission_halted",
+            "target": None,
+            "observations": 0,
+            "error": admission_block,
+            "dry_run": dry_run,
+        }
+
+    if dry_run:
+        try:
+            target = await _peek_pending_target(conn, policy)
+        except (AdmissionDenied, AdmissionPolicyError) as exc:
+            return {"status": "admission_halted", "target": None, "observations": 0, "error": str(exc), "dry_run": True}
+    else:
+        try:
+            async with conn.transaction():
+                # Reclaiming stale rows is a write, so the installed admission
+                # policy must be active before this recovery mutation as well.
+                await _reclaim_stale_targets(conn)
+                target = await _claim_target(conn, policy)
+        except AdmissionDenied as exc:
+            return {"status": "admission_halted", "target": None, "observations": 0, "error": str(exc), "dry_run": False}
+        except AdmissionPolicyError as exc:
+            error = str(exc)
+            await _mark_source_health(conn, "degraded", error)
+            return {"status": "admission_unavailable", "target": None, "observations": 0, "error": error, "dry_run": False}
     if not target:
-        await _mark_source_health(conn, "running", None, success=True)
-        return {"status": "idle", "target": None, "observations": 0, "dry_run": dry_run}
+        if not dry_run:
+            await _mark_source_health(conn, "running", None, success=True)
+        return {"status": "dry_run" if dry_run else "idle", "target": None, "observations": 0, "dry_run": dry_run}
     scope = _json_dict(target.get("scope_json"))
-    allowed, reason = target_allowed_by_policy(target, scope)
-    if not allowed:
+    try:
+        await asyncio.to_thread(
+            validate_recon_target,
+            str(target.get("target_type") or ""),
+            str(target.get("target_value") or ""),
+        )
+    except UnsafeReconTarget as exc:
+        reason = str(exc)[:500]
+        if dry_run:
+            return {"status": "dry_run", "target": target, "observations": 0, "rejected": reason, "dry_run": True}
         await conn.execute(
             "UPDATE recon_targets SET status = 'blocked', error = $2, updated_at = NOW() WHERE id = $1::uuid",
             target["id"],
@@ -1079,8 +1321,6 @@ async def run_spiderfoot_once(
     scope_modules_list = scope_modules_raw if isinstance(scope_modules_raw, list) else []
     if _ghunt_selected(target["target_type"], scope_modules_list):
         if dry_run:
-            await conn.execute("UPDATE recon_targets SET status = 'pending', updated_at = NOW() WHERE id = $1::uuid", target["id"])
-            await _mark_source_health(conn, "running", None, success=True)
             return {"status": "dry_run", "target": target, "engine": GHUNT_MODULE, "observations": 0, "dry_run": True}
         try:
             rows, meta = await _run_ghunt_cli(target, worker_label=worker_label)
@@ -1106,6 +1346,8 @@ async def run_spiderfoot_once(
                 await _mark_source_health(conn, "running", None, success=True)
                 return {"status": "failed", "target": target, "engine": GHUNT_MODULE, "observations": 0, "error": reason, "dry_run": False}
             written = await _store_observations(conn, rows)
+            if written == 0:
+                return await _fail_empty_target(conn, target, GHUNT_MODULE)
             await conn.execute(
                 "UPDATE recon_targets SET status = 'completed', error = NULL, updated_at = NOW() WHERE id = $1::uuid",
                 target["id"],
@@ -1123,11 +1365,36 @@ async def run_spiderfoot_once(
             return {"status": "failed", "target": target, "engine": GHUNT_MODULE, "observations": 0, "error": error, "dry_run": False}
 
 
-    module_override = scope.get("modules")
-    if isinstance(module_override, list):
-        module_override = ",".join(str(item) for item in module_override)
-    modules = allowed_modules(module_override if isinstance(module_override, str) else None)
+    try:
+        modules = effective_modules_for_target(scope.get("modules"))
+    except ValueError as exc:
+        error = str(exc)[:500]
+        requested = scope.get("modules")
+        requested_list = requested if isinstance(requested, list) else str(requested or "").split(",")
+        try:
+            validate_zero_spend_modules([str(item).strip() for item in requested_list], policy=policy)
+        except AdmissionDenied as paid_exc:
+            halt_admission("zero_spend_violation: " + str(paid_exc))
+            if not dry_run:
+                await conn.execute(
+                    "UPDATE recon_targets SET status='failed', error=$2, updated_at=NOW() WHERE id=$1::uuid",
+                    target["id"],
+                    str(paid_exc)[:500],
+                )
+                await _mark_source_health(conn, "degraded", str(paid_exc))
+            return {"status": "zero_spend_rejected", "target": target, "observations": 0, "error": str(paid_exc), "dry_run": dry_run}
+        if dry_run:
+            return {"status": "dry_run", "target": target, "observations": 0, "error": error, "dry_run": True}
+        await conn.execute(
+            "UPDATE recon_targets SET status = 'failed', error = $2, updated_at = NOW() WHERE id = $1::uuid",
+            target["id"],
+            error,
+        )
+        await _mark_source_health(conn, "degraded", error)
+        return {"status": "failed", "target": target, "observations": 0, "error": error, "dry_run": dry_run}
     if not modules:
+        if dry_run:
+            return {"status": "dry_run", "target": target, "modules": [], "observations": 0, "dry_run": True}
         await conn.execute(
             "UPDATE recon_targets SET status = 'blocked', error = $2, updated_at = NOW() WHERE id = $1::uuid",
             target["id"],
@@ -1136,8 +1403,6 @@ async def run_spiderfoot_once(
         await _mark_source_health(conn, "running", None, success=True)
         return {"status": "blocked", "target": target, "observations": 0, "dry_run": dry_run}
     if dry_run:
-        await conn.execute("UPDATE recon_targets SET status = 'pending', updated_at = NOW() WHERE id = $1::uuid", target["id"])
-        await _mark_source_health(conn, "running", None, success=True)
         return {"status": "dry_run", "target": target, "modules": modules, "observations": 0, "dry_run": True}
 
     if _maigret_selected(target["target_type"], modules):
@@ -1145,16 +1410,21 @@ async def run_spiderfoot_once(
             fp_blocklist = await load_maigret_fp_blocklist(conn)
             observations, blocked_fp_sitenames = await _run_maigret_cli(
                 target,
-                int(os.getenv(
+                _bounded_timeout_seconds(
                     "MAIGRET_TARGET_TIMEOUT_SECONDS",
-                    DEFAULT_MAIGRET_TARGET_TIMEOUT_SECONDS,
-                )),
+                    int(DEFAULT_MAIGRET_TARGET_TIMEOUT_SECONDS),
+                    600,
+                ),
                 worker_label=worker_label,
                 fp_blocklist=fp_blocklist,
             )
             written = await _store_observations(conn, observations)
             if blocked_fp_sitenames:
                 await bump_maigret_fp_hits(conn, blocked_fp_sitenames)
+            if written == 0:
+                return await _fail_empty_target(
+                    conn, target, MAIGRET_MODULE, modules=modules,
+                )
             await conn.execute(
                 "UPDATE recon_targets SET status = 'completed', error = NULL, updated_at = NOW() WHERE id = $1::uuid",
                 target["id"],
@@ -1196,7 +1466,7 @@ async def run_spiderfoot_once(
         raw_rows = await _run_spiderfoot_cli(
             target,
             modules,
-            int(os.getenv("SPIDERFOOT_TARGET_TIMEOUT_SECONDS", "300")),
+            _bounded_timeout_seconds("SPIDERFOOT_TARGET_TIMEOUT_SECONDS", 300, 600),
             worker_label=worker_label,
         )
         observations = [
@@ -1204,6 +1474,10 @@ async def run_spiderfoot_once(
             if (obs := normalize_observation(target["id"], raw)) is not None
         ]
         written = await _store_observations(conn, observations)
+        if written == 0:
+            return await _fail_empty_target(
+                conn, target, SOURCE_HEALTH_NAME, modules=modules,
+            )
         await conn.execute(
             "UPDATE recon_targets SET status = 'completed', error = NULL, updated_at = NOW() WHERE id = $1::uuid",
             target["id"],

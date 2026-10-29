@@ -8,8 +8,13 @@ across every volume mount. Task 0 froze that dirty file as authoritative
 rendered ``compose_sha256`` identity in ``task-0-artifact-identity.json``
 covers the same state), and the recovery plan reconciles it as intended.
 
-Any further compose byte change -- commands, ports, healthchecks, an unknown
-storage root -- must fail here loudly instead of drifting silently.
+The task-30 public-only guard, task-31 module policy, task-34 meaningful
+healthcheck, task-35 private evidence mount/resource limits, task-37
+fail-closed admission-policy/state mounts, and task-42 fail-closed internal
+secret/dashboard bindings are part of the
+reviewed Compose state. Any further compose byte change -- commands, ports,
+healthchecks, or an unknown storage root -- must fail here loudly instead of
+drifting silently.
 """
 from __future__ import annotations
 
@@ -19,10 +24,10 @@ from pathlib import Path
 
 COMPOSE = Path(__file__).resolve().parents[2] / "docker" / "docker-compose.yml"
 
-# task-0-source-manifest.tsv: sha256 of docker/docker-compose.yml at freeze
-# time (HEAD fc5c25b8 plus the seven staged pre-recovery files, which include
-# the intended seagate-expansion -> sg-ultra storage-root default).
-FROZEN_COMPOSE_SHA256 = "13df5a3d172c089ffbc4a2dea4d4bfeb977108039bf13a3f6ed73e0bacf4ca0e"
+# Reviewed Compose state after task-42 security hardening, Task 41's one-shot
+# schema-init gate, Task 43's read-only cutover pause marker for watchdog, and
+# the WhatsApp-only durable raw-payload spool on the existing sessions volume.
+FROZEN_COMPOSE_SHA256 = "f411fd889a4ea81d80b1c6428428b2b2c7f0cf72913fa90feb42861faeee28d4"
 
 # The reconciled intended storage root (task 29).
 INTENDED_ROOT = "/media/sg-ultra/unifiedcollector"
@@ -43,3 +48,9 @@ def test_compose_default_storage_root_is_the_intended_sg_ultra_root() -> None:
     defaults = _ROOT_DEFAULT.findall(text)
     assert defaults, "UNIFIEDCOLLECTOR_HOST_ROOT default missing from compose"
     assert set(defaults) == {INTENDED_ROOT}
+
+
+def test_whatsapp_history_sync_is_paused_without_disabling_realtime_sync() -> None:
+    text = COMPOSE.read_text(encoding="utf-8")
+    assert text.count('SYNC_FULL_HISTORY: "false"') == 2
+    assert text.count('WHATSAPP_DEEP_BACKFILL: "false"') == 2

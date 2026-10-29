@@ -73,6 +73,8 @@ import shutil
 import tempfile
 from typing import Any
 
+from src.core.recon_evidence import ensure_evidence_capacity
+
 logger = logging.getLogger(__name__)
 
 _ENV_CREDS = "GHUNT_CREDS"       # path to creds.m
@@ -147,9 +149,15 @@ async def run_lookup(email: str, *, timeout: float = _DEFAULT_TIMEOUT_S) -> dict
     env = os.environ.copy()
     env["HOME"] = staged_home
 
-    # ghunt writes JSON to a path; use a tempfile per call.
-    with tempfile.NamedTemporaryFile("r", suffix=".json", delete=False) as tf:
-        out_path = tf.name
+    # Retain raw output under the private evidence root, not shared /tmp or
+    # the exFAT vault. The root helper enforces disk headroom and byte budget.
+    evidence = ensure_evidence_capacity()
+    ghunt_dir = evidence / "ghunt"
+    ghunt_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    ghunt_dir.chmod(0o700)
+    fd, out_path = tempfile.mkstemp(prefix="ghunt-", suffix=".json", dir=ghunt_dir)
+    os.fchmod(fd, 0o600)
+    os.close(fd)
     try:
         proc = await asyncio.create_subprocess_exec(
             binp, "email", email, "--json", out_path,
@@ -163,6 +171,7 @@ async def run_lookup(email: str, *, timeout: float = _DEFAULT_TIMEOUT_S) -> dict
             proc.kill()
             await proc.wait()
             return {"email": email, "status": "error", "reason": f"timeout after {timeout}s"}
+        ensure_evidence_capacity()
         if proc.returncode != 0:
             return {
                 "email": email,
@@ -176,10 +185,8 @@ async def run_lookup(email: str, *, timeout: float = _DEFAULT_TIMEOUT_S) -> dict
             return {"email": email, "status": "error", "reason": f"json read failed: {e!r}"}
         return {"email": email, "status": "ok", "reason": "", "data": data}
     finally:
-        try:
-            os.unlink(out_path)
-        except OSError:
-            pass
+        # Raw GHunt JSON remains under the private evidence root until a
+        # retention rule is approved; only the staged credential HOME is removed.
         # Clean the staged HOME (symlink + parent dirs).
         try:
             import shutil as _sh

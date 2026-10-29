@@ -503,6 +503,7 @@ class WebsiteCollector(BaseCollector):
         self._max_pages = int(os.getenv("WEBSITE_MAX_PAGES", "500"))
         self._max_concurrent = int(os.getenv("WEBSITE_MAX_CONCURRENT_TASKS", "5"))
         self._sem = asyncio.Semaphore(self._max_concurrent)
+        self._checkpoint_lock = asyncio.Lock()
         self._domain_pacing = DomainPacer(
             self.SOURCE_NAME,
             env_prefix="WEBSITE",
@@ -633,6 +634,10 @@ class WebsiteCollector(BaseCollector):
         for seed in self._domain_pacing.order(seed for _url, seed in seed_pairs):
             ordered_pairs.append(by_seed[seed].pop(0))
 
+        async def save_checkpoint(seed: str) -> None:
+            async with self._checkpoint_lock:
+                await self.checkpoint.save_progress(seed)
+
         async def _collect_one(url: str, seed: str) -> None:
             if self._stop.is_set():
                 return
@@ -649,7 +654,7 @@ class WebsiteCollector(BaseCollector):
                     seed,
                     metadata={"backoff_seconds_remaining": round(backoff_left, 1)},
                 )
-                await self.checkpoint.save_progress(seed)
+                await save_checkpoint(seed)
                 return
             logger.info("Collecting website/%s", seed)
             try:
@@ -658,16 +663,16 @@ class WebsiteCollector(BaseCollector):
                     timeout=self._target_timeout,
                 )
                 await self._mark_target_finished(url, seed, stats)
-                await self.checkpoint.save_progress(seed)
+                await save_checkpoint(seed)
             except asyncio.TimeoutError:
                 msg = f"target exceeded {self._target_timeout:.0f}s wall-clock cap"
                 logger.info("Deferred website/%s: %s", seed, msg)
                 await self._defer_target(url, seed, msg)
-                await self.checkpoint.save_progress(seed)
+                await save_checkpoint(seed)
             except Exception as e:
                 logger.error("Failed website/%s: %s", seed, e)
                 await self._defer_target(url, seed, str(e))
-                await self.checkpoint.save_progress(seed)
+                await save_checkpoint(seed)
                 try:
                     await self.send_to_dlq(seed, seed, str(e))
                 except Exception:

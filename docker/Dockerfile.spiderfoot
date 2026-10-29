@@ -62,15 +62,15 @@ RUN wget -q -O /tmp/spiderfoot.tar.gz "https://github.com/smicallef/spiderfoot/a
 # current upstream WhatsMyName data (data URL renamed, `valid` field removed,
 # `check_uri`/`category` renamed to `uri_check`/`cat`). Idempotent, safe to
 # re-run. This makes sfp_accounts FUNCTIONAL if enabled; it does NOT enable
-# it — the SPIDERFOOT_MODULES / RECON_USERNAME_MODULES env + per-target scope
-# still control activation, and the intrusive-module block stays in place.
+# it — SPIDERFOOT_MODULES / RECON_USERNAME_MODULES env + per-target engine
+# selection control activation. Paid/uncertain modules are rejected in code.
 COPY docker/patches/sfp_accounts_schema_drift.py /tmp/sfp_accounts_patch.py
 RUN python /tmp/sfp_accounts_patch.py && rm -f /tmp/sfp_accounts_patch.py
 
 FROM python:3.11-slim-bookworm AS runtime-dependencies
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates wget libffi8 libssl3 libxml2 libxslt1.1 zlib1g \
+    ca-certificates wget nftables libffi8 libssl3 libxml2 libxslt1.1 zlib1g \
     libjpeg62-turbo libopenjp2-7 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=dependencies /usr/local /usr/local

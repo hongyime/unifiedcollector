@@ -140,6 +140,9 @@ class _MediaPending(Exception):
     """
 
 
+MEDIA_MAX_DELIVERY_RETRIES = 3
+
+
 class WhatsappCollector(BaseCollector):
     SOURCE_NAME = "whatsapp"
     INGEST_PATH = "messaging"  # realtime messaging path (P2 review §3 provenance)
@@ -162,6 +165,9 @@ class WhatsappCollector(BaseCollector):
             (os.getenv("WHATSAPP_SESSION_NAMES", "") or os.getenv("SESSION_NAMES", "")).split(",")
             if s.strip()
         ]
+        self._raw_archive_root = Path(
+            os.getenv("WHATSAPP_RAW_ARCHIVE_ROOT", str(VAULT_ROOT))
+        ).resolve()
 
         self._broker_type = os.getenv("WHATSAPP_BROKER_TYPE", "") or os.getenv("BROKER_TYPE", "rabbitmq")
         self._rabbitmq_url = os.getenv("WHATSAPP_RABBITMQ_URL", "") or os.getenv("RABBITMQ_URL", "")
@@ -187,6 +193,9 @@ class WhatsappCollector(BaseCollector):
         self._session_cooldown = int(os.getenv("WHATSAPP_SESSION_COOLDOWN_SECONDS", "") or os.getenv("SESSION_COOLDOWN_SECONDS", "300"))
 
         self._sem = asyncio.Semaphore(3)
+        # Raw payloads are durable, but the vault may be a rotational exFAT disk.
+        # Serialize fsync/rename so broker delivery cannot saturate that device.
+        self._raw_archive_sem = asyncio.Semaphore(1)
         self._redis = None
         self._broker_conn = None
         self._broker_channel = None
@@ -785,7 +794,7 @@ class WhatsappCollector(BaseCollector):
         # WA_CONTACT_ARCHIVE_RAW=1 to re-enable if a specific replay
         # scenario needs the raw AMQP payload back.
         if os.getenv("WA_CONTACT_ARCHIVE_RAW", "0").lower() in ("1", "true", "yes", "on"):
-            self._archive_raw_event(
+            await self._archive_raw_event(
                 artifact_id=f"contacts/{archive_id}",
                 payload=event,
                 target_tables=target_tables,
@@ -1107,7 +1116,7 @@ class WhatsappCollector(BaseCollector):
         except (TypeError, ValueError):
             participant_count = None
 
-        self._archive_raw_event(
+        await self._archive_raw_event(
             artifact_id=f"groups/{chat_jid}",
             payload=event,
             target_tables=["whatsapp_chats"],
@@ -1217,7 +1226,7 @@ class WhatsappCollector(BaseCollector):
         if event.get("deletion"):
             rid_for_archive = event.get("revoked_message_id") or event.get("message_id") or event.get("key", {}).get("id", "")
             if rid_for_archive:
-                self._archive_raw_event(
+                await self._archive_raw_event(
                     artifact_id=f"messages/{rid_for_archive}/deletion",
                     payload=event,
                     target_tables=["whatsapp_messages"],
@@ -1257,7 +1266,7 @@ class WhatsappCollector(BaseCollector):
         if targets and "*" not in targets and "all" not in targets and not any(t.lower() in chat_jid.lower() for t in targets):
             return
 
-        self._archive_raw_event(
+        await self._archive_raw_event(
             artifact_id=f"messages/{chat_jid}/{msg_id}",
             payload=event,
             target_tables=["whatsapp_messages"],
@@ -1327,6 +1336,19 @@ class WhatsappCollector(BaseCollector):
         ext, content_type = classified
         media_key = event.get("mediaKey")
         direct_path = event.get("directPath")
+        media_url = event.get("media_url", "")
+
+        # History events without a bridge locator or direct URL cannot ever
+        # yield media; retain the message and record the terminal gap.
+        if not media_url and not (media_key and direct_path):
+            await self._mark_media_unavailable(
+                msg_id=msg_id, session=session, status_code=0,
+                code="missing_media_locator",
+                reason="WhatsApp event has no media locator for archival",
+            )
+            await self._fail_media_work_item(msg_id, "media locator unavailable")
+            await self._mark_dedupe_complete(msg_id, chat_jid)
+            return
 
         try:
             if media_key and direct_path and session:
@@ -1338,8 +1360,9 @@ class WhatsappCollector(BaseCollector):
                     mimetype=event.get("mimetype") or event.get("mime_type"),
                 )
             else:
-                media_url = event.get("media_url", "")
-                data = await self._download_direct(media_url) if media_url else None
+                data = await self._download_direct(
+                    media_url, msg_id=msg_id, session=session,
+                ) if media_url else None
         except _MediaUnavailable:
             # The unavailability is durably recorded on the message row;
             # close the work item and treat the message as complete.
@@ -1358,9 +1381,16 @@ class WhatsappCollector(BaseCollector):
                 return
             raise _MediaPending(f"media save failed for {cid}; work item left pending")
 
+        if await self._media_retry_exhausted(msg_id, "media download returned no data"):
+            await self._mark_media_unavailable(
+                msg_id=msg_id, session=session, status_code=0,
+                code="retry_exhausted", reason="media download unavailable after bounded retries",
+            )
+            await self._mark_dedupe_complete(msg_id, chat_jid)
+            return
         raise _MediaPending(f"media download returned no data for {cid}; work item left pending")
 
-    def _archive_raw_event(
+    async def _archive_raw_event(
         self,
         *,
         artifact_id: str,
@@ -1371,14 +1401,16 @@ class WhatsappCollector(BaseCollector):
         if not _tier1_raw_archives_enabled():
             return
         try:
-            result = write_raw_payload(
-                source=self.SOURCE_NAME,
-                artifact_id=artifact_id,
-                payload=payload,
-                metadata=metadata or {},
-                target_tables=target_tables,
-                root=VAULT_ROOT,
-            )
+            async with self._raw_archive_sem:
+                result = await asyncio.to_thread(
+                    write_raw_payload,
+                    source=self.SOURCE_NAME,
+                    artifact_id=artifact_id,
+                    payload=payload,
+                    metadata=metadata or {},
+                    target_tables=target_tables,
+                    root=self._raw_archive_root,
+                )
             report_raw_archive_result(
                 self.pool,
                 source=self.SOURCE_NAME,
@@ -1454,7 +1486,7 @@ class WhatsappCollector(BaseCollector):
                     platform_message_id, chat_id, sender_id, from_me,
                     text, media_mime_type, quoted_message_id, quoted_text,
                     forward_from_name, timestamp, metadata, collection_surface
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'message_stream')
+                ) VALUES ($1::varchar, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'message_stream')
                 ON CONFLICT (platform_message_id) DO UPDATE SET
                     chat_id = COALESCE(whatsapp_messages.chat_id, EXCLUDED.chat_id),
                     sender_id = COALESCE(EXCLUDED.sender_id, whatsapp_messages.sender_id),
@@ -1482,7 +1514,7 @@ class WhatsappCollector(BaseCollector):
             """
             INSERT INTO dead_letter_queue
                 (source, entity_id, content_id, error_message, next_retry_at, status)
-            SELECT $1, $2, $3, $4, NOW(), 'pending'
+            SELECT $1::varchar, $2::varchar, $3::varchar, $4::text, NOW(), 'pending'
             WHERE NOT EXISTS (
                 SELECT 1 FROM dead_letter_queue
                 WHERE source = $1
@@ -1524,6 +1556,28 @@ class WhatsappCollector(BaseCollector):
                 )
         except Exception:
             logger.warning("wa media work-item failure mark failed for %s", msg_id, exc_info=True)
+
+    async def _media_retry_exhausted(self, msg_id: str, reason: str) -> bool:
+        """Advance one durable media attempt and terminalize only at its cap."""
+        if self.pool is None:
+            return False
+        try:
+            async with self.pool.acquire() as conn:
+                status = await conn.fetchval(
+                    """
+                    UPDATE dead_letter_queue
+                    SET retry_count=retry_count+1, last_attempt_at=NOW(), error_message=$3,
+                        status=CASE WHEN retry_count+1 >= $4 THEN 'failed' ELSE 'pending' END,
+                        next_retry_at=NOW() + interval '5 minutes'
+                    WHERE source=$1 AND content_id=$2 AND status IN ('pending', 'in_progress')
+                    RETURNING status
+                    """,
+                    self.SOURCE_NAME, f"wa_{msg_id}", reason, MEDIA_MAX_DELIVERY_RETRIES,
+                )
+            return status == "failed"
+        except Exception:
+            logger.warning("wa media retry accounting failed for %s", msg_id, exc_info=True)
+            return False
 
     @staticmethod
     def _build_whatsapp_source_url(chat_jid: str | None, cid: str | None) -> str | None:
@@ -2229,7 +2283,7 @@ class WhatsappCollector(BaseCollector):
                     if (
                         retryable is False
                         or resp.status_code in {410, 422}
-                        or error_code in {"media_unavailable", "media_decrypt_failed"}
+                        or error_code in {"media_unavailable", "media_decrypt_failed", "bridge_unpaired"}
                     ):
                         await self._mark_media_unavailable(
                             msg_id=msg_id,
@@ -2327,11 +2381,20 @@ class WhatsappCollector(BaseCollector):
         except Exception:
             logger.debug("wa media-unavailable marker failed for %s", msg_id, exc_info=True)
 
-    async def _download_direct(self, url: str) -> bytes | None:
+    async def _download_direct(
+        self, url: str, *, msg_id: str | None = None, session: str | None = None,
+    ) -> bytes | None:
         try:
             async with self._sem:
                 async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
                     resp = await client.get(url)
+                    if resp.status_code in {404, 410} and msg_id:
+                        await self._mark_media_unavailable(
+                            msg_id=msg_id, session=session, status_code=resp.status_code,
+                            code=f"http_{resp.status_code}",
+                            reason=f"WhatsApp direct media HTTP {resp.status_code}",
+                        )
+                        raise _MediaUnavailable(f"WhatsApp media unavailable {msg_id}: HTTP {resp.status_code}")
                     resp.raise_for_status()
                     return resp.content
         except Exception as e:

@@ -4,15 +4,20 @@ import argparse
 import asyncio
 import json
 
+from src.core.recon_rollout import AdmissionPolicyError, admission_snapshot
 from src.core.recon_seed import seed_recon_targets_from_collector
 from src.db.connection import close_pool, get_pool
-from src.db.migrate import apply_all
 
 
 async def _run(args) -> None:
     sources = [item.strip() for item in args.source.split(",") if item.strip()] if args.source else None
+    try:
+        policy, _state, block = admission_snapshot()
+    except AdmissionPolicyError as exc:
+        raise SystemExit(f"recon-seed refused: admission policy unavailable ({exc})") from exc
+    if not args.dry_run and block:
+        raise SystemExit(f"recon-seed refused by admission gate ({block})")
     pool = await get_pool()
-    await apply_all(pool)
     try:
         async with pool.acquire() as conn:
             report = await seed_recon_targets_from_collector(
@@ -25,6 +30,7 @@ async def _run(args) -> None:
                 total_limit=args.limit,
                 priority=args.priority,
                 dry_run=args.dry_run,
+                approved_source_identities=policy["approved_source_identities"],
             )
         if args.json:
             print(json.dumps(report, indent=2, sort_keys=True, default=str), flush=True)

@@ -4,6 +4,10 @@ from datetime import datetime, timezone
 logger = logging.getLogger(__name__)
 
 
+class CheckpointConflict(RuntimeError):
+    """A cursor changed after this worker loaded it; stale writes are fenced."""
+
+
 class CheckpointManager:
     """Resume cursor backed by the service_cursors table.
 
@@ -18,6 +22,8 @@ class CheckpointManager:
         self.last_processed_id: str | None = None
         self.last_processed_at: datetime | None = None
         self.status: str = "idle"
+        self._cursor_loaded = False
+        self._chat_cursors: dict[str, tuple[bool, str | None]] = {}
 
     def set_pool(self, pool):
         self._pool = pool
@@ -46,16 +52,26 @@ class CheckpointManager:
                 self.chat_cursor_key(chat_id),
             )
         raw = row["last_processed_id"] if row else None
+        self._chat_cursors[chat_id] = (True, str(raw) if raw is not None else None)
         try:
             return int(raw)
         except (TypeError, ValueError):
             return None
 
     async def save_chat_progress(self, chat_id: str, message_id: int) -> None:
-        """Upsert one chat's numeric message cursor (atomic)."""
+        """CAS one chat cursor so a pre-reset worker cannot restore stale state."""
         now = datetime.now(timezone.utc)
         async with self._pool.acquire() as conn:
-            await conn.execute(
+            loaded = self._chat_cursors.get(chat_id)
+            if loaded is None or not loaded[0]:
+                row = await conn.fetchrow(
+                    "SELECT last_processed_id FROM service_cursors WHERE service = $1",
+                    self.chat_cursor_key(chat_id),
+                )
+                expected = row["last_processed_id"] if row else None
+            else:
+                expected = loaded[1]
+            row = await conn.fetchrow(
                 """
                 INSERT INTO service_cursors
                     (service, last_processed_id, last_processed_at, status)
@@ -63,11 +79,17 @@ class CheckpointManager:
                 ON CONFLICT (service) DO UPDATE
                 SET last_processed_id = EXCLUDED.last_processed_id,
                     last_processed_at = EXCLUDED.last_processed_at
+                WHERE service_cursors.last_processed_id IS NOT DISTINCT FROM $4
+                RETURNING last_processed_id
                 """,
                 self.chat_cursor_key(chat_id),
                 str(message_id),
                 now,
+                expected,
             )
+            if row is None:
+                raise CheckpointConflict(f"chat cursor changed while worker was running: {chat_id}")
+            self._chat_cursors[chat_id] = (True, str(row["last_processed_id"]))
 
     async def touch(self, status: str | None = None):
         """Heartbeat the service row without advancing its cursor.
@@ -105,6 +127,8 @@ class CheckpointManager:
                 self._service,
             )
             self.last_processed_id = row["last_processed_id"]
+            self._expected_cursor = row["last_processed_id"]
+            self._cursor_loaded = True
             self.last_processed_at = row["last_processed_at"]
             self.status = row["status"] or "idle"
             logger.info(
@@ -113,26 +137,44 @@ class CheckpointManager:
             )
 
     async def save_progress(self, last_id: str | None = None, status: str | None = None):
-        if last_id is not None:
-            self.last_processed_id = last_id
-            self.last_processed_at = datetime.now(timezone.utc)
-        if status is not None:
-            self.status = status
-
         async with self._pool.acquire() as conn:
-            await conn.execute(
+            if not self._cursor_loaded:
+                row = await conn.fetchrow(
+                    "SELECT last_processed_id FROM service_cursors WHERE service = $1",
+                    self._service,
+                )
+                self.last_processed_id = row["last_processed_id"] if row else None
+                self._expected_cursor = self.last_processed_id
+                self._cursor_loaded = True
+            expected = self._expected_cursor
+            next_cursor = last_id if last_id is not None else self.last_processed_id
+            if last_id is not None:
+                self.last_processed_at = datetime.now(timezone.utc)
+            if status is not None:
+                self.status = status
+            row = await conn.fetchrow(
                 """
-                UPDATE service_cursors
-                SET last_processed_id = $2,
-                    last_processed_at = $3,
-                    status = $4
-                WHERE service = $1
+                INSERT INTO service_cursors
+                    (service, last_processed_id, last_processed_at, status)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (service) DO UPDATE SET
+                    last_processed_id = EXCLUDED.last_processed_id,
+                    last_processed_at = EXCLUDED.last_processed_at,
+                    status = EXCLUDED.status
+                WHERE service_cursors.last_processed_id IS NOT DISTINCT FROM $5
+                RETURNING last_processed_id
                 """,
                 self._service,
-                self.last_processed_id,
+                next_cursor,
                 self.last_processed_at,
                 self.status,
+                expected,
             )
+            if row is None:
+                raise CheckpointConflict(f"service cursor changed while worker was running: {self._service}")
+            self.last_processed_id = row["last_processed_id"]
+            self._expected_cursor = row["last_processed_id"]
+            self._cursor_loaded = True
 
     async def mark_running(self):
         await self.save_progress(status="running")

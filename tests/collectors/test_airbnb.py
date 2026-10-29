@@ -667,12 +667,18 @@ async def test_airbnb_listing_seed_respects_remaining_active_queue_capacity(
             return Transaction()
 
         async def execute(self, query, *args):
-            if "'airbnb_listings'" in query:
+            if (
+                query.lstrip().startswith("INSERT INTO browser_native_scrape_queue")
+                and "'airbnb_listings'" in query
+            ):
                 self.listing_limit = args[0]
                 self.seeded_count = min(5, args[0])
 
         async def fetchval(self, query, *args):
-            if "source='airbnb_listings'" in query:
+            if (
+                "WHERE platform='airbnb'" in query
+                and "status IN ('pending','claimed')" in query
+            ):
                 assert "status IN ('pending','claimed')" in query
                 return active_count
             assert args == ("airbnb", "followed_account_link")

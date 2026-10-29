@@ -21,6 +21,8 @@ x-collector-common: &collector-common
   depends_on:
     postgres:
       condition: service_healthy
+    schema_init:
+      condition: service_completed_successfully
   restart: unless-stopped
 
 
@@ -72,12 +74,72 @@ services:
     oom_score_adj: -500
     mem_reservation: 2g
 
+  # The only service permitted to apply DDL during startup.  Consumers wait
+  # for this one-shot phase instead of racing each other through apply_all().
+  # It uses the ordinary collector image/source contract and deliberately has
+  # no storage or credential mounts beyond the shared database environment.
+  schema_init:
+    image: unifiedcollector-collector:latest
+    container_name: unifiedcollector_schema_init
+    init: true
+    command: python -m src.db.dev_init
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
+    volumes:
+      - ../src:/app/src:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - ./env/common.env
+    restart: "no"
+
+  recon_egress_guard:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.spiderfoot
+    image: unifiedcollector-spiderfoot:latest
+    container_name: unifiedcollector_recon_egress_guard
+    init: true
+    command: python -m src.core.recon_egress_guard --serve --database-host unifiedcollector_postgres
+    environment:
+      RECON_MAX_EGRESS_BYTES: "${RECON_MAX_EGRESS_BYTES:-1073741824}"
+      RECON_EGRESS_GUARD_SOCKET: "/var/lib/unifiedcollector/recon-guard/status.sock"
+      RECON_EGRESS_GUARD_GID: "${RECON_GID:-1000}"
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_ADMIN
+      - CHOWN
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      postgres:
+        condition: service_healthy
+      schema_init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-m", "src.core.recon_egress_guard", "--check"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    volumes:
+      - /var/lib/unifiedcollector/recon-guard:/var/lib/unifiedcollector/recon-guard
+    restart: unless-stopped
+
   collector_spiderfoot:
     build:
       context: ..
       dockerfile: docker/Dockerfile.spiderfoot
     image: unifiedcollector-spiderfoot:latest
     container_name: unifiedcollector_spiderfoot
+    user: "${RECON_UID:-1000}:${RECON_GID:-1000}"
+    network_mode: "service:recon_egress_guard"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     init: true
     command: python -m src.recon_spiderfoot_service --poll-interval ${RECON_SPIDERFOOT_POLL_INTERVAL:-10} --workers ${RECON_SPIDERFOOT_WORKERS:-1}
     mem_limit: ${RECON_SPIDERFOOT_MEM:-2g}
@@ -85,20 +147,26 @@ services:
     pids_limit: 256
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
-      RECON_ALLOWLIST: "${RECON_ALLOWLIST:-}"
-      RECON_ALLOW_UNSCOPED: "${RECON_ALLOW_UNSCOPED:-0}"
-      RECON_ALLOWED_SOURCES: "${RECON_ALLOWED_SOURCES:-beeper,facebook,github,instagram,lemon8,search,strava,telegram,threads,tiktok,website,whatsapp,x,youtube}"
-      RECON_ALLOWED_SOURCE_TABLES: "${RECON_ALLOWED_SOURCE_TABLES:-collector_seen_targets,collection_targets,discovered_links,follow_edges,github_spider_queue,github_users,github_commits,instagram_spider_queue,social_users,website_targets,youtube_profile_queue,youtube_spider_queue}"
-      RECON_COLLECTOR_TARGET_TYPES: "${RECON_COLLECTOR_TARGET_TYPES:-domain,url,email,phone,ip,ipv4,user,username,channel}"
-      RECON_ALLOWED_DOMAIN_SUFFIXES: "${RECON_ALLOWED_DOMAIN_SUFFIXES:-}"
       RECON_USERNAME_MODULES: "${RECON_USERNAME_MODULES:-maigret}"
       SPIDERFOOT_CLI: "${SPIDERFOOT_CLI:-/usr/local/bin/spiderfoot-cli}"
-      SPIDERFOOT_MODULES: "${SPIDERFOOT_MODULES:-sfp_dnsresolve,sfp_whois,sfp_names}"
+      SPIDERFOOT_MODULES: "${SPIDERFOOT_MODULES:-sfp_dnsresolve,sfp_whois,sfp_names,sfp_dnsbrute,sfp_portscan_tcp}"
       SPIDERFOOT_MAX_MODULES: "${SPIDERFOOT_MAX_MODULES:-10}"
       SPIDERFOOT_MAX_THREADS: "${SPIDERFOOT_MAX_THREADS:-3}"
-      SPIDERFOOT_ALLOW_INTRUSIVE: "${SPIDERFOOT_ALLOW_INTRUSIVE:-0}"
       SPIDERFOOT_TARGET_TIMEOUT_SECONDS: "${SPIDERFOOT_TARGET_TIMEOUT_SECONDS:-180}"
       SPIDERFOOT_STALE_TARGET_MINUTES: "${SPIDERFOOT_STALE_TARGET_MINUTES:-30}"
+      RECON_HEALTH_MAX_AGE_SECONDS: "${RECON_HEALTH_MAX_AGE_SECONDS:-360}"
+      RECON_MAX_TARGETS_PER_RUN: "${RECON_MAX_TARGETS_PER_RUN:-10}"
+      RECON_RUN_DEADLINE_SECONDS: "${RECON_RUN_DEADLINE_SECONDS:-1800}"
+      RECON_RUN_COOLDOWN_SECONDS: "${RECON_RUN_COOLDOWN_SECONDS:-3600}"
+      RECON_ADMISSION_POLICY_PATH: "/app/config/task-37-admission-policy.json"
+      RECON_ADMISSION_STATE_PATH: "/var/lib/unifiedcollector/recon-admission/task-37-admission-state.json"
+      RECON_ADMISSION_STATE_MODE: "0660"
+      RECON_ADMISSION_SHARED_GID: "${RECON_ADMISSION_SHARED_GID:-1000}"
+      RECON_EGRESS_GUARD_SOCKET: "/var/lib/unifiedcollector/recon-guard/status.sock"
+      RECON_EVIDENCE_ROOT: "/var/lib/unifiedcollector/recon-evidence"
+      RECON_MIN_DISK_FREE_BYTES: "${RECON_MIN_DISK_FREE_BYTES:-2147483648}"
+      RECON_MAX_EVIDENCE_BYTES: "${RECON_MAX_EVIDENCE_BYTES:-10737418240}"
+      RECON_SPIDERFOOT_HEARTBEAT_PATH: "/tmp/recon-spiderfoot-worker.heartbeat"
       SPIDERFOOT_STATE_ROOT: "${SPIDERFOOT_STATE_ROOT:-/tmp/spiderfoot-state}"
       # maigret: HTTP-only OSS account-enumeration engine (MIT), replaces the
       # DEAD sfp_accounts module for username targets.
@@ -113,7 +181,7 @@ services:
       MAIGRET_NUM_REQUESTS: "${MAIGRET_NUM_REQUESTS:-10}"
       MAIGRET_HTTP_TIMEOUT_SECONDS: "${MAIGRET_HTTP_TIMEOUT_SECONDS:-10}"
       MAIGRET_TARGET_TIMEOUT_SECONDS: "${MAIGRET_TARGET_TIMEOUT_SECONDS:-420}"
-      MAIGRET_REPORT_KEEPDIR: "${MAIGRET_REPORT_KEEPDIR:-}"
+      MAIGRET_REPORT_KEEPDIR: "${MAIGRET_REPORT_KEEPDIR:-/var/lib/unifiedcollector/recon-evidence/maigret}"
       # GHunt: email -> Google account enrichment. Isolated venv, not the system python.
       # See docker/Dockerfile.spiderfoot for the /opt/ghunt-venv install.
       # Creds.m is mounted READ-ONLY below; disable by unsetting GHUNT_CREDS.
@@ -125,23 +193,27 @@ services:
       DB_POOL_MAX_SIZE: "6"
       PYTHONUNBUFFERED: "1"
     volumes:
+      - /var/lib/unifiedcollector/recon-evidence:/var/lib/unifiedcollector/recon-evidence
+      - /var/lib/unifiedcollector/recon-admission:/var/lib/unifiedcollector/recon-admission
+      - /var/lib/unifiedcollector/recon-guard:/var/lib/unifiedcollector/recon-guard:ro
+      - ./../config/task-37-admission-policy.json:/app/config/task-37-admission-policy.json:ro
       - ../src:/app/src
       # GHunt credentials: set GHUNT_CREDS_HOST to an existing private session file.
       # Read-only bind so a bug in ghunt cannot rewrite the operator's file. Path
       # inside the container is GHUNT_CREDS (default /app/.ghunt/creds.m).
       - ${GHUNT_CREDS_HOST:-${USERPROFILE:-${HOME}}/.malfrats/ghunt/creds.m}:/app/.ghunt/creds.m:ro
     depends_on:
-      postgres:
+      recon_egress_guard:
         condition: service_healthy
     env_file:
       - ./env/common.env
       - ./env/recon.env
     healthcheck:
-      test: ["CMD-SHELL", "/opt/spiderfoot-venv/bin/python /opt/spiderfoot/sf.py -V >/dev/null 2>&1"]
-      interval: 90s
-      timeout: 90s
+      test: ["CMD", "python", "-m", "src.recon_spiderfoot_service", "--healthcheck"]
+      interval: 30s
+      timeout: 10s
       retries: 3
-      start_period: 120s
+      start_period: 180s
     restart: unless-stopped
 
   # P3-1: youtube runs in its OWN process/container, isolated from the main
@@ -191,8 +263,8 @@ services:
     cap_add:
       - SYS_PTRACE
     volumes:
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/media"
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}:/vault"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -200,6 +272,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      schema_init:
+        condition: service_completed_successfully
     env_file:
       - ./env/common.env
       - ./env/youtube.env
@@ -248,8 +322,8 @@ services:
     cap_add:
       - SYS_PTRACE
     volumes:
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/media"
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}:/vault"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -257,6 +331,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      schema_init:
+        condition: service_completed_successfully
     env_file:
       - ./env/common.env
       - ./env/tiktok.env
@@ -317,8 +393,8 @@ services:
     extra_hosts:
       - "host.docker.internal:172.20.0.1"
     volumes:
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/media"
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}:/vault"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -326,6 +402,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      schema_init:
+        condition: service_completed_successfully
     env_file:
       - ./env/common.env
       - ./env/github.env
@@ -382,8 +460,8 @@ services:
     cap_add:
       - SYS_PTRACE
     volumes:
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/media"
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}:/vault"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -391,6 +469,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      schema_init:
+        condition: service_completed_successfully
     env_file:
       - ./env/common.env
       - ./env/search.env
@@ -429,8 +509,8 @@ services:
     cap_add:
       - SYS_PTRACE
     volumes:
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/media"
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}:/vault"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -438,6 +518,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      schema_init:
+        condition: service_completed_successfully
     env_file:
       - ./env/common.env
       - ./env/strava.env
@@ -482,9 +564,11 @@ services:
       # to revert to instant-restart behaviour.
       WATCHDOG_DECISION_BUTTONS_ENABLED: "${WATCHDOG_DECISION_BUTTONS_ENABLED:-1}"
       WATCHDOG_DECISION_GRACE_SECONDS: "${WATCHDOG_DECISION_GRACE_SECONDS:-600}"
+      CUTOVER_PAUSE_FILE: /var/lib/unifiedcollector/cutover.pause
     volumes:
       - ../src:/app/src
       - /var/run/docker.sock:/var/run/docker.sock
+      - /var/lib/unifiedcollector:/var/lib/unifiedcollector:ro
     # Load ../.env so the Telegram notifier (NOTIFY_TELEGRAM_BOT_TOKEN /
     # TELEGRAM_CHAT_ID) can alert on stale-source restarts. Without it the
     # notifier silently no-ops (send-only, fail-safe).
@@ -494,6 +578,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      schema_init:
+        condition: service_completed_successfully
     # The safety net now has its own safety net: a wedged loop (or dead
     # interpreter) fails this heartbeat check and restart:unless-stopped revives
     # it. start_period covers the first interval before a heartbeat exists.
@@ -544,8 +630,8 @@ services:
     cap_add:
       - SYS_PTRACE
     volumes:
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/media"
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}:/vault"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -553,6 +639,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      schema_init:
+        condition: service_completed_successfully
     env_file:
       - ./env/common.env
       - ./env/website.env
@@ -600,8 +688,8 @@ services:
     cap_add:
       - SYS_PTRACE
     volumes:
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/media"
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}:/vault"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -609,6 +697,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      schema_init:
+        condition: service_completed_successfully
     env_file:
       - ./env/common.env
       - ./env/exposure.env
@@ -646,8 +736,8 @@ services:
     cap_add:
       - SYS_PTRACE
     volumes:
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/media"
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}:/vault"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -655,6 +745,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      schema_init:
+        condition: service_completed_successfully
     env_file:
       - ./env/common.env
       - ./env/lemon8.env
@@ -776,8 +868,8 @@ services:
     cap_add:
       - SYS_PTRACE
     volumes:
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/media"
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}:/vault"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -787,6 +879,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      schema_init:
+        condition: service_completed_successfully
     env_file:
       - ./env/common.env
       - ./env/telegram.env
@@ -851,8 +945,8 @@ services:
     cap_add:
       - SYS_PTRACE
     volumes:
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/media"
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}:/vault"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -860,6 +954,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      schema_init:
+        condition: service_completed_successfully
     env_file:
       - ./env/common.env
       - ./env/beeper.env
@@ -881,6 +977,9 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
+      # Keep broker acknowledgements independent of slow removable-vault fsync.
+      # This named-volume spool is durable and flushed to the vault separately.
+      WHATSAPP_RAW_ARCHIVE_ROOT: /app/sessions/raw-payload-spool
       WHATSAPP_SPIDER_SESSIONS: "session_2"
       # Backfill ALL history, not just 90 days (user: "whatsapp backfill all").
       WHATSAPP_MAX_BACKFILL_AGE_DAYS: "36500"
@@ -913,8 +1012,8 @@ services:
     cap_add:
       - SYS_PTRACE
     volumes:
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/media"
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}:/vault"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -922,6 +1021,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      schema_init:
+        condition: service_completed_successfully
       rabbitmq:
         condition: service_started
     env_file:
@@ -973,8 +1074,8 @@ services:
     cap_add:
       - SYS_PTRACE
     volumes:
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/media"
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}:/vault"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -982,6 +1083,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      schema_init:
+        condition: service_completed_successfully
     env_file:
       - ./env/common.env
       - ./env/instagram.env
@@ -1027,13 +1130,15 @@ services:
       BROWSER_CONTENT_HINT_RESPONSE_TIMEOUT_SECONDS: "2.0"
       UC_EXTENSION_EXPECTED_VERSION: "1.23.124"
     volumes:
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/media"
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}:/vault"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}:/vault"
       - ../credentials:/app/credentials   # so /social/cookies can write live sessions
       - ../src:/app/src
     depends_on:
       postgres:
         condition: service_healthy
+      schema_init:
+        condition: service_completed_successfully
     env_file:
       - ./env/common.env
       - ./env/instagram.env
@@ -1044,6 +1149,8 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
     container_name: unifiedcollector_scheduler
+    group_add:
+      - "${RECON_ADMISSION_SHARED_GID:-1000}"
     command: python -m src.main scheduler
     # Dynamic (env-tunable) resource caps — enrichment ticks are light; keep the
     # scheduler bounded so seed/phone ticks never starve collectors. Live-applied
@@ -1066,6 +1173,10 @@ services:
       # the maigret HTTP-only engine automatically.
       RECON_USERNAME_MODULES: "${RECON_USERNAME_MODULES:-maigret}"
       RECON_USERNAME_ENGINE: "${RECON_USERNAME_ENGINE:-maigret}"
+      RECON_ADMISSION_POLICY_PATH: "/app/config/task-37-admission-policy.json"
+      RECON_ADMISSION_STATE_PATH: "/var/lib/unifiedcollector/recon-admission/task-37-admission-state.json"
+      RECON_ADMISSION_STATE_MODE: "0660"
+      RECON_ADMISSION_SHARED_GID: "${RECON_ADMISSION_SHARED_GID:-1000}"
       # "Base of operations" Telegram overhaul --------------------------------
       # See src/notifications/collector_bot.py. The scheduler hosts the getUpdates
       # long-poll task (single asyncio.Task; safe because the analyzer's merge_bot
@@ -1085,10 +1196,12 @@ services:
       WA_STAGING_MERGE_INTERVAL_MS: "${WA_STAGING_MERGE_INTERVAL_MS:-5000}"
       WA_STAGING_BATCH_MAX: "${WA_STAGING_BATCH_MAX:-1000}"
     volumes:
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/media"
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}:/vault"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
+      - ../config/task-37-admission-policy.json:/app/config/task-37-admission-policy.json:ro
+      - /var/lib/unifiedcollector/recon-admission:/var/lib/unifiedcollector/recon-admission
       # live src mount so scheduler code (e.g. identity reconciliation) applies on
       # a plain recreate — no image rebuild (vhdx must not grow). Matches the
       # collector/ig_ingest pattern; scheduler previously ran only baked-in code.
@@ -1096,6 +1209,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      schema_init:
+        condition: service_completed_successfully
     env_file:
       - ./env/common.env
       - ./env/telegram_notify.env
@@ -1121,6 +1236,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      schema_init:
+        condition: service_completed_successfully
     env_file:
       - ./env/common.env
       - ./env/telegram.env
@@ -1152,8 +1269,8 @@ services:
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
       REDIS_HOST: redis
-      REDIS_PASSWORD: ${REDIS_PASSWORD:-localdevredis123}
-      REDIS_URL: "redis://:${REDIS_PASSWORD:-localdevredis123}@redis:6379/0"
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+      REDIS_URL: "redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/0"
       # 1 = on, 0 = off. Default on so a fresh deploy posts realtime by default.
       REALTIME_POST_FEED_ENABLED: "${REALTIME_POST_FEED_ENABLED:-1}"
       REALTIME_POST_FEED_MAX_PER_MINUTE: "${REALTIME_POST_FEED_MAX_PER_MINUTE:-18}"
@@ -1168,14 +1285,16 @@ services:
     volumes:
       # The vault mount lets the drain read local media files instead of
       # relying on Telegram to fetch a URL (which fails for auth-gated media).
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/media"
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}:/vault"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}:/vault"
       - ../src:/app/src
     depends_on:
       redis:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      schema_init:
+        condition: service_completed_successfully
     env_file:
       - ./env/common.env
       - ./env/telegram_notify.env
@@ -1200,8 +1319,8 @@ services:
     ports:
       # Keep the original local dashboard URL alive while 8700 remains the
       # canonical service port.
-      - "8001:8700"
-      - "8700:8700"
+      - "127.0.0.1:8001:8700"
+      - "127.0.0.1:8700:8700"
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
@@ -1211,9 +1330,9 @@ services:
       STRAVA_ROUTE_STREAM_SHARED_COOLDOWN: "true"
       STRAVA_BROWSER_ROUTE_QUEUE_CANDIDATE_LIMIT: "50"
       STRAVA_BROWSER_ROUTE_QUEUE_IMPORTANT_CANDIDATE_LIMIT: "100"
-      # Localhost-only single-user deployment: skip bearer-token auth so the
-      # dashboard works without a login flow. Remove/false for network exposure.
-      DASHBOARD_AUTH_DISABLED: "true"
+      DASHBOARD_ADMIN_PASSWORD: ${DASHBOARD_ADMIN_PASSWORD:?DASHBOARD_ADMIN_PASSWORD is required}
+      DASHBOARD_JWT_SECRET: ${DASHBOARD_JWT_SECRET:?DASHBOARD_JWT_SECRET is required}
+      DASHBOARD_AUTH_DISABLED: "false"
       DB_POOL_MIN_SIZE: "2"
       DB_POOL_MAX_SIZE: "16"
       DASHBOARD_DB_ACQUIRE_TIMEOUT_SECONDS: "15"
@@ -1225,14 +1344,16 @@ services:
       GITHUB_QUOTA_PUSHER_MAX_CONCURRENT: "12"
       GITHUB_QUOTA_PUSHER_BATCH_SIZE: "100"
     volumes:
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/media"
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}:/vault"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}/media:/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - ../tmp:/app/tmp
       - ../src:/app/src
     depends_on:
       postgres:
         condition: service_healthy
+      schema_init:
+        condition: service_completed_successfully
     env_file:
       - ./env/common.env
       - ./env/dashboard.env
@@ -1253,7 +1374,7 @@ services:
     restart: unless-stopped
     environment:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-wac_user}
-      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-localdevrabbit123}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD is required}
       RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_VHOST:-/}
       RABBITMQ_NODENAME: rabbit@rabbitmq
       RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: "+S 2:2"
@@ -1280,14 +1401,14 @@ services:
     mem_limit: 256m
     init: true
     restart: unless-stopped
-    command: redis-server --requirepass ${REDIS_PASSWORD:-localdevredis123} --appendonly yes --appendfsync everysec
+    command: redis-server --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD is required} --appendonly yes --appendfsync everysec
     volumes:
       - redis_data:/data
     env_file:
       - ./env/common.env
       - ./env/broker.env
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-localdevredis123}", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:?REDIS_PASSWORD is required}", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -1302,18 +1423,20 @@ services:
     environment:
       SESSION_NAME: session_1
       AUTH_STORAGE_PATH: /app/auth_info/account1
-      WHATSAPP_RABBITMQ_URL: amqp://${RABBITMQ_USER:-wac_user}:${RABBITMQ_PASSWORD:-localdevrabbit123}@rabbitmq:5672/
-      RABBITMQ_URL: amqp://${RABBITMQ_USER:-wac_user}:${RABBITMQ_PASSWORD:-localdevrabbit123}@rabbitmq:5672/
-      SYNC_FULL_HISTORY: "true"
-      # On-demand deep history: actively pull older messages per chat (was stuck
-      # ~9 days). Paced; 36500d = effectively all the phone still holds.
-      WHATSAPP_DEEP_BACKFILL: "true"
+      WHATSAPP_RABBITMQ_URL: amqp://${RABBITMQ_USER:-wac_user}:${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD is required}@rabbitmq:5672/
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-wac_user}:${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD is required}@rabbitmq:5672/
+      # Full history sync asks the phone for a large history transfer at every
+      # socket creation. Keep passive/realtime sync without requesting it.
+      SYNC_FULL_HISTORY: "false"
+      # Deep history actively pulls older messages per chat and can destabilize
+      # the companion session. Keep normal passive/realtime sync enabled.
+      WHATSAPP_DEEP_BACKFILL: "false"
       WHATSAPP_BACKFILL_REQ_PER_MIN: "24"
       WHATSAPP_FETCH_COUNT: "100"
       WHATSAPP_MAX_BACKFILL_AGE_DAYS: "36500"
       WHATSAPP_UNPAIRED_QR_RECONNECT_MS: "5000"
       WHATSAPP_QR_STABILITY_MS: "45000"
-      WHATSAPP_MEDIA_BRIDGE_SECRET: ${WHATSAPP_MEDIA_BRIDGE_SECRET:-localdevmediabridgesecretkey12345678}
+      WHATSAPP_MEDIA_BRIDGE_SECRET: ${WHATSAPP_MEDIA_BRIDGE_SECRET:?WHATSAPP_MEDIA_BRIDGE_SECRET is required}
       LOG_LEVEL: info
     ports:
       - "3011:3001"
@@ -1322,7 +1445,7 @@ services:
       # live-mount compiled build/ so code changes apply on recreate (no image
       # rebuild — vhdx must not grow).
       - ../src/bridges/whatsapp/build:/app/build
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/data/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}/media:/data/media"
     depends_on:
       rabbitmq:
         condition: service_started
@@ -1344,24 +1467,25 @@ services:
     environment:
       SESSION_NAME: session_2
       AUTH_STORAGE_PATH: /app/auth_info/account2
-      WHATSAPP_RABBITMQ_URL: amqp://${RABBITMQ_USER:-wac_user}:${RABBITMQ_PASSWORD:-localdevrabbit123}@rabbitmq:5672/
-      RABBITMQ_URL: amqp://${RABBITMQ_USER:-wac_user}:${RABBITMQ_PASSWORD:-localdevrabbit123}@rabbitmq:5672/
-      SYNC_FULL_HISTORY: "true"
-      # On-demand deep history (see wa-bridge-1).
-      WHATSAPP_DEEP_BACKFILL: "true"
+      WHATSAPP_RABBITMQ_URL: amqp://${RABBITMQ_USER:-wac_user}:${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD is required}@rabbitmq:5672/
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-wac_user}:${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD is required}@rabbitmq:5672/
+      # Full history sync is paused; normal passive/realtime sync remains enabled.
+      SYNC_FULL_HISTORY: "false"
+      # Deep history is paused; normal passive/realtime sync remains enabled.
+      WHATSAPP_DEEP_BACKFILL: "false"
       WHATSAPP_BACKFILL_REQ_PER_MIN: "24"
       WHATSAPP_FETCH_COUNT: "100"
       WHATSAPP_MAX_BACKFILL_AGE_DAYS: "36500"
       WHATSAPP_UNPAIRED_QR_RECONNECT_MS: "5000"
       WHATSAPP_QR_STABILITY_MS: "45000"
-      WHATSAPP_MEDIA_BRIDGE_SECRET: ${WHATSAPP_MEDIA_BRIDGE_SECRET:-localdevmediabridgesecretkey12345678}
+      WHATSAPP_MEDIA_BRIDGE_SECRET: ${WHATSAPP_MEDIA_BRIDGE_SECRET:?WHATSAPP_MEDIA_BRIDGE_SECRET is required}
       LOG_LEVEL: info
     ports:
       - "3012:3001"
     volumes:
       - ../sessions/whatsapp:/app/auth_info
       - ../src/bridges/whatsapp/build:/app/build
-      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/data/media"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}/media:/data/media"
     depends_on:
       rabbitmq:
         condition: service_started
@@ -1419,4 +1543,3 @@ volumes:
   rabbitmq_data:
   redis_data:
   sessions_data:
-

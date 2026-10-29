@@ -45,6 +45,9 @@ RUN python -m playwright install-deps chromium \
 
 RUN useradd -u 1001 -m collector \
     && mkdir -p /app/data /app/sessions /app/logs /home/collector/.cache \
+    && mkdir -p /var/lib/unifiedcollector/recon-admission \
+    && chown root:1000 /var/lib/unifiedcollector/recon-admission \
+    && chmod 2770 /var/lib/unifiedcollector/recon-admission \
     && chown -R collector:collector /app /home/collector
 
 FROM runtime-dependencies AS dev

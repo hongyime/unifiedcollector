@@ -961,6 +961,7 @@ async def seed_native_targets(pool: Any, platform: str) -> None:
                 queries = tuple(
                     queries[index]
                     for index in _FOLLOW_ONLY_SEED_QUERY_INDEXES[platform]
+                    if index < len(queries)
                 )
             elif platform == "airbnb":
                 # Even with broad discovery enabled, user-selected Wishlist

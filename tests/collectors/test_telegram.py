@@ -604,12 +604,23 @@ async def test_chat_cursor_store_roundtrips_numeric_and_ignores_non_numeric():
     pool = _FakePool()
     mgr.set_pool(pool)
 
+    async def _empty_then_saved(sql, *args, **kwargs):
+        if "SELECT last_processed_id FROM service_cursors" in sql:
+            return None
+        if "INSERT INTO service_cursors" in sql and "RETURNING last_processed_id" in sql:
+            return {"last_processed_id": args[1]}
+        return {"last_processed_id": "4567"}
+
+    pool.conn.fetchrow = AsyncMock(side_effect=_empty_then_saved)
+
     await mgr.save_chat_progress("100200", 4567)
-    assert pool.conn.execute.await_count == 1
-    sql, key, value, _stamp = pool.conn.execute.await_args.args
+    assert pool.conn.fetchrow.await_count == 2
+    sql, key, value, _stamp, expected = pool.conn.fetchrow.await_args.args
     assert "INSERT INTO service_cursors" in sql
+    assert "IS NOT DISTINCT FROM $4" in sql
     assert key == "telegram:chat:100200"
     assert value == "4567"
+    assert expected is None
 
     pool.conn.fetchrow = AsyncMock(return_value={"last_processed_id": "4567"})
     assert await mgr.load_chat_progress("100200") == 4567

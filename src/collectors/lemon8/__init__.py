@@ -1314,7 +1314,17 @@ class Lemon8Collector(BaseCollector):
         users = result.get("discovered_users", []) or []
         tags = result.get("discovered_tags", []) or []
 
-        logger.info("Feed scraped: %d media, %d users, %d tags", len(media_items), len(users), len(tags))
+        logger.info(
+            "Feed scraped: %d media, %d users, %d tags "
+            "(method=%s, pages=%s/%s, cursor_advances=%s)",
+            len(media_items),
+            len(users),
+            len(tags),
+            result.get("method", "unknown"),
+            result.get("pages_scraped", "?"),
+            result.get("pages_requested", "?"),
+            result.get("pagination_advances", "?"),
+        )
 
         feed_capture_id = uuid4().hex
         shared_cap = 0
@@ -1593,6 +1603,8 @@ class Lemon8Collector(BaseCollector):
         all_media: list[dict] = []
         users: set[str] = set()
         tag_ids: set[str] = set()
+        pages_fetched = 0
+        pagination_advances = 0
 
         if PYLEMON8_AVAILABLE and _PyLemon8 is not None:
             loop = asyncio.get_running_loop()
@@ -1616,6 +1628,7 @@ class Lemon8Collector(BaseCollector):
                 OperationType.FEED_FETCH if hasattr(OperationType, "FEED_FETCH") else OperationType.PROFILE_VIEW,
             )
             all_media, users, tag_ids = await loop.run_in_executor(None, _sync_fetch)
+            pages_fetched = pages
         else:
             if client is None:
                 raise RuntimeError("lemon8_api_client_unavailable")
@@ -1643,9 +1656,43 @@ class Lemon8Collector(BaseCollector):
                     headers={**self._headers(), "Referer": FEED_URL},
                 )
                 response.raise_for_status()
+                pages_fetched += 1
                 payload = response.json()
                 feed_key = f"$FeedDateLoadmore+{category}"
                 feed_payload = payload.get(feed_key) if isinstance(payload, dict) else None
+                if not getattr(self, "_lemon8_feed_shape_logged", False):
+                    self._lemon8_feed_shape_logged = True
+                    content_key_fragments = (
+                        "item", "user", "author", "profile", "post", "note",
+                        "media", "image", "video", "comment", "tag", "url", "link",
+                    )
+                    safe_key = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]{0,39}$")
+                    metadata_paths: list[str] = []
+
+                    def collect_metadata_paths(value: Any, path: str, depth: int = 0) -> None:
+                        if depth >= 4 or not isinstance(value, dict):
+                            return
+                        for key, nested in value.items():
+                            if not isinstance(key, str) or not safe_key.fullmatch(key):
+                                continue
+                            normalized = key.lower().replace("_", "")
+                            if any(fragment in normalized for fragment in content_key_fragments):
+                                continue
+                            field_path = f"{path}.{key}" if path else key
+                            if len(metadata_paths) < 60:
+                                metadata_paths.append(field_path)
+                            if isinstance(nested, dict):
+                                collect_metadata_paths(nested, field_path, depth + 1)
+
+                    root_keys = [key for key in payload if isinstance(key, str) and safe_key.fullmatch(key)] \
+                        if isinstance(payload, dict) else []
+                    feed_keys = [key for key in feed_payload if isinstance(key, str) and safe_key.fullmatch(key)] \
+                        if isinstance(feed_payload, dict) else []
+                    collect_metadata_paths(feed_payload, feed_key)
+                    logger.info(
+                        "Lemon8 API response shape (field names only): root_keys=%s feed_keys=%s metadata_paths=%s",
+                        root_keys[:40], feed_keys[:40], metadata_paths,
+                    )
                 items = feed_payload.get("items") if isinstance(feed_payload, dict) else None
                 if not isinstance(items, list):
                     item_lists = self._find_item_lists_in_json(payload)
@@ -1662,16 +1709,30 @@ class Lemon8Collector(BaseCollector):
                         for key in ("cursor", "max_cursor", "next_cursor", "nextCursor")
                         if feed_payload.get(key) not in (None, "")
                     ), "")
+                    if not next_cursor:
+                        pagination_metadata = {
+                            key: value for key, value in feed_payload.items()
+                            if key not in {"items", "item_list", "items_list"}
+                        }
+                        nested_cursor = self._find_key_in_json(
+                            pagination_metadata,
+                            ["cursor", "max_cursor", "next_cursor", "nextCursor"],
+                        )
+                        if isinstance(nested_cursor, (str, int, float)) and str(nested_cursor).strip():
+                            next_cursor = str(nested_cursor).strip()
                 else:
                     next_cursor = ""
                 if not next_cursor or next_cursor == cursor:
                     break
                 cursor = next_cursor
+                pagination_advances += 1
 
         unique_items = self._deduplicate_media_items(all_media)
         return {
             "feed_type": category,
-            "pages_scraped": pages,
+            "pages_requested": max(1, pages),
+            "pages_scraped": pages_fetched,
+            "pagination_advances": pagination_advances,
             "media_items": unique_items,
             "media_urls": [i["url"] for i in unique_items],
             "discovered_users": list(users),
@@ -1687,6 +1748,7 @@ class Lemon8Collector(BaseCollector):
         all_users: set[str] = set()
         all_tag_ids: set[str] = set()
         current_cursor = "0"
+        pages_fetched = 0
 
         for page in range(pages):
             if self._stop.is_set():
@@ -1700,6 +1762,7 @@ class Lemon8Collector(BaseCollector):
                 resp = await client.get(url, headers={**self._headers(), "Referer": FEED_URL})
                 resp.raise_for_status()
                 html_content = resp.text
+                pages_fetched += 1
             except Exception as e:
                 safe_error = _safe_log_text(e)
                 await self._record_http_status_event(
@@ -1761,7 +1824,8 @@ class Lemon8Collector(BaseCollector):
         unique_items = self._deduplicate_media_items(all_media)
         return {
             "feed_type": "foryou",
-            "pages_scraped": pages,
+            "pages_requested": max(1, pages),
+            "pages_scraped": pages_fetched,
             "media_items": unique_items,
             "media_urls": [i["url"] for i in unique_items],
             "discovered_users": list(all_users),

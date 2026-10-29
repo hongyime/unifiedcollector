@@ -91,25 +91,21 @@ def test_constructor_defaults(monkeypatch):
     assert coll._download_images is False
     assert coll._spider_pages is False
     assert coll._bing_pages == 3
-    assert coll._serper_threshold == 5
-    assert coll._serper_api_key == ""
-    assert coll.DEFAULT_ENGINES == ("ddg", "bing", "serper")
+    assert not hasattr(coll, "_serper_api_key")
+    assert coll.DEFAULT_ENGINES == ("ddg", "bing")
 
 
 def test_constructor_env_overrides(monkeypatch):
     _set_clean_env(monkeypatch)
     monkeypatch.setenv("SEARCH_MAX_RESULTS", "10")
     monkeypatch.setenv("SEARCH_BING_PAGES", "1")
-    monkeypatch.setenv("SEARCH_SERPER_THRESHOLD", "3")
     monkeypatch.setenv("SERPER_API_KEY", "abcd1234efgh")
     monkeypatch.setenv("SERPER_DAILY_QUOTA", "100")
 
     coll = SearchCollector()
     assert coll._max_results == 10
     assert coll._bing_pages == 1
-    assert coll._serper_threshold == 3
-    assert coll._serper_api_key == "abcd1234efgh"
-    assert coll._serper_quota == 100
+    assert not hasattr(coll, "_serper_api_key")
 
 
 @pytest.mark.asyncio
@@ -267,10 +263,9 @@ async def test_search_query_promotes_to_bing_when_ddg_short(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_search_query_consults_serper_when_under_threshold(monkeypatch):
+async def test_search_free_provider_failure_never_falls_back_to_serper(monkeypatch):
     _set_clean_env(monkeypatch)
     monkeypatch.setenv("SERPER_API_KEY", "abcd1234efgh")
-    monkeypatch.setenv("SEARCH_SERPER_THRESHOLD", "5")
     coll = SearchCollector()
     coll._DDGS = MagicMock()
     coll._BS = MagicMock()
@@ -281,44 +276,27 @@ async def test_search_query_consults_serper_when_under_threshold(monkeypatch):
         {"url": "https://a.com/1", "engine": "ddg", "domain": "a.com"},
     ])
     coll._search_bing = AsyncMock(return_value=[])
-    coll._search_serper = AsyncMock(return_value=[
-        {"url": "https://g.com/1", "engine": "serper", "domain": "g.com"},
-    ])
-    coll._serper_has_quota = AsyncMock(return_value=True)
-    coll._serper_consume = AsyncMock()
+    coll._search_serper = AsyncMock(return_value=[])
+    coll._search_ddg.return_value = []
+    coll._search_bing.return_value = []
 
-    out = await coll.search_query("q")
-    assert len(out) == 2
-    coll._search_serper.assert_awaited_once()
-    coll._serper_consume.assert_awaited_once()
+    out = await coll.search_query("q", postprocess=False)
+    assert out == []
+    coll._search_serper.assert_not_awaited()
+    assert not hasattr(coll, "_serper_api_key")
 
 
 @pytest.mark.asyncio
-async def test_search_query_records_serper_quota_exhaustion(monkeypatch):
+async def test_search_query_rejects_explicit_serper_even_with_key(monkeypatch):
     _set_clean_env(monkeypatch)
     monkeypatch.setenv("SERPER_API_KEY", "abcd1234efgh")
     coll = SearchCollector()
     coll._DDGS = None
     coll._BS = None
-    coll._serper_has_quota = AsyncMock(return_value=False)
     coll._search_serper = AsyncMock(return_value=[])
-    coll._record_search_rate_limit = AsyncMock()
-
-    out = await coll.search_query("q", engines=("serper",))
-
-    assert out == []
-    coll._search_serper.assert_not_called()
-    coll._record_search_rate_limit.assert_awaited_once_with(
-        engine="serper",
-        account="abcd1234",
-        scope="serper_quota",
-        status_code=None,
-        reason="serper account quota exhausted",
-        metadata={
-            "query": "q",
-            "daily_quota": 2500,
-        },
-    )
+    with pytest.raises(ValueError, match="disabled by zero-spend policy: serper"):
+        await coll.search_query("q", engines=("serper",), postprocess=False)
+    coll._search_serper.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -493,35 +471,30 @@ async def test_search_serper_no_key_returns_empty(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_search_serper_happy_path(monkeypatch):
+async def test_search_serper_key_is_ignored_and_never_makes_request(monkeypatch):
     _set_clean_env(monkeypatch)
     monkeypatch.setenv("SERPER_API_KEY", "abcd1234efgh")
     coll = SearchCollector()
     coll._cache.get = MagicMock(return_value=None)
-    coll._cache.put = MagicMock()
-
-    # Page 1: two organic hits. Page 2: empty (loop breaks).
-    page1 = MagicMock(status_code=200)
-    page1.json = MagicMock(return_value={
-        "organic": [
-            {"link": "https://x.com/a", "title": "A", "snippet": "s1"},
-            {"link": "https://x.com/b", "title": "B", "snippet": "s2"},
-        ]
-    })
-    page2 = MagicMock(status_code=200)
-    page2.json = MagicMock(return_value={"organic": []})
-
-    client = MagicMock()
-    client.post = AsyncMock(side_effect=[page1, page2, page2])
-    client.__aenter__ = AsyncMock(return_value=client)
-    client.__aexit__ = AsyncMock(return_value=None)
-
-    with patch.object(coll, "_make_client", return_value=client):
+    with patch.object(coll, "_make_client") as make_client:
         out = await coll._search_serper("q")
+    assert out == []
+    make_client.assert_not_called()
 
-    assert len(out) == 2
-    assert out[0]["engine"] == "serper"
-    coll._cache.put.assert_called_once()
+
+@pytest.mark.asyncio
+async def test_search_default_logs_do_not_print_full_query(monkeypatch, caplog):
+    _set_clean_env(monkeypatch)
+    caplog.set_level("INFO")
+    coll = SearchCollector()
+    query = "private-target@example.org"
+    await coll._finalise_query(
+        query,
+        [{"url": "https://example.org/result", "engine": "ddg"}],
+        postprocess=False,
+    )
+    assert query not in caplog.text
+    assert "query-" in caplog.text
 
 
 # ── expand_paste_sites ────────────────────────────────────────────────────
@@ -1214,7 +1187,6 @@ async def test_search_query_releases_shared_mutex_before_finalisation(monkeypatc
     coll._collect_mutex_release = release
     coll._DDGS = None
     coll._BS = None
-    coll._serper_api_key = ""
     coll._finalise_query = AsyncMock(side_effect=finalise)
     coll._search_query_unlocked = AsyncMock(side_effect=search)
 

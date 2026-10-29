@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "task": 43,
+  "scope": "unifiedcollector cutover controls only",
+  "owner_role": "host operator",
+  "pause_marker": {
+    "linux": "/var/lib/unifiedcollector/cutover.pause",
+    "windows": "C:\\unifiedcollector\\cutover.pause",
+    "semantics": "Presence suppresses automatic recovery and backup actions; removal is an explicit restoration action."
+  },
+  "pause_controls": [
+    {
+      "name": "compose_watchdog",
+      "owner_role": "host operator",
+      "pause_action": "create the Linux pause marker before stopping writers",
+      "restoration_action": "remove the Linux pause marker only after the approved service set is verified",
+      "scope": "UnifiedCollector watchdog only; no unrelated Compose stack is controlled"
+    },
+    {
+      "name": "docker_desktop_watchdog",
+      "owner_role": "Windows host operator",
+      "pause_action": "create the Windows pause marker before host cutover",
+      "restoration_action": "remove the Windows pause marker after intentional Docker Desktop state is restored",
+      "scope": "UnifiedCollector Docker recovery task only"
+    },
+    {
+      "name": "browser_autorecover",
+      "owner_role": "Windows host operator",
+      "pause_action": "create the Windows pause marker before browser/container cutover",
+      "restoration_action": "remove the Windows pause marker only after browser transport approval",
+      "scope": "Managed UnifiedCollector browser only"
+    },
+    {
+      "name": "pg_dump_backup_launcher",
+      "owner_role": "host operator",
+      "pause_action": "set BACKUP_ENABLED=0 or create the Linux pause marker before cutover",
+      "restoration_action": "remove the marker and set BACKUP_ENABLED=1 only after the selected database branch is verified",
+      "scope": "UnifiedCollector backup task only; no backup is forced during cutover"
+    }
+  ],
+  "shared_host_restoration": {
+    "unrelated_stacks": "out of scope and remain under their existing owners",
+    "required_receipt": "record which listed controls were actually paused, which were never paused, and the operator who restored each one"
+  }
+}

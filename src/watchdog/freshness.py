@@ -23,6 +23,9 @@ DB = os.environ["DATABASE_URL"]
 INTERVAL = int(os.getenv("WATCHDOG_INTERVAL", "300"))              # check every 5 min
 COOLDOWN = int(os.getenv("WATCHDOG_RESTART_COOLDOWN", "1800"))     # ≤1 restart / 30 min / container
 DOCKER_SOCK = os.getenv("DOCKER_SOCK", "/var/run/docker.sock")
+CUTOVER_PAUSE_FILE = Path(os.getenv(
+    "CUTOVER_PAUSE_FILE", "/var/lib/unifiedcollector/cutover.pause"
+))
 
 # Heartbeat: the loop touches this file every tick so the container healthcheck
 # can tell a WEDGED loop from a live one (a bare `python -c exit(0)` check would
@@ -38,6 +41,15 @@ def _touch_heartbeat() -> None:
         HEARTBEAT_FILE.write_text(str(int(time.time())))
     except Exception as e:  # pragma: no cover - defensive; never let heartbeat kill the loop
         log.debug("heartbeat write failed: %s", e)
+
+
+def _cutover_pause_active() -> bool:
+    """True only for an explicit operator cutover marker; fail closed on action."""
+    try:
+        return CUTOVER_PAUSE_FILE.is_file()
+    except OSError as exc:  # pragma: no cover - defensive filesystem failure
+        log.warning("cannot inspect cutover pause marker %s: %s", CUTOVER_PAUSE_FILE, exc)
+        return True
 
 
 def _run_healthcheck() -> None:
@@ -413,7 +425,11 @@ EXPECTED_COMPOSE_SERVICES = frozenset({
     "onboard_bot",
     "wa-bridge-2",
     "watchdog",
+    "recon_egress_guard",
 })
+# One-shot Compose jobs are present in the project inventory but an `exited`
+# state is their successful terminal state, not a liveness failure.
+LIVENESS_EXCLUDED_COMPOSE_SERVICES = frozenset({"schema_init"})
 # States that mean "not running and not recovering itself right now" — restart
 # candidates. `restarting` means Docker is already retrying (leave it alone);
 # `paused` is intentional (leave it alone); `running` is fine. Everything else
@@ -1012,6 +1028,11 @@ async def main() -> None:
     _touch_heartbeat()  # write immediately so healthcheck has a file before first tick
     while True:
         try:
+            if _cutover_pause_active():
+                log.warning("cutover pause marker present; skipping all watchdog restart actions")
+                _touch_heartbeat()
+                await asyncio.sleep(INTERVAL)
+                continue
             db = await asyncpg.connect(DB)
             try:
                 await _tick(db)

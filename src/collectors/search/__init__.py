@@ -9,9 +9,7 @@ ABSORBED FROM ``searchtoolkit/``
 * ``main.py``                   — entry-point shim (replaced by unified scheduler).
 * ``src/app.py::search_duckduckgo`` — DDG text + image search → ``_search_ddg``.
 * ``src/app.py::search_bing``       — Bing HTML scrape → ``_search_bing``.
-* ``src/app.py::search_serper``     — Serper.dev (Google) API → ``_search_serper``,
-                                      with account_quota tracking on the API key.
-* ``src/app.py::get_search_results``— DDG → Bing → Serper waterfall → ``search_query``.
+* ``src/app.py::get_search_results``— DDG → Bing zero-spend waterfall → ``search_query``.
 * ``src/app.py::spider_page``       — HTML → image/PDF URL extraction →
                                       ``expand_paste_sites`` + ``_spider_page``.
 * ``src/app.py::is_content_url``    — icon/sprite filter → ``_is_content_url``.
@@ -35,7 +33,7 @@ ABSORBED FROM ``searchtoolkit/``
 DROPPED (NOT PORTED)
 --------------------
 * ``src/app.py::search_chrome`` — undetected-chromedriver Selenium fallback. Heavy
-  binary dep, slow, and we already have DDG + Bing + Serper.
+  binary dep and slow; DDG + Bing are the enabled providers.
 * ``mode_search_extract`` / ``mode_bing_images`` / ``mode_dork_runner`` interactive
   CLI menus. Replaced by ``run(targets)`` + the unified scheduler.
 * Standalone web UI (Flask). Unified dashboard covers it.
@@ -55,8 +53,6 @@ DEFERRED
 
 ENVIRONMENT VARS
 ----------------
-SERPER_API_KEY                 Serper.dev API key (optional; conserves Google).
-SERPER_DAILY_QUOTA             Daily request cap for the Serper key (default 2500).
 SEARCH_MAX_RESULTS             Max results per query across engines (default 50).
 SEARCH_MIN_DIMENSION           Reject images smaller than NxN px (default 200).
 SEARCH_MIN_FILE_SIZE           Reject files below N bytes (default 10240).
@@ -82,8 +78,6 @@ SEARCH_DDG_TIMEOUT             Per-attempt timeout (seconds) for the DDGS
 SEARCH_DDG_RETRY_BASE_SECONDS  Base backoff between DDG retries; waits grow
                                as base * 2**attempt plus jitter (default 2.0).
 SEARCH_BING_PAGES              Pages of Bing results to scrape (default 3).
-SEARCH_SERPER_THRESHOLD        Use Serper only when DDG+Bing < this many results
-                               (default 5; conserves API credits).
 TOR_PROXY_ENABLED              '1' to route HTTP through the Tor sidecar.
 """
 from __future__ import annotations
@@ -639,7 +633,9 @@ SKIP_EXTENSIONS = {".svg", ".webp", ".ico", ".cur", ".gif"}
 
 DEFAULT_DDG_DOMAIN = "https://duckduckgo.com"
 DEFAULT_BING_DOMAIN = "https://www.bing.com"
-DEFAULT_SERPER_DOMAIN = "https://google.serper.dev"
+def _search_log_ref(query: str) -> str:
+    """Stable short reference that does not disclose a search target/query."""
+    return hashlib.sha256(str(query).encode("utf-8", errors="replace")).hexdigest()[:12]
 
 
 # ---------------------------------------------------------------------------
@@ -729,7 +725,7 @@ class SearchCollector(BaseCollector):
     """Multi-engine search → spider → quality-gated download.
 
     ``run(targets)`` consumes a list of search queries. For each query we:
-        1. Hit DDG (text + image) → Bing → Serper in a waterfall.
+        1. Hit DDG (text + image) → Bing in a zero-spend waterfall.
         2. Persist hits to ``search_queries`` / ``search_results``.
         3. Optionally spider each result page for embedded images/PDFs.
         4. Quality-gate + dedup + atomically save the binaries.
@@ -742,7 +738,8 @@ class SearchCollector(BaseCollector):
 
     # Engines we know how to drive. Order matters — the waterfall consults
     # them in this sequence and short-circuits when ``max_results`` is met.
-    DEFAULT_ENGINES = ("ddg", "bing", "serper")
+    DEFAULT_ENGINES = ("ddg", "bing")
+    DISABLED_ENGINES = frozenset({"serper"})
 
     def __init__(self):
         super().__init__()
@@ -778,13 +775,10 @@ class SearchCollector(BaseCollector):
         self._video_chunk_bytes = int(os.getenv("SEARCH_VIDEO_CHUNK_BYTES", str(1024 * 1024)))
         self._spider_pages = os.getenv("SEARCH_SPIDER_PAGES", "1") == "1"
         self._bing_pages = int(os.getenv("SEARCH_BING_PAGES", "3"))
-        self._serper_threshold = int(os.getenv("SEARCH_SERPER_THRESHOLD", "5"))
         self._concurrent_downloads = int(os.getenv("SEARCH_CONCURRENT_DOWNLOADS", "5"))
         self._max_targets_per_cycle = min(
             100, max(1, int(os.getenv("SEARCH_MAX_TARGETS_PER_CYCLE", "10")))
         )
-        self._serper_api_key = os.getenv("SERPER_API_KEY", "").strip()
-        self._serper_quota = int(os.getenv("SERPER_DAILY_QUOTA", "2500"))
         self._domain_pacing = DomainPacer(
             self.SOURCE_NAME,
             env_prefix="SEARCH",
@@ -820,8 +814,7 @@ class SearchCollector(BaseCollector):
         # being set whenever it reads past the lock-skip check.
         self._last_persist_outcome: Optional[_PersistOutcome] = None
 
-        # Register Serper quota with the unified tracker if available.
-        self._register_serper_quota()
+        # Paid search quota registration is intentionally disabled.
 
     async def _record_domain_pacing_event(
         self,
@@ -1116,48 +1109,6 @@ class SearchCollector(BaseCollector):
         key = self._search_cooldown_key(engine, scope)
         self._search_scope_cooldowns.pop(key, None)
         self._search_rate_limit_streaks.pop(key, None)
-
-    # ------------------------------------------------------------------ #
-    # Quota wiring
-    # ------------------------------------------------------------------ #
-
-    def _register_serper_quota(self) -> None:
-        """Register the Serper API key under account_quota. Best-effort."""
-        if not self._serper_api_key:
-            return
-        try:
-            from src.core.account_quota import (
-                get_default_tracker,
-                QuotaConfig,
-            )
-            tracker = get_default_tracker()
-            if tracker is None:
-                return
-            tracker.register("serper", QuotaConfig(daily_limit=self._serper_quota))
-        except Exception as e:
-            logger.debug("serper quota registration skipped: %s", e)
-
-    async def _serper_has_quota(self) -> bool:
-        if not self._serper_api_key:
-            return False
-        try:
-            from src.core.account_quota import get_default_tracker
-            tracker = get_default_tracker()
-            if tracker is None:
-                return True
-            return await tracker.has_quota("serper", self._serper_api_key[:8], 1)
-        except Exception:
-            return True
-
-    async def _serper_consume(self) -> None:
-        try:
-            from src.core.account_quota import get_default_tracker
-            tracker = get_default_tracker()
-            if tracker is None:
-                return
-            await tracker.consume("serper", self._serper_api_key[:8], 1)
-        except Exception:
-            pass
 
     # ------------------------------------------------------------------ #
     # BaseCollector contract
@@ -1755,7 +1706,7 @@ class SearchCollector(BaseCollector):
         for query in queries:
             if self._stop.is_set():
                 break
-            logger.info("Collecting search/%s", query)
+            logger.info("Collecting search/query-%s", _search_log_ref(query))
             try:
                 results = await self.search_query(query, postprocess=False)
                 if self._last_search_query_lock_skipped:
@@ -1813,7 +1764,10 @@ class SearchCollector(BaseCollector):
                 await self.checkpoint.save_progress(query)
                 await self.heartbeat_source_health()
             except Exception as e:
-                logger.exception("Failed search/%s: %s", query, e)
+                logger.error(
+                    "Failed search/query-%s (%s)",
+                    _search_log_ref(query), type(e).__name__,
+                )
                 if query in dynamic_by_query:
                     await self._mark_dynamic_search_query(
                         dynamic_by_query[query], completed=False,
@@ -1829,7 +1783,10 @@ class SearchCollector(BaseCollector):
             try:
                 await self._postprocess_query_results(query, results)
             except Exception:
-                logger.exception("Search result post-processing failed for %r", query)
+                logger.error(
+                    "Search result post-processing failed for query-%s",
+                    _search_log_ref(query),
+                )
 
         if direct:
             logger.info("Crawling %d direct seed URL(s) (open dir / bucket)", len(direct))
@@ -1839,7 +1796,7 @@ class SearchCollector(BaseCollector):
                     await self.checkpoint.save_progress(url)
                 await self.heartbeat_source_health()
             except Exception:
-                logger.exception("direct seed crawl failed")
+                logger.error("direct seed crawl failed")
 
     # ------------------------------------------------------------------ #
     # Public entry points (search_query / expand_paste_sites)
@@ -1875,10 +1832,14 @@ class SearchCollector(BaseCollector):
         returns them for persistence after the shared provider mutex is released.
         """
         engines = tuple(engines) if engines else self.DEFAULT_ENGINES
+        disabled = sorted(set(engines) & self.DISABLED_ENGINES)
+        if disabled:
+            raise ValueError(
+                "search engines disabled by zero-spend policy: " + ", ".join(disabled)
+            )
         self._last_search_query_rate_limited = not any((
             "ddg" in engines and self._DDGS is not None,
             "bing" in engines and self._BS is not None,
-            "serper" in engines and bool(self._serper_api_key),
         ))
         all_results: dict[str, dict] = {}  # url -> result dict (dedupe across engines)
         rank_counter = 0
@@ -1908,37 +1869,6 @@ class SearchCollector(BaseCollector):
                 all_results[url] = hit
             if len(all_results) >= self._max_results:
                 return list(all_results.values())
-
-        # --- 3) Serper (Google) — only when DDG+Bing came up dry --------
-        if (
-            "serper" in engines
-            and self._serper_api_key
-            and len(all_results) < self._serper_threshold
-        ):
-            if await self._serper_has_quota():
-                serper_hits = await self._search_serper(query)
-                await self._serper_consume()
-                for hit in serper_hits:
-                    url = hit.get("url")
-                    if not url or url in all_results:
-                        continue
-                    rank_counter += 1
-                    hit["rank"] = rank_counter
-                    all_results[url] = hit
-            else:
-                self._last_search_query_rate_limited = True
-                await self._record_search_rate_limit(
-                    engine="serper",
-                    account=self._serper_api_key[:8] or None,
-                    scope="serper_quota",
-                    status_code=None,
-                    reason="serper account quota exhausted",
-                    metadata={
-                        "query": query,
-                        "daily_quota": self._serper_quota,
-                    },
-                )
-                logger.warning("Serper quota exhausted; skipping for query=%r", query)
 
         return list(all_results.values())
 
@@ -1972,7 +1902,10 @@ class SearchCollector(BaseCollector):
                             if self._download_images:
                                 await self._download_asset(query=seed, hit={"url": url, "rank": i + 1}, source_url=seed)
                 except Exception as e:
-                    logger.warning("expand_paste_sites failed for %s: %s", seed, e)
+                    logger.warning(
+                        "expand_paste_sites failed for seed-%s (%s)",
+                        _search_log_ref(seed), type(e).__name__,
+                    )
         await self._record_domain_pacing_event(
             "crawl_summary",
             seed_urls[0] if seed_urls else "search-spider",
@@ -2109,7 +2042,10 @@ class SearchCollector(BaseCollector):
                         and p.path.startswith(base_path) and cand not in seen and "#" not in cand:
                     frontier.append((cand, d + 1))
         if saved:
-            logger.info("spider %s -> %d asset(s) across %d page(s)", seed, saved, len(seen))
+            logger.info(
+                "spider seed-%s -> %d asset(s) across %d page(s)",
+                _search_log_ref(seed), saved, len(seen),
+            )
         return saved
 
     # ------------------------------------------------------------------ #
@@ -2120,7 +2056,7 @@ class SearchCollector(BaseCollector):
         """DDG text + image search, served via the executor (sync SDK)."""
         cached = self._cache.get(query, "ddg")
         if cached is not None:
-            logger.info("[DDG] cache hit for %r (%d)", query, len(cached))
+            logger.info("[DDG] cache hit for query-%s (%d)", _search_log_ref(query), len(cached))
             return cached
 
         DDGS = self._DDGS
@@ -2202,7 +2138,7 @@ class SearchCollector(BaseCollector):
             except Exception as e:
                 if self._looks_like_rate_limit_error(e):
                     text_rate_limit = {"message": str(e)}
-                logger.warning("[DDG] text search failed: %s", e)
+                logger.warning("[DDG] text search failed (%s)", type(e).__name__)
             return out
 
         def _do_images() -> list[dict]:
@@ -2258,7 +2194,10 @@ class SearchCollector(BaseCollector):
         if not bing_cooling and image_rate_limit is None:
             self._clear_search_scope_cooldown("bing", "bing.com")
         all_hits = text_hits + image_hits
-        logger.info("[DDG] %r → %d text, %d images", query, len(text_hits), len(image_hits))
+        logger.info(
+            "[DDG] query-%s -> %d text, %d images",
+            _search_log_ref(query), len(text_hits), len(image_hits),
+        )
 
         if all_hits:
             self._cache.put(query, all_hits, engine="ddg")
@@ -2268,7 +2207,7 @@ class SearchCollector(BaseCollector):
         """Bing HTML scrape — paginated."""
         cached = self._cache.get(query, "bing")
         if cached is not None:
-            logger.info("[Bing] cache hit for %r (%d)", query, len(cached))
+            logger.info("[Bing] cache hit for query-%s (%d)", _search_log_ref(query), len(cached))
             return cached
 
         if self._BS is None:
@@ -2337,119 +2276,18 @@ class SearchCollector(BaseCollector):
                             "domain": urlparse(link).netloc,
                         })
                 except Exception as e:
-                    logger.warning("[Bing] page=%d error: %s", page, e)
+                    logger.warning("[Bing] page=%d error (%s)", page, type(e).__name__)
                 # Polite jitter between pages
                 await asyncio.sleep(random.uniform(1.0, 2.5))
 
-        logger.info("[Bing] %r → %d results", query, len(results))
+        logger.info("[Bing] query-%s -> %d results", _search_log_ref(query), len(results))
         if results:
             self._cache.put(query, results, engine="bing")
         return results
 
     async def _search_serper(self, query: str) -> list[dict]:
-        """Serper.dev (Google) JSON API — paginated, regional gl=sg."""
-        cached = self._cache.get(query, "serper")
-        if cached is not None:
-            logger.info("[Serper] cache hit for %r (%d)", query, len(cached))
-            return cached
-
-        if not self._serper_api_key:
-            return []
-
-        results: list[dict] = []
-        seen: set[str] = set()
-        url = f"{DEFAULT_SERPER_DOMAIN}/search"
-        headers = {
-            "X-API-KEY": self._serper_api_key,
-            "Content-Type": "application/json",
-        }
-
-        async with self._make_client(timeout=15.0) as client:
-            for page in range(3):
-                if self._stop.is_set():
-                    break
-                payload = {
-                    "q": query,
-                    "page": page + 1,
-                    "num": 100,
-                    "gl": os.getenv("SERPER_GL", "sg"),
-                    "hl": os.getenv("SERPER_HL", "en"),
-                }
-                scope = "google.serper.dev"
-                account = self._serper_api_key[:8] or None
-                if await self._search_scope_cooldown_active("serper", scope):
-                    self._last_search_query_rate_limited = True
-                    break
-                try:
-                    async def _post_serper():
-                        async with self._domain_pacing.slot(url):
-                            await self.wait_rate_limit(scope)
-                            return await client.post(url, headers=headers, json=payload)
-
-                    resp = await _post_serper()
-                    if resp.status_code == 401:
-                        logger.error("[Serper] API key unauthorized")
-                        break
-                    if resp.status_code == 429:
-                        retry_resp = await self._retry_search_after_429(
-                            _post_serper,
-                            engine="serper",
-                            account=account,
-                            scope=scope,
-                            reason="serper search returned 429",
-                            metadata={
-                                "query": query,
-                                "page": page + 1,
-                                "url": url,
-                            },
-                        )
-                        if retry_resp is not None:
-                            resp = retry_resp
-                    if resp.status_code == 429:
-                        self._last_search_query_rate_limited = True
-                        await self._record_search_rate_limit(
-                            engine="serper",
-                            account=account,
-                            scope=scope,
-                            status_code=429,
-                            reason="serper search returned 429",
-                            metadata={
-                                "query": query,
-                                "page": page + 1,
-                                "url": url,
-                            },
-                            response=resp,
-                        )
-                        logger.warning("[Serper] quota hit, breaking")
-                        break
-                    if resp.status_code != 200:
-                        logger.warning("[Serper] status=%d", resp.status_code)
-                        break
-                    data = resp.json()
-                    organic = data.get("organic", [])
-                    if not organic:
-                        break
-                    for item in organic:
-                        link = item.get("link")
-                        if not link or link in seen:
-                            continue
-                        seen.add(link)
-                        results.append({
-                            "url": link,
-                            "title": item.get("title"),
-                            "snippet": item.get("snippet"),
-                            "engine": "serper",
-                            "domain": urlparse(link).netloc,
-                            "date_published": item.get("date"),
-                        })
-                except Exception as e:
-                    logger.warning("[Serper] page=%d error: %s", page, e)
-                    break
-
-        logger.info("[Serper] %r → %d results", query, len(results))
-        if results:
-            self._cache.put(query, results, engine="serper")
-        return results
+        """Compatibility stub: the chargeable Serper provider is disabled."""
+        return []
 
     # ------------------------------------------------------------------ #
     # Persistence + post-processing
@@ -2476,8 +2314,8 @@ class SearchCollector(BaseCollector):
             if postprocess:
                 await self._postprocess_query_results(query, hits)
             logger.info(
-                "Search %r: %d results (db unavailable, not persisted, tor=%s)",
-                query, len(hits), os.getenv("TOR_PROXY_ENABLED") == "1",
+                "Search query-%s: %d results (db unavailable, not persisted, tor=%s)",
+                _search_log_ref(query), len(hits), os.getenv("TOR_PROXY_ENABLED") == "1",
             )
             return outcome
         try:
@@ -2495,7 +2333,10 @@ class SearchCollector(BaseCollector):
             # Hits with no terminal status (this one and the rest) failed.
             outcome.failed = len(hits) - outcome.persisted - outcome.deduped
             outcome.error = f"{type(e).__name__}: {e}"
-            logger.warning("DB persist failed for %r: %s", query, e)
+            logger.warning(
+                "DB persist failed for query-%s (%s)",
+                _search_log_ref(query), type(e).__name__,
+            )
 
         if postprocess:
             await self._postprocess_query_results(query, hits)
@@ -2670,7 +2511,7 @@ class SearchCollector(BaseCollector):
             url = _bc.next_page_url(root, token)
             body = None
         if found:
-            logger.info("bucket %s -> %d media object(s)", root, len(found))
+            logger.info("bucket root-%s -> %d media object(s)", _search_log_ref(root), len(found))
         return set(list(found)[:max_keys])
 
     async def _spider_page(
@@ -2963,7 +2804,7 @@ class SearchCollector(BaseCollector):
         try:
             stored_data = await loop.run_in_executor(None, _encode_image)
         except Exception:
-            logger.exception("save image failed cid=%s url=%s", content_id, source_url)
+            logger.error("save image failed cid=%s", content_id)
             return False
 
         sha = self.sha256_bytes(stored_data)
@@ -3675,7 +3516,7 @@ class SearchCollector(BaseCollector):
             doc.close()
             return saved
         except Exception as e:
-            logger.warning("PDF page extract failed for %s: %s", base_filename, e)
+            logger.warning("PDF page extract failed (%s)", type(e).__name__)
             return 0
 
     async def cleanup(self):

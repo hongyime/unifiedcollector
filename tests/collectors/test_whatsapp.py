@@ -475,12 +475,18 @@ async def test_handle_message_event_dedupes(collector):
 async def test_handle_message_event_archives_raw_payload_before_duplicate(collector, monkeypatch):
     monkeypatch.setenv("COLLECTOR_TIER1_RAW_PAYLOADS_ENABLED", "1")
     calls = []
+    thread_calls = []
 
     def fake_write_raw_payload(**kwargs):
         calls.append(kwargs)
         return MagicMock(ok=True)
 
+    async def fake_to_thread(func, *args, **kwargs):
+        thread_calls.append(func)
+        return func(*args, **kwargs)
+
     monkeypatch.setattr(wa_mod, "write_raw_payload", fake_write_raw_payload)
+    monkeypatch.setattr(wa_mod.asyncio, "to_thread", fake_to_thread)
     event = {
         "message_id": "m1",
         "chat_jid": "111@s.whatsapp.net",
@@ -492,11 +498,53 @@ async def test_handle_message_event_archives_raw_payload_before_duplicate(collec
     await collector._handle_message_event(event, [])
 
     assert calls
+    assert thread_calls == [fake_write_raw_payload]
     assert calls[0]["source"] == "whatsapp"
     assert calls[0]["artifact_id"] == "messages/111@s.whatsapp.net/m1"
     assert calls[0]["target_tables"] == ["whatsapp_messages"]
     assert calls[0]["metadata"]["platform_message_id"] == "m1"
     collector._test_conn.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_raw_archive_serializes_slow_vault_writes(collector, monkeypatch):
+    monkeypatch.setenv("COLLECTOR_TIER1_RAW_PAYLOADS_ENABLED", "1")
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+
+    async def slow_to_thread(_func, *_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            entered.set()
+            await release.wait()
+        return MagicMock(ok=True)
+
+    monkeypatch.setattr(wa_mod.asyncio, "to_thread", slow_to_thread)
+    first = asyncio.create_task(collector._archive_raw_event(
+        artifact_id="messages/chat/one", payload={}, target_tables=["whatsapp_messages"],
+    ))
+    await entered.wait()
+    second = asyncio.create_task(collector._archive_raw_event(
+        artifact_id="messages/chat/two", payload={}, target_tables=["whatsapp_messages"],
+    ))
+    await asyncio.sleep(0)
+    assert calls == 1
+    release.set()
+    await asyncio.gather(first, second)
+    assert calls == 2
+
+
+def test_raw_archive_root_defaults_to_vault_and_accepts_durable_spool(tmp_path, monkeypatch):
+    monkeypatch.delenv("WHATSAPP_RAW_ARCHIVE_ROOT", raising=False)
+    default = WhatsappCollector()
+    assert default._raw_archive_root == wa_mod.VAULT_ROOT
+
+    spool = tmp_path / "spool"
+    monkeypatch.setenv("WHATSAPP_RAW_ARCHIVE_ROOT", str(spool))
+    staged = WhatsappCollector()
+    assert staged._raw_archive_root == spool
 
 
 @pytest.mark.asyncio
@@ -1108,6 +1156,20 @@ async def test_download_via_bridge_marks_non_retryable_media_unavailable(
 
 
 @pytest.mark.asyncio
+async def test_download_via_bridge_marks_unpaired_session_media_unavailable(
+    configured_collector, monkeypatch,
+):
+    health = MagicMock(status_code=200, content=b"", raise_for_status=MagicMock())
+    health.json = MagicMock(return_value={"status": "ok", "whatsapp_ready": True})
+    resp = MagicMock(status_code=503, content=b"", raise_for_status=MagicMock())
+    resp.json = MagicMock(return_value={"code": "bridge_unpaired", "retryable": True})
+    _patch_async_client(monkeypatch, response=health, post_response=resp)
+
+    with pytest.raises(wa_mod._MediaUnavailable):
+        await configured_collector._download_via_bridge("sess1", "m-unpaired", "key", "/path")
+
+
+@pytest.mark.asyncio
 async def test_download_direct_returns_bytes(collector, monkeypatch):
     resp = MagicMock(status_code=200, content=b"hello",
                        raise_for_status=MagicMock())
@@ -1250,6 +1312,64 @@ async def test_media_download_none_raises_pending_and_keeps_work_item(collector)
     assert any("INSERT INTO dead_letter_queue" in s for s in sqls)
     assert not any("status='failed'" in s for s in sqls)
     redis_mock.set.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_media_without_retrievable_locator_terminalizes(collector):
+    event = _media_event("m-no-locator")
+    event.pop("mediaKey")
+    event.pop("directPath")
+    redis_mock = _redis_mock()
+    _mock_pipeline(collector, redis_mock)
+    collector._mark_media_unavailable = AsyncMock()
+    collector._fail_media_work_item = AsyncMock()
+
+    await collector._handle_message_event(event, [])
+
+    collector._mark_media_unavailable.assert_awaited_once_with(
+        msg_id="m-no-locator", session="sess1", status_code=0,
+        code="missing_media_locator",
+        reason="WhatsApp event has no media locator for archival",
+    )
+    collector._fail_media_work_item.assert_awaited_once_with(
+        "m-no-locator", "media locator unavailable",
+    )
+    redis_mock.set.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_media_download_none_terminalizes_after_durable_retry_cap(collector):
+    event = _media_event("m-retry-cap")
+    redis_mock = _redis_mock()
+    _mock_pipeline(collector, redis_mock)
+    collector._download_via_bridge = AsyncMock(return_value=None)
+    collector._media_retry_exhausted = AsyncMock(return_value=True)
+    collector._mark_media_unavailable = AsyncMock()
+
+    await collector._handle_message_event(event, [])
+
+    collector._media_retry_exhausted.assert_awaited_once_with(
+        "m-retry-cap", "media download returned no data",
+    )
+    collector._mark_media_unavailable.assert_awaited_once_with(
+        msg_id="m-retry-cap", session="sess1", status_code=0,
+        code="retry_exhausted",
+        reason="media download unavailable after bounded retries",
+    )
+    redis_mock.set.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_media_retry_cap_marks_work_item_failed(collector):
+    collector._test_conn.fetchval = AsyncMock(return_value="failed")
+
+    assert await collector._media_retry_exhausted("m-retry-cap", "no data") is True
+
+    sql, source, content_id, reason, cap = collector._test_conn.fetchval.await_args.args
+    assert "status=CASE WHEN retry_count+1 >= $4 THEN 'failed'" in sql
+    assert (source, content_id, reason, cap) == (
+        "whatsapp", "wa_m-retry-cap", "no data", wa_mod.MEDIA_MAX_DELIVERY_RETRIES,
+    )
 
 
 @pytest.mark.asyncio

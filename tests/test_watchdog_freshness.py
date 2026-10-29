@@ -31,7 +31,11 @@ def test_liveness_service_allowlist_matches_compose_services():
             if match:
                 services.add(match.group(1))
 
-    assert freshness.EXPECTED_COMPOSE_SERVICES == services
+    assert (
+        freshness.EXPECTED_COMPOSE_SERVICES
+        | freshness.LIVENESS_EXCLUDED_COMPOSE_SERVICES
+    ) == services
+    assert "schema_init" not in freshness.EXPECTED_COMPOSE_SERVICES
 
 
 def test_watchdog_stale_strava_zero_disables_source_check(monkeypatch):

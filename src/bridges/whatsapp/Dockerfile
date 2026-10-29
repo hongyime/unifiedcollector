@@ -28,6 +28,7 @@ RUN addgroup -S wac && adduser -S wac -G wac \
     && apk add --no-cache git wget
 COPY package.json package-lock.json ./
 COPY --from=production-dependencies /app/node_modules ./node_modules
+COPY --from=builder /app/src ./src
 COPY --from=builder /app/build ./build
 RUN mkdir -p /app/auth_info /data/media \
     && chown -R wac:wac /app/auth_info /data/media
