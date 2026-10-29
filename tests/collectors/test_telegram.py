@@ -1765,3 +1765,42 @@ async def test_collect_chat_resumes_from_per_chat_newest_stored_id(monkeypatch):
     await coll._collect_chat(worker, "empty")
 
     assert calls == [(111, 50000), (222, 120), (333, 0)]
+
+
+@pytest.mark.asyncio
+async def test_on_new_message_normalizes_marked_chat_id_to_bare(monkeypatch):
+    coll = _make_collector(monkeypatch)
+    worker = _make_worker(coll)
+    message = SimpleNamespace(
+        id=77,
+        message="hello",
+        caption=None,
+        date=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        media=None,
+        sender_id=555,
+        peer_id=None,
+        pinned=False,
+    )
+    event = SimpleNamespace(chat_id=-1000000000123, message=message)
+
+    await coll._on_new_message(worker, event)
+
+    conn = coll.pool.conn
+    calls = (
+        conn.execute.await_args_list
+        + conn.fetchrow.await_args_list
+        + conn.fetchval.await_args_list
+        + conn.fetch.await_args_list
+    )
+    assert any(
+        isinstance(call.args[0], str)
+        and "from telegram_chats where platform_chat_id" in call.args[0].lower()
+        and call.args[1] == "123"
+        for call in conn.fetchrow.await_args_list
+    ), conn.fetchrow.await_args_list
+    assert any(
+        "insert into telegram_messages" in str(call.args[0]).lower()
+        and call.args[1] == "123:77"
+        for call in conn.fetchrow.await_args_list
+    ), conn.fetchrow.await_args_list
+    assert all("-100" not in repr(call.args) for call in calls), calls

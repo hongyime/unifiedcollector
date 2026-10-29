@@ -34,6 +34,24 @@ if TYPE_CHECKING:  # pragma: no cover — forward-ref hints only
 logger = logging.getLogger("src.collectors.telegram")
 
 
+def _bare_chat_id(chat_id):
+    """Marked Telethon id (-100…) -> bare id, matching the backfill rows.
+
+    Realtime events carry the marked form while ``telegram_chats.platform_chat_id``
+    and ``platform_message_id`` are stored bare (``str(entity.id)``). Falls back to
+    the raw value if Telethon cannot resolve an unusual peer.
+    """
+    if chat_id is None:
+        return None
+    from telethon.utils import resolve_id
+
+    try:
+        bare, _ = resolve_id(chat_id)
+    except Exception:
+        return chat_id
+    return bare
+
+
 class RealtimeMixin:
     """Realtime ingestion — Telethon @client.on(...) handlers."""
 
@@ -376,20 +394,24 @@ class RealtimeMixin:
 
     async def _on_new_message(self, worker: "TelegramWorker", event):
         try:
-            chat_id = event.chat_id
+            raw_chat_id = event.chat_id
             message = event.message
             # Circular-loop guard: skip messages authored by our own realtime-feed
             # bot in the logs chat. Without this, the bot's per-post notifications
             # would be re-ingested as new telegram media_items, which the feed
-            # would then re-send, ad infinitum.
-            skip_reason = self._should_skip_self_bot_message(chat_id, message)
+            # would then re-send, ad infinitum. Uses the raw (marked) id because
+            # the configured guards may be stored in either form.
+            skip_reason = self._should_skip_self_bot_message(raw_chat_id, message)
             if skip_reason is not None:
                 logger.debug(
                     "telegram skip: self_bot reason=%s chat=%s msg=%s sender=%s",
-                    skip_reason, chat_id, getattr(message, "id", None),
+                    skip_reason, raw_chat_id, getattr(message, "id", None),
                     getattr(message, "sender_id", None),
                 )
                 return
+            # Realtime events carry the marked id (-100…); the DB uses the bare id
+            # (same as backfill), so normalize once before any write/lookup.
+            chat_id = _bare_chat_id(raw_chat_id)
             await self._write_realtime_message_with_retry(worker, message, chat_id)
             # Sender resolution hits the network and can raise ChannelPrivateError
             # for private/restricted channels (or if we were removed). Isolate it so
@@ -412,18 +434,19 @@ class RealtimeMixin:
 
     async def _on_message_edited(self, worker: "TelegramWorker", event):
         try:
-            chat_id = event.chat_id
+            raw_chat_id = event.chat_id
             message = event.message
             # Circular-loop guard: same rationale as _on_new_message. An edited
             # self-bot message must not be ingested either.
-            skip_reason = self._should_skip_self_bot_message(chat_id, message)
+            skip_reason = self._should_skip_self_bot_message(raw_chat_id, message)
             if skip_reason is not None:
                 logger.debug(
                     "telegram skip: self_bot reason=%s chat=%s msg=%s sender=%s edit=1",
-                    skip_reason, chat_id, getattr(message, "id", None),
+                    skip_reason, raw_chat_id, getattr(message, "id", None),
                     getattr(message, "sender_id", None),
                 )
                 return
+            chat_id = _bare_chat_id(raw_chat_id)
             await self._write_realtime_message_with_retry(worker, message, chat_id, is_edit=True)
         except Exception as exc:
             logger.error("_on_message_edited error: %s", _format_exception(exc), exc_info=True)
