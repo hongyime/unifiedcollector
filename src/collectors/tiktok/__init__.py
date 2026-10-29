@@ -2680,7 +2680,8 @@ class TiktokCollector(BaseCollector):
             return 0
         spider = self.make_spider_discover(max_hops=max_hops)
         try:
-            return await spider.run(seeds=[seed])
+            await spider.seed(seed)
+            return await spider.run()
         except Exception as e:
             logger.warning("spider_related_creators %s: %s", seed, e)
             return 0

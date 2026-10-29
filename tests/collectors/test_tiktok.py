@@ -1041,12 +1041,14 @@ async def test_spider_related_creators_runs_spider(monkeypatch):
     c.pool = _make_pool()
 
     fake_spider = MagicMock()
+    fake_spider.seed = AsyncMock(return_value=True)
     fake_spider.run = AsyncMock(return_value=7)
     monkeypatch.setattr(c, "make_spider_discover", lambda **kw: fake_spider)
 
     out = await c.spider_related_creators("bryan", max_hops=2)
     assert out == 7
-    fake_spider.run.assert_awaited_once_with(seeds=["bryan"])
+    fake_spider.seed.assert_awaited_once_with("bryan")
+    fake_spider.run.assert_awaited_once()
 
 
 # ── download_media ───────────────────────────────────────────────────────
