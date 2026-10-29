@@ -74,7 +74,11 @@ function authHeaders(): HeadersInit {
 
 async function get<T>(path: string): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, { headers: authHeaders() });
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  if (!res.ok) {
+    const err = new Error(`${res.status} ${res.statusText}`) as Error & { status?: number };
+    err.status = res.status;
+    throw err;
+  }
   return res.json() as Promise<T>;
 }
 
