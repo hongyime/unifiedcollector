@@ -427,13 +427,12 @@ async def wa_link_stats(_user: dict = Depends(require_role("viewer"))):
 
 
 @router.get("/whatsapp/qr/{bridge}")
-async def whatsapp_qr(bridge: str):
+async def whatsapp_qr(bridge: str, _user: dict = Depends(require_role("viewer"))):
     """Proxy the live QR / status from a wa-bridge.
 
     bridge is '1' or '2'. Returns {status, qr, ready, error}. The bridge
     regenerates the QR on its own cadence; the client polls this endpoint and
-    re-renders, so a QR never goes stale on screen. Unauthenticated like the
-    bridge's own /qr route (link page is behind the dashboard already).
+    re-renders, so a QR never goes stale on screen.
     """
     if bridge not in ("1", "2"):
         raise HTTPException(400, "bridge must be 1 or 2")
@@ -676,7 +675,7 @@ async def whatsapp_pairing_code(
 
 
 @router.get("/whatsapp/link")
-async def whatsapp_link_page():
+async def whatsapp_link_page(_user: dict = Depends(require_role("viewer"))):
     """Self-contained QR linking page with auto-refresh.
 
     Polls /whatsapp/qr/{1,2} every 3s, re-renders the QR image, and flips each

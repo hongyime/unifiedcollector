@@ -65,7 +65,7 @@ async def follow_edges_stats(_user: dict = Depends(require_role("viewer"))):
 
 
 @router.get("/social/stats")
-async def social_stats():
+async def social_stats(_user: dict = Depends(require_role("viewer"))):
     pool = await _get_pool()
     async with pool.acquire() as conn:
         users = await conn.fetch(
@@ -112,7 +112,8 @@ async def social_network(_user: dict = Depends(require_role("viewer"))):
 
 @router.get("/social/users")
 async def social_users_list(platform: str | None = None, q: str | None = None,
-                            limit: int = 50, offset: int = 0):
+                            limit: int = 50, offset: int = 0,
+                            _user: dict = Depends(require_role("viewer"))):
     limit = max(1, min(limit, 200))
     clauses, args = [], []
     if platform:
@@ -132,7 +133,7 @@ async def social_users_list(platform: str | None = None, q: str | None = None,
 
 
 @router.get("/social/scrape-config")
-async def social_scrape_config():
+async def social_scrape_config(_user: dict = Depends(require_role("viewer"))):
     """Per-platform scrape enable state for the browser extension (rotator control).
 
     The activity rotator writes collection_schedules.enabled for the browser
@@ -191,5 +192,5 @@ document.getElementById('platform').onchange=load;stats().then(load);
 
 
 @router.get("/social", response_class=HTMLResponse)
-async def social_page():
+async def social_page(_user: dict = Depends(require_role("viewer"))):
     return HTMLResponse(_SOCIAL_HTML)
