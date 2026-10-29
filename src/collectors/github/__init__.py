@@ -234,6 +234,7 @@ class GithubCollector(BaseCollector):
         self._sem = asyncio.Semaphore(int(os.getenv("GITHUB_MAX_CONCURRENT", "5")))
         self._batch_sem = asyncio.Semaphore(10)
         self._spider_depth = int(os.getenv("GITHUB_SPIDER_DEPTH", "4"))
+        self._spider_queue_recovered = False
         self._spider_batch_size = int(os.getenv("GITHUB_SPIDER_BATCH_SIZE", "20"))
         self._spider_user_delay = float(os.getenv("GITHUB_SPIDER_USER_DELAY", "2.0"))
         self._api_delay = float(os.getenv("GITHUB_API_DELAY", "0.1"))
@@ -1590,6 +1591,31 @@ class GithubCollector(BaseCollector):
             await self._run_quota_pusher_spider()
         await self._run_shared_spider()
 
+    async def _reclaim_stranded_spider_queue(self):
+        """Return stranded 'processing' rows to 'pending' once per process.
+
+        Runs before the drain loop: any 'processing' row at that point belongs
+        to a prior process that stopped mid-work.
+        """
+        if self.pool is None or self._spider_queue_recovered:
+            return
+        self._spider_queue_recovered = True
+        try:
+            async with self.pool.acquire() as conn:
+                result = await conn.execute(
+                    "UPDATE github_spider_queue SET status = 'pending' "
+                    "WHERE status = 'processing'"
+                )
+            count = int(result.rsplit(" ", 1)[-1]) if isinstance(result, str) else 0
+            if count:
+                logger.warning(
+                    "github spider: recovered %d interrupted queue item(s)", count,
+                )
+        except Exception as exc:
+            logger.warning(
+                "github spider: queue recovery failed: %s", type(exc).__name__,
+            )
+
     async def _process_spider_queue(
         self,
         *,
@@ -1603,6 +1629,7 @@ class GithubCollector(BaseCollector):
         ``FOR UPDATE SKIP LOCKED``. Each worker pops one row, processes it,
         sleeps the per-user delay, then loops.
         """
+        await self._reclaim_stranded_spider_queue()
         await refresh_account_proximity_cache(self.pool)
         batch_limit = int(batch_size if batch_size is not None else self._spider_batch_size)
         spider_concurrency = int(concurrency if concurrency is not None else os.getenv("GITHUB_SPIDER_CONCURRENCY", "4"))
@@ -2454,7 +2481,8 @@ class GithubCollector(BaseCollector):
         async with self.pool.acquire() as conn:
             await conn.execute(
                 "INSERT INTO github_readmes (repo_id, content, sha, size, collected_at) "
-                "VALUES ($1, $2, $3, $4, NOW())",
+                "VALUES ($1, $2, $3, $4, NOW()) "
+                "ON CONFLICT (repo_id, sha) DO UPDATE SET collected_at = NOW()",
                 repo_uuid, content, sha, size,
             )
 

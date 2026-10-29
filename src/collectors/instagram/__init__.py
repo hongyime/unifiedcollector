@@ -43,7 +43,6 @@ from src.core.account_pool import AccountPool, Account, _build_fingerprint
 from src.core.file_naming import sanitize_name  # F821 fix: used in account_media_dir
 from src.core.human_rate_limiter import HumanLikeRateLimiter, OperationType
 from src.core.sliding_window_limiter import SlidingWindowRateLimiter, WindowConfig
-from src.core.proximity import refresh_account_proximity_cache
 from src.core.profile_photo_tracker import ProfilePhotoTracker
 from src.core.raw_archive import report_raw_archive_result
 from src.core.rate_limit_events import record_rate_limit_event
@@ -1474,55 +1473,6 @@ class InstagramCollector(BaseCollector):
             else:
                 logger.error("Failed instagram/%s: %s", username, e)
                 await self.send_to_dlq(username, username, str(e))
-
-    async def _process_spider_queue(self, client: httpx.AsyncClient):
-        """Claim and process jobs from the spider queue."""
-        await refresh_account_proximity_cache(self.pool)
-        while not self._stop.is_set():
-            async with self.pool.acquire() as conn:
-                row = await conn.fetchrow("""
-                    UPDATE instagram_spider_queue
-                    SET status = 'processing',
-                        last_attempt = NOW(),
-                        attempts = attempts + 1
-                    WHERE id = (
-                        SELECT q.id
-                        FROM instagram_spider_queue q
-                        LEFT JOIN LATERAL (
-                            SELECT MIN(ap.tier) AS proximity_tier
-                            FROM account_proximity_cache ap
-                            WHERE ap.platform = 'instagram'
-                              AND (
-                                     ap.account_id = q.platform_user_id
-                                  OR ap.account_id = lower(q.username)
-                              )
-                        ) prox ON TRUE
-                        WHERE q.status = 'pending' AND q.attempts < 3
-                        ORDER BY
-                            CASE
-                                WHEN prox.proximity_tier IN (1, 2) THEN 2
-                                WHEN prox.proximity_tier = 3 THEN 1
-                                ELSE 0
-                            END DESC,
-                            q.priority ASC,
-                            q.collected_at ASC
-                        LIMIT 1
-                    )
-                    RETURNING platform_user_id, username
-                """)
-            
-            if not row:
-                break
-            
-            target = row['username'] or row['platform_user_id']
-            try:
-                await self._process_target(client, target)
-                async with self.pool.acquire() as conn:
-                    await conn.execute("UPDATE instagram_spider_queue SET status = 'completed' WHERE platform_user_id = $1", row['platform_user_id'])
-            except Exception as e:
-                logger.error("Spider job failed for %s: %s", target, e)
-                async with self.pool.acquire() as conn:
-                    await conn.execute("UPDATE instagram_spider_queue SET status = 'failed', error_message = $1 WHERE platform_user_id = $2", str(e), row['platform_user_id'])
 
     async def _record_rate_limit_event(
         self,

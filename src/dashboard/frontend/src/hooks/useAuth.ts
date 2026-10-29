@@ -21,19 +21,50 @@ export function useAuth() {
 }
 
 export function useAuthProvider(): AuthState {
-  const [user, setUser] = useState<AuthUser | null>({ username: "admin", role: "admin" });
-  const [loading, setLoading] = useState(false);
+  const [user, setUser] = useState<AuthUser | null>(null);
+  const [loading, setLoading] = useState(true);
 
+  // Restore the session on mount: with a stored token, /auth/me validates it
+  // via authHeaders(); without one it still answers 200 when
+  // DASHBOARD_AUTH_DISABLED=true (default admin) and 401 when auth is enforced.
   useEffect(() => {
-    // Auth bypassed
+    let cancelled = false;
+    api
+      .me()
+      .then((me) => {
+        if (!cancelled) setUser({ username: me.username, role: me.role as AuthUser["role"] });
+      })
+      .catch((err) => {
+        // Stale/invalid token → drop it. Other failures (network) keep the
+        // token so a transient backend blip doesn't log the user out.
+        if ((err as { status?: number }).status === 401) {
+          localStorage.removeItem("auth_token");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const login = useCallback(async (username: string, password: string) => {
-    setUser({ username: "admin", role: "admin" });
+    try {
+      const res = await api.login(username, password);
+      localStorage.setItem("auth_token", res.token);
+      setUser({ username: res.username, role: res.role as AuthUser["role"] });
+    } catch (err) {
+      // Surface FastAPI's `detail` (e.g. "Invalid credentials") over the raw
+      // "401 Unauthorized" status line.
+      const e = err as Error & { detail?: unknown };
+      throw new Error(typeof e.detail === "string" && e.detail ? e.detail : e.message);
+    }
   }, []);
 
   const logout = useCallback(() => {
-    // Auth bypassed
+    localStorage.removeItem("auth_token");
+    setUser(null);
   }, []);
 
   return { user, loading, login, logout };

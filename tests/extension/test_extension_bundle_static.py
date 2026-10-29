@@ -14,8 +14,11 @@ _BUNDLE_SIZE_BASELINE_BYTES = {
     # The checked-in content bundle already exceeded the original baseline's
     # 10% budget. Reset to the measured size after the follow-first guard; the
     # code change below reduces the prior bundle by 590 bytes.
+    # Reset after the bridge-secret header rollout (v1.23.126): every bridge
+    # fetch now awaits bridgeHeaders(), which adds the storage read + header
+    # spread to background.js.
     "content.js": 221_859,
-    "background.js": 126_077,
+    "background.js": 139_670,
 }
 _BUNDLE_SIZE_BUDGET_MULTIPLIER = 1.10
 
@@ -343,7 +346,10 @@ def test_recoverable_page_shells_recover_without_waiting_on_x_native_retry():
     assert "recoverablePageActionIsSafe(platformId, el)" in find_button_block
     assert "platformId === \"x\"" in recover_block
     assert "Date.now() - last < 15000" in recover_block
-    assert 'if (!button2.isConnected || button2.closest && button2.closest("form") || button2.form)' in recover_block
+    x_click_block = recover_block.split('if (platformId === "x") {', 1)[1].split(
+        "if (last && Date.now() - last < 60000)", 1
+    )[0]
+    assert "button.click()" not in x_click_block
     assert "switchXHostForRecoverableShell(shell)" in recover_block
 
     x_retry_shell = recover_block.split(

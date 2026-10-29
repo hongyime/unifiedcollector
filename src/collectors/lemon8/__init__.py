@@ -293,6 +293,7 @@ class Lemon8Collector(BaseCollector):
             0,
             int(os.getenv("LEMON8_SPIDER_QUEUE_PER_CYCLE", "8") or "0"),
         )
+        self._spider_queue_recovered = False
         self._feed_pages_per_cycle = bounded_capture_limit(
             os.getenv("LEMON8_FEED_PAGES_PER_CYCLE"), default=2, maximum=5, minimum=1,
         )
@@ -506,7 +507,30 @@ class Lemon8Collector(BaseCollector):
         except Exception:
             logger.debug("lemon8: failed to mark %s unavailable", username, exc_info=True)
 
+    async def _reclaim_stranded_spider_queue(self):
+        """Return stranded 'processing' rows to 'pending' once per process."""
+        if self.pool is None or self._spider_queue_recovered:
+            return
+        self._spider_queue_recovered = True
+        try:
+            async with self.pool.acquire() as conn:
+                result = await conn.execute(
+                    "UPDATE lemon8_spider_queue SET status = 'pending' "
+                    "WHERE status = 'processing'"
+                )
+            count = int(result.rsplit(" ", 1)[-1]) if isinstance(result, str) else 0
+            if count:
+                logger.warning(
+                    "lemon8 spider queue: recovered %d interrupted queue item(s)",
+                    count,
+                )
+        except Exception as exc:
+            logger.warning(
+                "lemon8 spider queue: recovery failed: %s", type(exc).__name__,
+            )
+
     async def _process_spider_queue(self, max_items: int | None = None):
+        await self._reclaim_stranded_spider_queue()
         async with httpx.AsyncClient(timeout=30, cookies=self._cookies, headers=self._headers(), follow_redirects=True) as client:
             processed = 0
             while not self._stop.is_set():

@@ -905,3 +905,33 @@ async def test_edge_fetcher_no_op_when_spider_unavailable(
 async def test_cleanup_is_noop(collector):
     # Just must not raise.
     assert await collector.cleanup() is None
+
+
+# ── startup reclaim ──────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_reclaim_stranded_spider_queue_once(collector):
+    conn = collector._test_conn
+    table = {"stranded": "processing", "queued": "pending"}
+
+    async def _execute(sql, *args):
+        if "SET status = 'pending'" in sql and "processing" in sql:
+            n = 0
+            for key, status in table.items():
+                if status == "processing":
+                    table[key] = "pending"
+                    n += 1
+            return f"UPDATE {n}"
+        return "UPDATE 0"
+
+    conn.execute = AsyncMock(side_effect=_execute)
+
+    await collector._reclaim_stranded_spider_queue()
+
+    assert table == {"stranded": "pending", "queued": "pending"}
+    conn.execute.assert_awaited_once()
+    assert "lemon8_spider_queue" in conn.execute.await_args.args[0]
+
+    await collector._reclaim_stranded_spider_queue()
+    conn.execute.assert_awaited_once()

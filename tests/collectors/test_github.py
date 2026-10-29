@@ -653,6 +653,56 @@ async def test_upsert_repo_serialises_metadata_and_handles_no_license():
 
 
 @pytest.mark.asyncio
+async def test_upsert_readme_conflicts_on_repo_and_sha():
+    """Unchanged README sha must update, not append a second row."""
+    coll = _new_collector()
+    rows: dict[tuple, str] = {}
+    repo_id = uuid4()
+
+    async def _execute(sql, *args):
+        assert "ON CONFLICT (repo_id, sha) DO UPDATE SET collected_at = NOW()" in sql
+        rows[(args[0], args[2])] = args[1]
+        return "INSERT 0 1" if len(rows) == 1 else "UPDATE 1"
+
+    coll.pool._conn.execute.side_effect = _execute
+
+    await coll._upsert_readme(repo_id, "same", "sha1", 4)
+    await coll._upsert_readme(repo_id, "same", "sha1", 4)
+    assert len(rows) == 1
+
+    await coll._upsert_readme(repo_id, "changed", "sha2", 7)
+    assert rows == {(repo_id, "sha1"): "same", (repo_id, "sha2"): "changed"}
+
+
+_MIGRATION = (
+    Path(__file__).resolve().parents[2]
+    / "src/db/migrations/20261029_github_readmes_unique_repo_sha.sql"
+)
+
+
+def test_github_readmes_migration_dedupes_before_unique_index():
+    """Dedupe must run before the index build, and both must be re-runnable."""
+    sql = "\n".join(
+        line for line in _MIGRATION.read_text().splitlines()
+        if not line.lstrip().startswith("--")
+    )
+    statements = [s.strip() for s in sql.split(";") if s.strip()]
+    upper = [" ".join(s.upper().split()) for s in statements]
+
+    delete_at = next(i for i, s in enumerate(upper) if s.startswith("DELETE FROM GITHUB_READMES"))
+    index_at = next(
+        i for i, s in enumerate(upper)
+        if "CREATE UNIQUE INDEX IF NOT EXISTS GITHUB_READMES_REPO_SHA_UNIQ" in s
+    )
+    assert delete_at < index_at
+    assert "(REPO_ID, SHA)" in statements[index_at].upper()
+    # keeps the newest collected_at, ties broken by id
+    assert "ROW_NUMBER() OVER" in upper[delete_at]
+    assert "COLLECTED_AT DESC NULLS LAST, ID DESC" in upper[delete_at]
+    assert "IF NOT EXISTS" in upper[index_at]
+
+
+@pytest.mark.asyncio
 async def test_upsert_commit_tolerates_none_author_blocks():
     """Null commit/author/gh-author are common on imported / signed commits."""
     coll = _new_collector()
@@ -962,3 +1012,37 @@ async def test_shared_github_graph_marks_missing_api_page_unavailable(monkeypatc
         ):
             pass
     assert exc_info.value.error_class == "github_relationships_unavailable"
+
+
+# ── startup reclaim ──────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_reclaim_stranded_spider_queue_once(monkeypatch):
+    coll = _new_collector(monkeypatch)
+    conn = coll.pool._conn
+    # One row stranded mid-work by a crashed process, one still queued.
+    table = {"stranded": "processing", "queued": "pending"}
+
+    async def _execute(sql, *args):
+        if "SET status = 'pending'" in sql and "processing" in sql:
+            n = 0
+            for key, status in table.items():
+                if status == "processing":
+                    table[key] = "pending"
+                    n += 1
+            return f"UPDATE {n}"
+        return "UPDATE 0"
+
+    conn.execute = AsyncMock(side_effect=_execute)
+
+    await coll._reclaim_stranded_spider_queue()
+
+    # Both rows are now visible to the drain loop's status='pending' claim.
+    assert table == {"stranded": "pending", "queued": "pending"}
+    conn.execute.assert_awaited_once()
+    assert "github_spider_queue" in conn.execute.await_args.args[0]
+
+    # Second call in the same process is a no-op.
+    await coll._reclaim_stranded_spider_queue()
+    conn.execute.assert_awaited_once()

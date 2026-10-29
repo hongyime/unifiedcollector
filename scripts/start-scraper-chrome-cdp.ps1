@@ -701,7 +701,6 @@ function Open-RequestedPlatformTabs {
 
 $args = @(
     "--remote-debugging-port=$RemoteDebuggingPort",
-    "--remote-debugging-address=0.0.0.0",
     "--remote-allow-origins=*",
     "--user-data-dir=$profile",
     "--enable-extensions",

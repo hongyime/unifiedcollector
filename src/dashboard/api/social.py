@@ -65,7 +65,7 @@ async def follow_edges_stats(_user: dict = Depends(require_role("viewer"))):
 
 
 @router.get("/social/stats")
-async def social_stats():
+async def social_stats(_user: dict = Depends(require_role("viewer"))):
     pool = await _get_pool()
     async with pool.acquire() as conn:
         users = await conn.fetch(
@@ -112,7 +112,8 @@ async def social_network(_user: dict = Depends(require_role("viewer"))):
 
 @router.get("/social/users")
 async def social_users_list(platform: str | None = None, q: str | None = None,
-                            limit: int = 50, offset: int = 0):
+                            limit: int = 50, offset: int = 0,
+                            _user: dict = Depends(require_role("viewer"))):
     limit = max(1, min(limit, 200))
     clauses, args = [], []
     if platform:
@@ -132,7 +133,7 @@ async def social_users_list(platform: str | None = None, q: str | None = None,
 
 
 @router.get("/social/scrape-config")
-async def social_scrape_config():
+async def social_scrape_config(_user: dict = Depends(require_role("viewer"))):
     """Per-platform scrape enable state for the browser extension (rotator control).
 
     The activity rotator writes collection_schedules.enabled for the browser
@@ -177,19 +178,21 @@ img{width:32px;height:32px;border-radius:50%;object-fit:cover;background:#222}.m
 <input id=q placeholder="search username / name" oninput="load()"></div>
 <table><thead><tr><th></th><th>platform</th><th>username</th><th>name</th><th>seen</th><th>contexts</th></tr></thead><tbody id=rows></tbody></table>
 <script>
-async function stats(){const s=await (await fetch('/social/stats')).json();
-document.getElementById('stats').innerHTML=s.users.map(u=>`<div class=chip><b>${u.platform}</b> ${u.users} users · ${u.with_photo} 📷</div>`).join('')+
-Object.entries(s.content).map(([k,v])=>`<div class=chip>${k}: <b>${v??'—'}</b></div>`).join('');
+function esc(s){return String(s||'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));}
+function authHeaders(){try{const t=localStorage.getItem('auth_token');return t?{Authorization:'Bearer '+t}:{};}catch(e){return {};}}
+async function stats(){const s=await (await fetch('/social/stats',{headers:authHeaders()})).json();
+document.getElementById('stats').innerHTML=s.users.map(u=>`<div class=chip><b>${esc(u.platform)}</b> ${esc(String(u.users))} users · ${esc(String(u.with_photo))} 📷</div>`).join('')+
+Object.entries(s.content).map(([k,v])=>`<div class=chip>${esc(k)}: <b>${esc(String(v??'—'))}</b></div>`).join('');
 const sel=document.getElementById('platform');s.users.forEach(u=>{const o=document.createElement('option');o.value=u.platform;o.textContent=u.platform;sel.appendChild(o)});}
 async function load(){const p=document.getElementById('platform').value,q=document.getElementById('q').value;
-const r=await (await fetch(`/social/users?limit=100&platform=${encodeURIComponent(p)}&q=${encodeURIComponent(q)}`)).json();
-document.getElementById('rows').innerHTML=r.map(u=>`<tr><td>${u.profile_photo_url?`<img src="${u.profile_photo_url}">`:''}</td>
-<td>${u.platform}</td><td>${u.username||'<span class=muted>—</span>'}</td><td>${u.display_name||''}</td>
-<td>${u.times_seen}</td><td class=muted>${(u.contexts||[]).join(', ')}</td></tr>`).join('');}
+const r=await (await fetch(`/social/users?limit=100&platform=${encodeURIComponent(p)}&q=${encodeURIComponent(q)}`,{headers:authHeaders()})).json();
+document.getElementById('rows').innerHTML=r.map(u=>`<tr><td>${u.profile_photo_url?'<img src="'+esc(u.profile_photo_url)+'">':''}</td>
+<td>${esc(u.platform)}</td><td>${u.username?esc(u.username):'<span class=muted>—</span>'}</td><td>${esc(u.display_name||'')}</td>
+<td>${esc(String(u.times_seen))}</td><td class=muted>${esc((u.contexts||[]).join(', '))}</td></tr>`).join('');}
 document.getElementById('platform').onchange=load;stats().then(load);
 </script></body></html>"""
 
 
 @router.get("/social", response_class=HTMLResponse)
-async def social_page():
+async def social_page(_user: dict = Depends(require_role("viewer"))):
     return HTMLResponse(_SOCIAL_HTML)

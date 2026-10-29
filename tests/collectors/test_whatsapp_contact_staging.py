@@ -78,6 +78,14 @@ def _row(
     }
 
 
+def _deleted_ids(conn):
+    sql, *params = conn.execute.call_args_list[-1][0]
+    if "ANY" in sql:
+        return set(params[0])
+    lo, hi = params
+    return set(range(lo, hi + 1))
+
+
 # ---------------------------------------------------------------------------
 # 1. should_run gating
 # ---------------------------------------------------------------------------
@@ -181,10 +189,59 @@ async def test_merge_batch_duplicate_platform_user_ids():
 
     assert user_merged == 3  # all 3 rows passed to the INSERT (SQL handles dedup)
     assert lid_merged == 0
-    # DELETE by id range: min_id=1, max_id=3
+    # DELETE by exact id list: the rows read
     delete_call = ctx._conn.execute.call_args_list[-1]
-    assert delete_call[0][1] == 1   # min_id
-    assert delete_call[0][2] == 3   # max_id
+    assert "id = ANY($1::bigint[])" in delete_call[0][0]
+    assert delete_call[0][1] == [1, 2, 3]
+
+
+# ---------------------------------------------------------------------------
+# 4b. out-of-order collected_at — only the ids actually read are deleted
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_merge_batch_deletes_only_exact_ids_read():
+    ctx = _make_ctx()
+    t = lambda d: datetime(2026, 9, 10, 0, 0, d, tzinfo=timezone.utc)
+    # ids 1..5, collected_at order 2,4,1,3,5 → batch of 3 reads ids [2,4,1]
+    staged = [
+        _row(id=1, collected_at=t(20)),
+        _row(id=2, collected_at=t(10)),
+        _row(id=3, collected_at=t(30)),
+        _row(id=4, collected_at=t(15)),
+        _row(id=5, collected_at=t(40)),
+    ]
+    read = sorted(staged, key=lambda r: (r["collected_at"], r["id"]))[:3]
+    assert [r["id"] for r in read] == [2, 4, 1]
+    ctx._conn.fetch = AsyncMock(return_value=read)
+
+    await WhatsappStagingMergeHandler._merge_batch(ctx.pool, batch_max=3)
+
+    assert _deleted_ids(ctx._conn) == {1, 2, 4}
+
+
+@pytest.mark.asyncio
+async def test_merge_batch_gap_id_between_read_ids_survives():
+    ctx = _make_ctx()
+    t = lambda d: datetime(2026, 9, 10, 0, 0, d, tzinfo=timezone.utc)
+    # collected_at order 1,3,4,2,5 → reads [1,3,4]; a min/max range would
+    # also delete unread id 2.
+    staged = [
+        _row(id=1, collected_at=t(10)),
+        _row(id=2, collected_at=t(40)),
+        _row(id=3, collected_at=t(20)),
+        _row(id=4, collected_at=t(30)),
+        _row(id=5, collected_at=t(50)),
+    ]
+    read = sorted(staged, key=lambda r: (r["collected_at"], r["id"]))[:3]
+    assert [r["id"] for r in read] == [1, 3, 4]
+    ctx._conn.fetch = AsyncMock(return_value=read)
+
+    await WhatsappStagingMergeHandler._merge_batch(ctx.pool, batch_max=3)
+
+    deleted = _deleted_ids(ctx._conn)
+    assert deleted == {1, 3, 4}
+    assert 2 not in deleted
 
 
 # ---------------------------------------------------------------------------

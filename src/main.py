@@ -45,9 +45,9 @@ async def init_db(pool):
     # P0-1/P0-2: single DDL authority. Applies base schemas/ then pending
     # migrations/ via the ledger-backed runner. The old code globbed schemas/
     # ONLY, silently omitting 19 live, code-referenced tables under migrations/.
-    from src.db.migrate import apply_all
+    from src.db.migrate import apply_all_with_retry
     from src.core.maintenance import run_collector_maintenance
-    await apply_all(pool)
+    await apply_all_with_retry(pool)
     await run_collector_maintenance(pool)
 
 

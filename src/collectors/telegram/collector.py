@@ -2011,22 +2011,31 @@ class TelegramCollector(
                         type(exc).__name__,
                     )
 
-        last_id = self.checkpoint.last_processed_id
-        try:
-            min_id = int(last_id) if last_id else 0
-        except (TypeError, ValueError):
-            min_id = 0
+        min_id = 0
+        if self.pool is not None:
+            try:
+                async with self.pool.acquire() as conn:
+                    min_id = int(await conn.fetchval(
+                        """
+                        SELECT COALESCE(MAX(CAST(split_part(m.platform_message_id, ':', 2) AS BIGINT)), 0)
+                        FROM telegram_messages m
+                        JOIN telegram_chats c ON c.id = m.chat_id
+                        WHERE c.platform_chat_id = $1
+                        """,
+                        chat_id,
+                    ) or 0)
+            except Exception:
+                logger.debug(
+                    "telegram/%s: per-chat min_id lookup failed", chat_name, exc_info=True
+                )
+                min_id = 0
         count = 0
-        seen_count = 0
-        last_seen_message_id: int | None = None
 
         async for message in client.iter_messages(entity, min_id=min_id, limit=None):
             if self._stop.is_set():
                 break
 
             await self.wait_rate_limit("telegram.org")
-            seen_count += 1
-            last_seen_message_id = int(message.id)
 
             sender_uuid = None
             if message.sender_id:
@@ -2055,21 +2064,6 @@ class TelegramCollector(
                 worker, message, chat_id, chat_name, chat_username
             ):
                 count += 1
-
-            if seen_count % self._batch_size == 0 and seen_count > 0:
-                await self.checkpoint.save_progress(str(last_seen_message_id))
-
-        # P3-6: flush the final partial batch. The per-batch save above only
-        # fires on exact _batch_size multiples, so the trailing remainder
-        # (up to _batch_size-1 messages) was never checkpointed — a SIGTERM or
-        # normal completion mid-remainder lost that cursor progress and forced
-        # re-collection on restart. Persist the last seen id unconditionally.
-        if last_seen_message_id is not None:
-            try:
-                await self.checkpoint.save_progress(str(last_seen_message_id))
-            except Exception:
-                logger.warning("telegram/%s: final checkpoint flush failed",
-                               chat_name, exc_info=True)
 
         if count > 0:
             logger.info(

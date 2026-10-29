@@ -82,15 +82,21 @@ function escapeHtml(s) { return String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp
 async function refresh() { await renderStatus(); await renderLog(); }
 
 async function load() {
-  const { ingestBase } = await chrome.storage.local.get(["ingestBase"]);
+  const { ingestBase, uc_bridge_secret } = await chrome.storage.local.get(["ingestBase", "uc_bridge_secret"]);
   $("ingest").value = ingestBase || DEFAULT_INGEST;
+  $("bridgeSecret").value = uc_bridge_secret || "";
   await refresh();
 }
 
 $("save").addEventListener("click", async () => {
   const ingestBase = $("ingest").value.trim() || DEFAULT_INGEST;
-  await chrome.storage.local.set({ ingestBase });
+  const uc_bridge_secret = $("bridgeSecret").value.trim();
+  await chrome.storage.local.set({ ingestBase, uc_bridge_secret });
   refresh();
+});
+
+$("bridgeSecret").addEventListener("change", async () => {
+  await chrome.storage.local.set({ uc_bridge_secret: $("bridgeSecret").value.trim() });
 });
 
 $("clear").addEventListener("click", async () => {

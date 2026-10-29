@@ -36,6 +36,7 @@ import {
   nativePageMatchesTarget,
   nativePageUsername,
 } from "./native_scrapers.js";
+import { bridgeHeaders } from "./shared/ingest_client.js";
 
 
 (() => {
@@ -387,11 +388,15 @@ async function directSendFallback(msg, error) {
     return proxied; // may be null; send() treats null as "no fallback"
   }
 
+  // With the PNA opt-in removed, a direct fetch here only works from
+  // extension-origin contexts; the normal path is content → SW message →
+  // background fetch, which is CORS-exempt. The header is still attached so
+  // the fallback is not rejected by the bridge's secret check.
   try {
     const response = await withDeadline(
       fetch(DIRECT_INGEST_BASE + request.path, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...(await bridgeHeaders()) },
         body: JSON.stringify(request.payload),
       }),
       timeoutMs,

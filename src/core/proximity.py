@@ -371,18 +371,16 @@ async def seed_proximity_backfill_targets(pool) -> dict[str, int]:
                     FROM resolved
                     GROUP BY platform_user_id, username
                 )
-                INSERT INTO instagram_spider_queue (platform_user_id, username, source, priority, status)
-                SELECT platform_user_id, username, 'proximity_t' || tier::text, tier, 'pending'
+                INSERT INTO spider_queue (
+                    platform, node_id, hop_distance, priority, status,
+                    attempts, discovery_type, source_table, idempotency_key
+                )
+                SELECT 'instagram', platform_user_id, 0, tier, 'pending',
+                       0, 'proximity', 'account_proximity_cache',
+                       'instagram:' || platform_user_id
                 FROM users
-                WHERE platform_user_id IS NOT NULL AND platform_user_id <> ''
-                ON CONFLICT (platform_user_id) DO UPDATE SET
-                    username = COALESCE(EXCLUDED.username, instagram_spider_queue.username),
-                    priority = LEAST(instagram_spider_queue.priority, EXCLUDED.priority),
-                    source = EXCLUDED.source,
-                    status = CASE
-                        WHEN instagram_spider_queue.status IN ('completed', 'processing') THEN instagram_spider_queue.status
-                        ELSE 'pending'
-                    END
+                WHERE platform_user_id ~ '^[0-9]+$'
+                ON CONFLICT (platform, idempotency_key) DO NOTHING
             """)
 
             out["instagram_targets"] = await _exec_count(conn, """

@@ -41,7 +41,33 @@ try:
     )
 except (TypeError, ValueError):
     SOCIAL_INGEST_STRUCTURED_BACKGROUND_CONCURRENCY = 2
-SOCIAL_INGEST_CLIENT_MAX_MB = int(os.getenv("SOCIAL_INGEST_CLIENT_MAX_MB", "512"))
+SOCIAL_INGEST_CLIENT_MAX_MB = int(os.getenv("SOCIAL_INGEST_CLIENT_MAX_MB", "256"))
+
+# Extension media download allowlist (SSRF guard). Comma-separated hosts;
+# entries are exact names or ``*.suffix`` wildcards. Operators extend this if
+# they ingest a platform whose CDN is not covered here; ``*`` alone is not
+# supported on purpose.
+BRIDGE_MEDIA_ALLOWED_HOSTS = [
+    h.strip().lower()
+    for h in os.getenv(
+        "BRIDGE_MEDIA_ALLOWED_HOSTS",
+        ",".join(
+            [
+                "*.cdninstagram.com",
+                "*.fbcdn.net",
+                "*.tiktokcdn.com",
+                "*.tiktokcdn-us.com",
+                "*.tiktokv.com",
+                "*.tiktokv.us",
+                "*.ibytedtos.com",
+                "*.twimg.com",
+                "*.googleusercontent.com",
+                "*.ggpht.com",
+            ]
+        ),
+    ).split(",")
+    if h.strip()
+]
 try:
     BROWSER_TELEMETRY_WRITE_TIMEOUT_SECONDS = max(
         0.25,

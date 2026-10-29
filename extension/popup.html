@@ -82,9 +82,12 @@
         <h2>Settings</h2>
         <label>Ingest endpoint</label>
         <input id="ingest" placeholder="http://127.0.0.1:8765" />
+        <label>Bridge secret</label>
+        <input id="bridgeSecret" type="password" placeholder="X-UC-Bridge-Secret" autocomplete="off" />
+        <p class="hint">Shared secret configured on the collector (BRIDGE_SHARED_SECRET). Required for every bridge request.</p>
         <p class="hint">The scrape loop runs continuously in your open social tab (rate-limited + jittered) — there's no interval to set.</p>
         <div class="btns">
-          <button id="save">Save endpoint</button>
+          <button id="save">Save settings</button>
         </div>
         <div class="btns">
           <button id="tabsBtn" class="primary">🗂 Open / manage social tabs</button>

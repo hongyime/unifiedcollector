@@ -41,14 +41,14 @@ services:
     shm_size: 1gb
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}"
       POSTGRES_DB: unifiedcollector
     ports:
       # Configurable host-side port. Default 5433 to avoid colliding with
       # any pre-existing local postgres on 5432 (e.g. another project's
       # docker postgres). Containers inside this compose network connect
       # via host=postgres:5432 — only the host-side mapping changes.
-      - "${POSTGRES_HOST_PORT:-5433}:5432"
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5433}:5432"
     volumes:
       - ./postgres/postgres.conf:/etc/postgresql/postgresql.conf
       - pgdata:/var/lib/postgresql/data
@@ -1007,8 +1007,9 @@ services:
     command: python -m src.bridges.ig_ingest
     mem_limit: 512m
     ports:
-      - "8765:8765"
+      - "127.0.0.1:8765:8765"
     environment:
+      BRIDGE_SHARED_SECRET: "${BRIDGE_SHARED_SECRET:?BRIDGE_SHARED_SECRET required}"
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
@@ -1025,7 +1026,7 @@ services:
       SOCIAL_INGEST_DM_SAMPLE_CONCURRENCY: "1"
       SOCIAL_INGEST_LANE_WAIT_SECONDS: "0.25"
       BROWSER_CONTENT_HINT_RESPONSE_TIMEOUT_SECONDS: "2.0"
-      UC_EXTENSION_EXPECTED_VERSION: "1.23.124"
+      UC_EXTENSION_EXPECTED_VERSION: "1.23.126"
     volumes:
       - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}/media:/media"
       - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/seagate-expansion/unifiedcollector}:/vault"
@@ -1059,7 +1060,7 @@ services:
       DB_POOL_MAX_SIZE: "4"
       # Operator status compares live Chrome hook heartbeats against this repo
       # extension build. Update with extension/manifest.json version bumps.
-      UC_EXTENSION_EXPECTED_VERSION: "1.23.124"
+      UC_EXTENSION_EXPECTED_VERSION: "1.23.126"
       # OSS-enrichment automation defaults: the scheduler seeds recon_targets
       # from social_users and tags scope.modules from RECON_USERNAME_MODULES.
       # Default "maigret" so newly-seeded username targets are routed through
@@ -1152,8 +1153,8 @@ services:
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
       REDIS_HOST: redis
-      REDIS_PASSWORD: ${REDIS_PASSWORD:-localdevredis123}
-      REDIS_URL: "redis://:${REDIS_PASSWORD:-localdevredis123}@redis:6379/0"
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD required}
+      REDIS_URL: "redis://:${REDIS_PASSWORD:?REDIS_PASSWORD required}@redis:6379/0"
       # 1 = on, 0 = off. Default on so a fresh deploy posts realtime by default.
       REALTIME_POST_FEED_ENABLED: "${REALTIME_POST_FEED_ENABLED:-1}"
       REALTIME_POST_FEED_MAX_PER_MINUTE: "${REALTIME_POST_FEED_MAX_PER_MINUTE:-18}"
@@ -1198,28 +1199,34 @@ services:
     container_name: unifiedcollector_dashboard
     mem_limit: 256m
     ports:
-      # Keep the original local dashboard URL alive while 8700 remains the
-      # canonical service port.
-      - "8001:8700"
-      - "8700:8700"
+      # Publish on loopback only: this is a single-user local deployment and the
+      # dashboard has auth disabled below, so it must never bind a public
+      # interface. Keep the original local dashboard URL alive while 8700
+      # remains the canonical service port.
+      - "127.0.0.1:8001:8700"
+      - "127.0.0.1:8700:8700"
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
-      UC_EXTENSION_EXPECTED_VERSION: "1.23.124"
+      UC_EXTENSION_EXPECTED_VERSION: "1.23.126"
       YOUTUBE_MAX_VIDEO_DURATION_MINUTES: "0"
       STRAVA_ROUTE_STREAM_SHARED_COOLDOWN: "true"
       STRAVA_BROWSER_ROUTE_QUEUE_CANDIDATE_LIMIT: "50"
       STRAVA_BROWSER_ROUTE_QUEUE_IMPORTANT_CANDIDATE_LIMIT: "100"
-      # Localhost-only single-user deployment: skip bearer-token auth so the
-      # dashboard works without a login flow. Remove/false for network exposure.
-      DASHBOARD_AUTH_DISABLED: "true"
+      # Localhost-only single-user deployment: default to skipping bearer-token
+      # auth so the dashboard works without a login flow. Override to "false"
+      # to require auth before exposing anything beyond loopback.
+      # NOTE: compose interpolation reads the compose project env (`docker/.env`
+      # or a shell export), NOT ./env/dashboard.env -- env_file only feeds the
+      # container at runtime and cannot drive this substitution.
+      DASHBOARD_AUTH_DISABLED: "${DASHBOARD_AUTH_DISABLED:-true}"
       DB_POOL_MIN_SIZE: "2"
       DB_POOL_MAX_SIZE: "16"
       DASHBOARD_DB_ACQUIRE_TIMEOUT_SECONDS: "15"
       WA_BRIDGE_HEALTH_TIMEOUT_SECONDS: "5"
-      WA_BRIDGE_1_FALLBACK_URL: "http://host.docker.internal:3011"
-      WA_BRIDGE_2_FALLBACK_URL: "http://host.docker.internal:3012"
+      WA_BRIDGE_1_FALLBACK_URL: "http://wa-bridge-1:3001"
+      WA_BRIDGE_2_FALLBACK_URL: "http://wa-bridge-2:3001"
       GITHUB_QUOTA_PUSHER_ENABLED: "true"
       GITHUB_QUOTA_PUSHER_TARGET_RATIO: "0.80"
       GITHUB_QUOTA_PUSHER_MAX_CONCURRENT: "12"
@@ -1253,7 +1260,7 @@ services:
     restart: unless-stopped
     environment:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-wac_user}
-      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-localdevrabbit123}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD required}
       RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_VHOST:-/}
       RABBITMQ_NODENAME: rabbit@rabbitmq
       RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: "+S 2:2"
@@ -1280,14 +1287,14 @@ services:
     mem_limit: 256m
     init: true
     restart: unless-stopped
-    command: redis-server --requirepass ${REDIS_PASSWORD:-localdevredis123} --appendonly yes --appendfsync everysec
+    command: redis-server --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD required} --appendonly yes --appendfsync everysec
     volumes:
       - redis_data:/data
     env_file:
       - ./env/common.env
       - ./env/broker.env
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-localdevredis123}", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:?REDIS_PASSWORD required}", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -1302,8 +1309,8 @@ services:
     environment:
       SESSION_NAME: session_1
       AUTH_STORAGE_PATH: /app/auth_info/account1
-      WHATSAPP_RABBITMQ_URL: amqp://${RABBITMQ_USER:-wac_user}:${RABBITMQ_PASSWORD:-localdevrabbit123}@rabbitmq:5672/
-      RABBITMQ_URL: amqp://${RABBITMQ_USER:-wac_user}:${RABBITMQ_PASSWORD:-localdevrabbit123}@rabbitmq:5672/
+      WHATSAPP_RABBITMQ_URL: amqp://${RABBITMQ_USER:-wac_user}:${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD required}@rabbitmq:5672/
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-wac_user}:${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD required}@rabbitmq:5672/
       SYNC_FULL_HISTORY: "true"
       # On-demand deep history: actively pull older messages per chat (was stuck
       # ~9 days). Paced; 36500d = effectively all the phone still holds.
@@ -1313,10 +1320,10 @@ services:
       WHATSAPP_MAX_BACKFILL_AGE_DAYS: "36500"
       WHATSAPP_UNPAIRED_QR_RECONNECT_MS: "5000"
       WHATSAPP_QR_STABILITY_MS: "45000"
-      WHATSAPP_MEDIA_BRIDGE_SECRET: ${WHATSAPP_MEDIA_BRIDGE_SECRET:-localdevmediabridgesecretkey12345678}
+      WHATSAPP_MEDIA_BRIDGE_SECRET: ${WHATSAPP_MEDIA_BRIDGE_SECRET:?WHATSAPP_MEDIA_BRIDGE_SECRET required}
       LOG_LEVEL: info
     ports:
-      - "3011:3001"
+      - "127.0.0.1:3011:3001"
     volumes:
       - ../sessions/whatsapp:/app/auth_info
       # live-mount compiled build/ so code changes apply on recreate (no image
@@ -1344,8 +1351,8 @@ services:
     environment:
       SESSION_NAME: session_2
       AUTH_STORAGE_PATH: /app/auth_info/account2
-      WHATSAPP_RABBITMQ_URL: amqp://${RABBITMQ_USER:-wac_user}:${RABBITMQ_PASSWORD:-localdevrabbit123}@rabbitmq:5672/
-      RABBITMQ_URL: amqp://${RABBITMQ_USER:-wac_user}:${RABBITMQ_PASSWORD:-localdevrabbit123}@rabbitmq:5672/
+      WHATSAPP_RABBITMQ_URL: amqp://${RABBITMQ_USER:-wac_user}:${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD required}@rabbitmq:5672/
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-wac_user}:${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD required}@rabbitmq:5672/
       SYNC_FULL_HISTORY: "true"
       # On-demand deep history (see wa-bridge-1).
       WHATSAPP_DEEP_BACKFILL: "true"
@@ -1354,10 +1361,10 @@ services:
       WHATSAPP_MAX_BACKFILL_AGE_DAYS: "36500"
       WHATSAPP_UNPAIRED_QR_RECONNECT_MS: "5000"
       WHATSAPP_QR_STABILITY_MS: "45000"
-      WHATSAPP_MEDIA_BRIDGE_SECRET: ${WHATSAPP_MEDIA_BRIDGE_SECRET:-localdevmediabridgesecretkey12345678}
+      WHATSAPP_MEDIA_BRIDGE_SECRET: ${WHATSAPP_MEDIA_BRIDGE_SECRET:?WHATSAPP_MEDIA_BRIDGE_SECRET required}
       LOG_LEVEL: info
     ports:
-      - "3012:3001"
+      - "127.0.0.1:3012:3001"
     volumes:
       - ../sessions/whatsapp:/app/auth_info
       - ../src/bridges/whatsapp/build:/app/build
