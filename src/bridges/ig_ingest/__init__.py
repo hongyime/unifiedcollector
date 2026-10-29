@@ -620,6 +620,38 @@ def _download_headers(platform: str, url: str, item: dict | None = None) -> dict
     return headers
 
 
+BRIDGE_MEDIA_MAX_BYTES = 200 * 1024 * 1024
+
+
+class BridgeMediaRejected(ValueError):
+    """Extension-supplied media URL failed the SSRF/allowlist gate."""
+
+
+def _is_allowed_media_host(hostname: str) -> bool:
+    host = (hostname or "").lower().rstrip(".")
+    for pattern in BRIDGE_MEDIA_ALLOWED_HOSTS:
+        pattern = pattern.lower().strip().rstrip(".")
+        if pattern.startswith("*."):
+            suffix = pattern[1:]
+            if host.endswith(suffix) and host != suffix[1:]:
+                return True
+        elif host == pattern:
+            return True
+    return False
+
+
+def _validate_media_url(url: str) -> None:
+    parsed = urlparse(url or "")
+    if parsed.scheme != "https":
+        raise BridgeMediaRejected(f"scheme not allowed: {parsed.scheme or 'none'}")
+    try:
+        hostname = parsed.hostname
+    except ValueError as exc:
+        raise BridgeMediaRejected(f"invalid host: {exc}") from exc
+    if not _is_allowed_media_host(hostname):
+        raise BridgeMediaRejected(f"host not allowed: {hostname or 'none'}")
+
+
 def _threads_media_content_base_id(platform: str, content_id: str, sha256: str | None = None) -> str:
     """Stabilize extension-generated Threads media IDs with the stored bytes.
 
@@ -1487,6 +1519,10 @@ async def _download_and_save(pool, session, platform, username, item, reject_sta
                 return _reject("bad_uploaded_media", exc.__class__.__name__)
             ct_header = item.get("mime_type") or item.get("content_type_header")
         else:
+            try:
+                _validate_media_url(url)
+            except BridgeMediaRejected as exc:
+                return _reject("blocked_url", str(exc))
             async with session.get(
                 url,
                 headers=_download_headers(platform, url, item),
@@ -1494,8 +1530,23 @@ async def _download_and_save(pool, session, platform, username, item, reject_sta
             ) as r:
                 if r.status != 200:
                     return _reject("http_status", str(r.status))
+                try:
+                    _validate_media_url(str(r.url or url))
+                except BridgeMediaRejected as exc:
+                    return _reject("blocked_url", f"redirect {exc}")
                 ct_header = r.headers.get("content-type")
-                data = await r.read()
+                limit = BRIDGE_MEDIA_MAX_BYTES
+                chunks: list[bytes] = []
+                total = 0
+                while True:
+                    chunk = await r.content.read(64 * 1024)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > limit:
+                        return _reject("media_too_large", f">{limit} bytes")
+                    chunks.append(chunk)
+                data = b"".join(chunks)
 
         # GATE: keep only real PDF/image/video/audio above min size — drop
         # favicons, thumbnails, tracking pixels, sprite sheets, HTML error pages.
