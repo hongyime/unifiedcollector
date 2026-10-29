@@ -728,13 +728,14 @@ async def whatsapp_link_page(_user: dict = Depends(require_role("viewer"))):
  </div>
 <script>
 function esc(s){return String(s||'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));}
+function authHeaders(){try{const t=localStorage.getItem('auth_token');return t?{Authorization:'Bearer '+t}:{};}catch(e){return {};}}
 async function fetchJsonWithRetry(url, tries){
   let lastErr=null;
   for(let i=0;i<(tries||2);i++){
     const ctrl=new AbortController();
     const timer=setTimeout(()=>ctrl.abort(),12000);
     try{
-      const r=await fetch(url,{cache:'no-store',credentials:'same-origin',signal:ctrl.signal});
+      const r=await fetch(url,{cache:'no-store',credentials:'same-origin',signal:ctrl.signal,headers:authHeaders()});
       clearTimeout(timer);
       if(!r.ok) throw new Error('HTTP '+r.status);
       return await r.json();
@@ -754,7 +755,7 @@ async function pairCode(b){
   try{
     const r=await fetch('/whatsapp/'+b+'/pairing-code',{
       method:'POST',
-      headers:{'Content-Type':'application/json'},
+      headers:{'Content-Type':'application/json',...authHeaders()},
       credentials:'same-origin',
       body:JSON.stringify({phone})
     });
