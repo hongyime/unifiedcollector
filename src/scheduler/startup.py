@@ -30,9 +30,9 @@ async def init_db(pool) -> None:
     boot path is importable and testable without a full Scheduler.
     """
     # P0-1/P0-2: ledger-backed runner applies schemas/ + migrations/.
-    from src.db.migrate import apply_all
+    from src.db.migrate import apply_all_with_retry
     from src.core.maintenance import run_collector_maintenance
-    await apply_all(pool)
+    await apply_all_with_retry(pool)
     await run_collector_maintenance(pool)
 
 
