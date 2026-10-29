@@ -86,9 +86,11 @@ logger = logging.getLogger("social_ingest")
 # ``src.bridges.ig_ingest.<CONSTANT>`` keep working.
 from .constants import *  # noqa: E402,F401,F403 -- re-export
 from .constants import (
+    BRIDGE_MEDIA_ALLOWED_HOSTS,
     BROWSER_CONTENT_HINT_TTL_SECONDS,
     BROWSER_CONTENT_STALE_SECONDS,
     BROWSER_DIAGNOSTIC_PLATFORMS,
+    BROWSER_HEARTBEAT_ONLY_PLATFORMS,
     BROWSER_TELEMETRY_WRITE_TIMEOUT_SECONDS,
     DL_CONCURRENCY,
     KNOWN_PLATFORMS,

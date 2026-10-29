@@ -24,7 +24,7 @@ Usage:
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from enum import Enum
 
 logger = logging.getLogger(__name__)

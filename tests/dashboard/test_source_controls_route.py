@@ -15,7 +15,6 @@ os.environ.setdefault("DASHBOARD_ADMIN_PASSWORD", "x")
 os.environ.pop("DASHBOARD_AUTH_DISABLED", None)
 
 import jwt  # noqa: E402
-import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from src.dashboard.api import app  # noqa: E402
