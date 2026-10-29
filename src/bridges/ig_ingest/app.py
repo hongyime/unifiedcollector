@@ -40,6 +40,8 @@ from .ingest import (
     ingest_upload_binary,
 )
 from .middleware import (
+    bridge_auth_middleware,
+    bridge_cors_middleware,
     db_pool_middleware,
     lane_isolation_middleware,
     request_timeout_middleware,
@@ -82,7 +84,13 @@ def build_app():
 
     app = web.Application(
         client_max_size=SOCIAL_INGEST_CLIENT_MAX_MB * 1024 * 1024,
-        middlewares=[request_timeout_middleware, lane_isolation_middleware, db_pool_middleware],
+        middlewares=[
+            bridge_cors_middleware,
+            bridge_auth_middleware,
+            request_timeout_middleware,
+            lane_isolation_middleware,
+            db_pool_middleware,
+        ],
     )
     app.router.add_route("OPTIONS", "/{tail:.*}", handle_options)
     # generic multi-platform

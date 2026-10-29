@@ -21,6 +21,8 @@ etc.).
 """
 import asyncio
 import logging
+import os
+import secrets
 
 from aiohttp import web
 
@@ -135,6 +137,42 @@ def _request_timeout_seconds(path: str) -> float:
     if path in _STRUCTURED_CAPTURE_PATHS:
         return _structured
     return _default
+
+
+_BRIDGE_AUTH_EXEMPT_GET = frozenset({"/health", "/livez"})
+_BRIDGE_SECRET_HEADER = "X-UC-Bridge-Secret"
+
+
+def _bridge_cors_origins() -> set[str]:
+    raw = os.getenv("BRIDGE_CORS_ALLOWED_ORIGINS", "")
+    return {origin.strip() for origin in raw.split(",") if origin.strip()}
+
+
+@web.middleware
+async def bridge_cors_middleware(request, handler):
+    resp = await handler(request)
+    origin = request.headers.get("Origin")
+    if origin and origin in _bridge_cors_origins() and isinstance(resp, web.Response):
+        resp.headers["Access-Control-Allow-Origin"] = origin
+        resp.headers["Vary"] = "Origin"
+    return resp
+
+
+@web.middleware
+async def bridge_auth_middleware(request, handler):
+    # Env read per request (tests patch it); unset secret fails closed;
+    # OPTIONS is exempt so browser preflight is not 401'd.
+    if request.method == "OPTIONS":
+        return await handler(request)
+    if request.method == "GET" and request.path in _BRIDGE_AUTH_EXEMPT_GET:
+        return await handler(request)
+    expected = os.getenv("BRIDGE_SHARED_SECRET") or ""
+    supplied = request.headers.get(_BRIDGE_SECRET_HEADER) or ""
+    if not expected or not secrets.compare_digest(supplied, expected):
+        return web.json_response(
+            {"ok": False, "error": "missing or invalid bridge secret"}, status=401
+        )
+    return await handler(request)
 
 
 @web.middleware
