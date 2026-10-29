@@ -1423,4 +1423,3 @@ volumes:
   rabbitmq_data:
   redis_data:
   sessions_data:
-
