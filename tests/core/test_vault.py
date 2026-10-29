@@ -848,3 +848,57 @@ def test_assert_media_write_allowed_rejects_unlinked_media_mount(tmp_path):
 
     with pytest.raises(RuntimeError, match="not linked to vault media"):
         vault.assert_media_write_allowed(media / "instagram" / "a.jpg", root=root, media_root=media)
+
+
+def test_finalize_fallback_copy_failure_leaves_no_partial_blob(tmp_path, monkeypatch):
+    root = tmp_path / "vault"
+    root.mkdir()
+    data = b"poison-check-payload"
+    digest = hashlib.sha256(data).hexdigest()
+    blob_path = vault.blob_path_for_sha256(digest, extension="bin", root=root)
+
+    real_replace = Path.replace
+    rename_attempts = {"count": 0}
+
+    def fail_first_rename(self, target):
+        rename_attempts["count"] += 1
+        if rename_attempts["count"] == 1:
+            raise OSError("simulated rename failure")
+        return real_replace(self, target)
+
+    def truncated_copy(src, dst, *args, **kwargs):
+        content = Path(src).read_bytes()
+        Path(dst).write_bytes(content[: len(content) // 2])
+        raise OSError("simulated copy failure")
+
+    monkeypatch.setattr(Path, "replace", fail_first_rename)
+    monkeypatch.setattr(vault.shutil, "copy2", truncated_copy)
+
+    failed = vault.write_atomic_artifact(
+        source="test",
+        artifact_id="poison-check",
+        artifact_kind="media",
+        data=data,
+        extension="bin",
+        root=root,
+    )
+
+    assert failed.ok is False
+    assert failed.partial is False
+    assert not blob_path.exists()
+    assert not list(blob_path.parent.glob("*.part-*"))
+    assert not list((root / "media" / ".tmp").iterdir())
+
+    second = vault.write_atomic_artifact(
+        source="test",
+        artifact_id="poison-check",
+        artifact_kind="media",
+        data=data,
+        extension="bin",
+        root=root,
+    )
+
+    assert second.ok is True
+    assert second.sha256 == digest
+    assert blob_path.read_bytes() == data
+    assert not list(blob_path.parent.glob("*.part-*"))
