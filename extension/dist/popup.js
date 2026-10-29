@@ -111,14 +111,19 @@
     await renderLog();
   }
   async function load() {
-    const { ingestBase: ingestBase2 } = await chrome.storage.local.get(["ingestBase"]);
+    const { ingestBase: ingestBase2, uc_bridge_secret } = await chrome.storage.local.get(["ingestBase", "uc_bridge_secret"]);
     $("ingest").value = ingestBase2 || DEFAULT_INGEST;
+    $("bridgeSecret").value = uc_bridge_secret || "";
     await refresh();
   }
   $("save").addEventListener("click", async () => {
     const ingestBase2 = $("ingest").value.trim() || DEFAULT_INGEST;
-    await chrome.storage.local.set({ ingestBase: ingestBase2 });
+    const uc_bridge_secret = $("bridgeSecret").value.trim();
+    await chrome.storage.local.set({ ingestBase: ingestBase2, uc_bridge_secret });
     refresh();
+  });
+  $("bridgeSecret").addEventListener("change", async () => {
+    await chrome.storage.local.set({ uc_bridge_secret: $("bridgeSecret").value.trim() });
   });
   $("clear").addEventListener("click", async () => {
     await clearLog();
