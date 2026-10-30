@@ -96,7 +96,11 @@ for _ in $(seq 1 30); do
   sleep 1
 done
 [[ $ready == true ]] || die 'disposable restore database did not become ready'
-docker exec -u postgres "$container" pg_restore --exit-on-error --no-owner --no-privileges \
+# The host-owned private dump stays mode 600 on its read-only bind mount. Run
+# only this client as container root so it can read that file; it still
+# connects as the database role postgres and never writes outside the
+# disposable volume.
+docker exec -u 0 "$container" pg_restore --exit-on-error --no-owner --no-privileges \
   --host=/var/run/postgresql --username=postgres --dbname=unifiedcollector /task-53-forward.dump \
   >"$logs/pg_restore.stdout" 2>"$logs/pg_restore.stderr" || die 'disposable forward pg_restore failed'
 docker cp "$cursor_export" "$container:/tmp/task-53-cursor-queue.json"
