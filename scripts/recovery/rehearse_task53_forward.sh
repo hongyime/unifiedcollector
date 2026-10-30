@@ -56,6 +56,10 @@ fi
 
 logs=$(mktemp -d "$evidence/task-53-rehearsal-XXXXXXXX")
 media_stage=$(mktemp -d "$evidence/task-53-rehearsal-media-XXXXXXXX")
+# The union verifier creates its own new stage and rejects reuse. Reserve a
+# private collision-resistant pathname, then release the empty directory so
+# the verifier can prove it did not inherit staged media from another run.
+rmdir -- "$media_stage"
 docker volume inspect "$volume" >/dev/null 2>&1 && die "refusing to reuse existing rehearsal volume: $volume"
 docker inspect "$container" >/dev/null 2>&1 && die "refusing to reuse existing rehearsal restore container"
 
