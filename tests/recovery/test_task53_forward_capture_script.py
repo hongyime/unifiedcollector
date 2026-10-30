@@ -18,4 +18,5 @@ def test_task53_forward_rehearsal_is_disposable_and_requires_a_verified_dump() -
     assert 'task53_cursor_queue_import' in text
     assert 'verify_task53_media_union.py' in text
     assert 'task-53-rehearsal-media-' in text
+    assert 'rmdir -- "$media_stage"' in text
     assert 'unifiedcollector_pgdata_recovered' not in text
