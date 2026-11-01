@@ -25,9 +25,10 @@ from pathlib import Path
 COMPOSE = Path(__file__).resolve().parents[2] / "docker" / "docker-compose.yml"
 
 # Reviewed Compose state after task-42 security hardening, Task 41's one-shot
-# schema-init gate, Task 43's read-only cutover pause marker for watchdog, and
-# the WhatsApp-only durable raw-payload spool on the existing sessions volume.
-FROZEN_COMPOSE_SHA256 = "f411fd889a4ea81d80b1c6428428b2b2c7f0cf72913fa90feb42861faeee28d4"
+# schema-init gate, Task 43's read-only cutover pause marker for watchdog, the
+# WhatsApp-only durable raw-payload spool, and Task 56's extension version
+# alignment for browser_ingest, scheduler, and dashboard.
+FROZEN_COMPOSE_SHA256 = "55563d3763f4a614fa7859686786d100204b3f90b0dea1d0440f98d3c57088c0"
 
 # The reconciled intended storage root (task 29).
 INTENDED_ROOT = "/media/sg-ultra/unifiedcollector"

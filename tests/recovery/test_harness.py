@@ -207,21 +207,22 @@ async def test_cursor_upsert_update_read(pg_conn) -> None:
     assert cursor["status"] == "running"
 
 
-def test_zz_teardown_removes_disposable_resources(disposable_pg: DisposablePostgres) -> None:
-    """Runs last by definition order; calls teardown explicitly and proves it."""
-    if not disposable_pg.owned:
-        pytest.skip("external UC_RECOVERY_TEST_DSN: no Docker resources are owned")
+def test_zz_teardown_removes_disposable_resources() -> None:
+    """Prove teardown on an owned harness without stopping the session fixture."""
+    harness = DisposablePostgres.start()
+    try:
+        before = list_test_resources(harness.run_id)
+        assert harness.container_name in before["containers"]
+        assert harness.volume_name in before["volumes"]
+        assert harness.network_name in before["networks"]
 
-    before = list_test_resources(disposable_pg.run_id)
-    assert disposable_pg.container_name in before["containers"]
-    assert disposable_pg.volume_name in before["volumes"]
-    assert disposable_pg.network_name in before["networks"]
+        harness.stop()
+        harness.stop()  # idempotent
 
-    disposable_pg.stop()
-    disposable_pg.stop()  # idempotent: the fixture finalizer calls it again
-
-    after = list_test_resources(disposable_pg.run_id)
-    assert after == {"containers": [], "volumes": [], "networks": []}, after
+        after = list_test_resources(harness.run_id)
+        assert after == {"containers": [], "volumes": [], "networks": []}, after
+    finally:
+        harness.stop()
 
 
 def test_harness_module_documents_disposable_rules() -> None:
