@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 NFT_TABLE = "recon_egress"
 NFT_MARKER = "uc-recon-egress-v1"
 MAX_RECON_EGRESS_BYTES = 1_073_741_824
+DEFAULT_DATABASE_REFRESH_SECONDS = 30
 DEFAULT_GUARD_SOCKET = Path("/var/lib/unifiedcollector/recon-guard/status.sock")
 _Resolver = Callable[..., list[tuple]]
 
@@ -286,7 +287,7 @@ def install_network_policy(
     *,
     database_port: int = 5432,
     runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
-) -> None:
+) -> tuple[str, ...]:
     addresses = _database_addresses(database_host, database_port)
     exists = runner(
         ["nft", "list", "table", "inet", NFT_TABLE],
@@ -320,10 +321,31 @@ def install_network_policy(
         runner=runner, use_guard_socket=False
     ):
         raise RuntimeError(f"failed to install public-only recon firewall: {(result.stderr or '')[:300]}")
+    return addresses
+
+
+def _refresh_database_policy(
+    database_host: str, known_addresses: tuple[str, ...]
+) -> tuple[tuple[str, ...], bool]:
+    """Reinstall only when Docker DNS moves the exact database allow-rule."""
+    addresses = _database_addresses(database_host, 5432)
+    if addresses == known_addresses:
+        return known_addresses, False
+    return install_network_policy(database_host), True
+
+
+def _database_refresh_seconds() -> int:
+    try:
+        value = int(os.getenv("RECON_EGRESS_DATABASE_REFRESH_SECONDS", str(DEFAULT_DATABASE_REFRESH_SECONDS)))
+    except ValueError as exc:
+        raise RuntimeError("RECON_EGRESS_DATABASE_REFRESH_SECONDS must be an integer") from exc
+    if not 5 <= value <= 3600:
+        raise RuntimeError("RECON_EGRESS_DATABASE_REFRESH_SECONDS must be between 5 and 3600")
+    return value
 
 
 async def serve_guard(database_host: str) -> None:
-    install_network_policy(database_host)
+    database_addresses = install_network_policy(database_host)
     socket_path = Path(os.getenv("RECON_EGRESS_GUARD_SOCKET", str(DEFAULT_GUARD_SOCKET)))
     socket_path.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -355,7 +377,19 @@ async def serve_guard(database_host: str) -> None:
             pass
     logger.info("recon public-only egress policy installed")
     try:
-        await stop.wait()
+        refresh_seconds = _database_refresh_seconds()
+        while not stop.is_set():
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=refresh_seconds)
+            except TimeoutError:
+                try:
+                    database_addresses, refreshed = _refresh_database_policy(
+                        database_host, database_addresses
+                    )
+                    if refreshed:
+                        logger.info("recon database allow-rule refreshed after address change")
+                except Exception as exc:  # noqa: BLE001 - retain the last known fail-closed policy
+                    logger.warning("recon database allow-rule refresh failed: %s", exc)
     finally:
         server.close()
         await server.wait_closed()
