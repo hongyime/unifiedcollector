@@ -295,7 +295,7 @@ async function runBrowserRevisitWatchdog(alarmName) {
 let _scrapeConfigDisabled = new Set();
 let _scrapeConfigFetchedAt = 0;
 const SCRAPE_CONFIG_TTL_MS = 60000;
-async function refreshScrapeConfig(base) {
+async function refreshScrapeConfig() {
   const now = Date.now();
   if (now - _scrapeConfigFetchedAt < SCRAPE_CONFIG_TTL_MS) return;
   _scrapeConfigFetchedAt = now;
@@ -304,7 +304,8 @@ async function refreshScrapeConfig(base) {
     const timer = setTimeout(() => ctrl.abort(), 5000);
     let r;
     try {
-      r = await fetch(base + "/social/scrape-config", { signal: ctrl.signal, headers: await bridgeHeaders() });
+      const control = await controlBase();
+      r = await fetch(control + "/social/scrape-config", { signal: ctrl.signal, headers: await bridgeHeaders() });
     } finally {
       clearTimeout(timer);
     }
@@ -317,11 +318,11 @@ async function refreshScrapeConfig(base) {
     /* fail-open: keep previous set; never block scraping on a config blip */
   }
 }
-async function platformScrapeDisabled(platform, base) {
+async function platformScrapeDisabled(platform) {
   const id = platform && (platform.id || platform.label);
   if (!id) return false;
   try {
-    await refreshScrapeConfig(base || (await controlBase()));
+    await refreshScrapeConfig();
   } catch (e) { return false; }
   return _scrapeConfigDisabled.has(String(id).toLowerCase());
 }
@@ -806,7 +807,7 @@ async function maybeForceScrapeCycle(tab, platform, responseBody, reason, base =
   if (!body) return;
   // G3-wire: honor the rotator. If this platform is rotated off, do not force a
   // scrape cycle for it (reduces shared-Chrome contention). Fail-open on error.
-  if (await platformScrapeDisabled(platform, base)) {
+  if (await platformScrapeDisabled(platform)) {
     return;
   }
   const reloadScheduled = await maybeAutoReloadExtension(base, tab, platform, body, reason);

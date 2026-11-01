@@ -88,6 +88,14 @@ def test_extension_expected_version_matches_manifest():
     assert lock["version"] == lock["packages"][""]["version"] == manifest["version"]
 
 
+def test_rotator_scrape_config_uses_the_dashboard_control_plane():
+    source = (ROOT / "extension/src/background.ts").read_text(encoding="utf-8")
+
+    assert 'const control = await controlBase();' in source
+    assert 'fetch(control + "/social/scrape-config"' in source
+    assert 'platformScrapeDisabled(platform, base)' not in source
+
+
 def test_content_script_has_install_guard_for_manifest_reload():
     content = _read("extension/content.js").strip()
     # esbuild wraps every bundle in "use strict"; then an outer IIFE, and
