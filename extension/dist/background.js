@@ -328,7 +328,7 @@
   var _scrapeConfigDisabled = /* @__PURE__ */ new Set();
   var _scrapeConfigFetchedAt = 0;
   var SCRAPE_CONFIG_TTL_MS = 6e4;
-  async function refreshScrapeConfig(base) {
+  async function refreshScrapeConfig() {
     const now = Date.now();
     if (now - _scrapeConfigFetchedAt < SCRAPE_CONFIG_TTL_MS) return;
     _scrapeConfigFetchedAt = now;
@@ -337,7 +337,8 @@
       const timer = setTimeout(() => ctrl.abort(), 5e3);
       let r;
       try {
-        r = await fetch(base + "/social/scrape-config", { signal: ctrl.signal });
+        const control = await controlBase();
+        r = await fetch(control + "/social/scrape-config", { signal: ctrl.signal, headers: await bridgeHeaders() });
       } finally {
         clearTimeout(timer);
       }
@@ -349,11 +350,11 @@
     } catch (e) {
     }
   }
-  async function platformScrapeDisabled(platform, base) {
+  async function platformScrapeDisabled(platform) {
     const id = platform && (platform.id || platform.label);
     if (!id) return false;
     try {
-      await refreshScrapeConfig(base || await controlBase());
+      await refreshScrapeConfig();
     } catch (e) {
       return false;
     }
@@ -823,7 +824,7 @@
   async function maybeForceScrapeCycle(tab, platform, responseBody, reason, base = null) {
     const body = parseHeartbeatResponseBody(responseBody);
     if (!body) return;
-    if (await platformScrapeDisabled(platform, base)) {
+    if (await platformScrapeDisabled(platform)) {
       return;
     }
     const reloadScheduled = await maybeAutoReloadExtension(base, tab, platform, body, reason);
