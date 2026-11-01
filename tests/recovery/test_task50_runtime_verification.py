@@ -45,6 +45,21 @@ def test_runtime_receipt_covers_the_recon_services_in_the_approved_set() -> None
     specs = {spec.service: spec for spec in SPECS}
     assert specs["recon_egress_guard"].artifact == "recon-egress-guard"
     assert specs["collector_spiderfoot"].artifact == "spiderfoot"
+    assert specs["browser_ingest"].artifact == "collector"
+    assert specs["scheduler"].artifact == "scheduler"
+
+
+def test_runtime_receipt_uses_baseline_artifacts_for_unchanged_services() -> None:
+    spec = ServiceSpec("collector_paypal", "paypal", "collector", "/src", "/artifact")
+    receipt = collect(
+        {"schema_version": 1, "task": 44, "artifacts": [_artifact("collector", "sha256:refreshed")]},
+        {"schema_version": 1, "task": 49},
+        baseline_runtime={"schema_version": 1, "task": 44, "artifacts": [_artifact("collector", "sha256:baseline")]},
+        inspect=lambda _: _inspect("sha256:baseline"),
+        container_sha=lambda _container, path: "a" * 64 if path == "/src" else "b" * 64,
+        specs=(spec,),
+    )
+    assert receipt["services"][0]["release"] == "baseline"
 
 
 def test_production_whatsapp_bridge_retains_source_for_runtime_hashing() -> None:
