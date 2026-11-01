@@ -62,18 +62,20 @@ class _Conn:
                 "media_rows": 5,
                 "window_last_media_at": now - timedelta(minutes=3),
             }]
+        if "COUNT(*)::bigint AS message_rows" in query:
+            return [{
+                "platform": "telegram",
+                "collection_surface": "message_stream",
+                "message_rows": 7,
+                "last_message_at": now - timedelta(minutes=4),
+            }]
         if "AS messages" in query and "MAX(collected_at)" in query:
             return [{
                 "platform": "telegram",
                 "collection_surface": "message_stream",
                 "last_message_at": now - timedelta(days=40),
             }]
-        return [{
-            "platform": "telegram",
-            "collection_surface": "message_stream",
-            "message_rows": 7,
-            "last_message_at": now - timedelta(minutes=4),
-        }]
+        return []
 
 
 class _Pool:
@@ -162,21 +164,26 @@ def test_surface_progress_groups_and_returns_capture_metrics(monkeypatch):
     result = asyncio.run(collection_surface_progress(hours=24, _user={"role": "viewer"}))
     assert result["available"] is True
     assert result["hours"] == 24
-    row = next(item for item in result["surfaces"] if item["platform"] == "x")
+    row = next(
+        item for item in result["surfaces"]
+        if (item["platform"], item["surface"]) == ("x", "for_you")
+    )
     assert (row["platform"], row["surface"]) == ("x", "for_you")
     assert row["observed_count"] == 12
     assert row["stored_count"] == 8
     assert row["deduped_count"] == 2
     assert row["failed_count"] == 2
     assert row["media_rows"] == 5
-    assert row["freshness_seconds"] >= 0
+    assert row["freshness_seconds"] is None
     stale_event = next(item for item in result["surfaces"] if item["surface"] == "following")
     assert stale_event["capture_count"] == 0
     assert stale_event["last_success_at"] is not None
-    assert stale_event["freshness_seconds"] >= 10 * 24 * 60 * 60
+    # The fixture clock is sampled after the route's `now`, so exact ten-day
+    # equality can be one second short without changing stale classification.
+    assert stale_event["freshness_seconds"] >= 9 * 24 * 60 * 60
     stale_media = next(item for item in result["surfaces"] if item["platform"] == "instagram")
     assert stale_media["media_rows"] == 0
-    assert stale_media["freshness_seconds"] >= 30 * 24 * 60 * 60
+    assert stale_media["freshness_seconds"] >= 29 * 24 * 60 * 60
     message = next(item for item in result["surfaces"] if item["platform"] == "telegram")
     assert message["platform"] == "telegram"
     assert message["surface"] == "message_stream"

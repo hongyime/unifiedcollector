@@ -827,12 +827,9 @@ async def test_quota_pusher_runs_spider_with_override_limits(monkeypatch):
 async def test_edge_fetcher_yields_followers():
     coll = _new_collector()
 
-    # Stub out _paginate so we don't go near httpx.
-    async def fake_paginate(client, url, **kw):
-        assert "/followers" in url
-        return [{"login": "x"}, {"login": "y"}, {}]  # last is dropped
-
-    coll._paginate = AsyncMock(side_effect=fake_paginate)
+    response = MagicMock()
+    response.json.return_value = [{"login": "x"}, {"login": "y"}, {}]
+    coll._api_get = AsyncMock(return_value=response)
 
     # _make_client must yield *something*; the EdgeFetcher just needs the CM.
     http = MagicMock()
@@ -845,6 +842,7 @@ async def test_edge_fetcher_yields_followers():
 
     assert [e.target for e in edges] == ["x", "y"]
     assert all(e.source == "octocat" for e in edges)
+    assert "/followers" in coll._api_get.await_args.args[1]
 
 
 @pytest.mark.asyncio

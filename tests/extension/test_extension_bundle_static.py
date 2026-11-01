@@ -352,6 +352,12 @@ def test_recoverable_page_shells_recover_without_waiting_on_x_native_retry():
     assert "button.click()" not in x_click_block
     assert "switchXHostForRecoverableShell(shell)" in recover_block
 
+    x_recovery = recover_block.split('if (platformId === "x")', 1)[1].split(
+        'if (last && Date.now() - last < 60000)', 1,
+    )[0]
+    assert "switchXHostForRecoverableShell(shell)" in x_recovery
+    assert "button.click()" not in x_recovery
+
     x_retry_shell = recover_block.split(
         'if (platformId === "x" && shell.reason === "try_again_empty_state")',
         1,

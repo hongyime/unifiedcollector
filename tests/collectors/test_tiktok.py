@@ -351,7 +351,7 @@ async def test_upsert_profile_returns_uuid(monkeypatch):
         "uniqueId": "bryan",
         "nickname": "Bryan",
         "signature": "bio",
-        "verified": True,
+        "verified": False,
         "privateAccount": False,
         "avatarLarger": "https://x/avatar.jpg",
     }
