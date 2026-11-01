@@ -1915,3 +1915,102 @@ async def test_mark_youtube_target_binds_every_sql_parameter(_disposable_pg):
 def test_module_exposes_collector_class():
     assert hasattr(youtube_mod, "YoutubeCollector")
     assert youtube_mod.YoutubeCollector.SOURCE_NAME == "youtube"
+
+
+# ── startup reclaim ──────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_reclaim_stranded_spider_queue_once(monkeypatch):
+    coll = _new_collector(monkeypatch)
+    conn = coll.pool._conn
+    table = {"stranded": "processing", "queued": "pending"}
+
+    async def _execute(sql, *args):
+        if "SET status = 'pending'" in sql and "processing" in sql:
+            n = 0
+            for key, status in table.items():
+                if status == "processing":
+                    table[key] = "pending"
+                    n += 1
+            return f"UPDATE {n}"
+        return "UPDATE 0"
+
+    conn.execute = AsyncMock(side_effect=_execute)
+
+    await coll._reclaim_stranded_spider_queue()
+
+    assert table == {"stranded": "pending", "queued": "pending"}
+    conn.execute.assert_awaited_once()
+    assert "youtube_spider_queue" in conn.execute.await_args.args[0]
+
+    await coll._reclaim_stranded_spider_queue()
+    conn.execute.assert_awaited_once()
+
+
+# ── enrichment recency guard + community scan ordering ───────────────────
+
+
+@pytest.mark.asyncio
+async def test_enrichment_queries_carry_attempt_recency_predicate(monkeypatch):
+    coll = _new_collector(monkeypatch)
+    coll._fetch_transcripts = True
+    coll._fetch_comments_enabled = True
+    coll._download_delay = 0
+    coll._youtube_channel_is_verified = AsyncMock(return_value=False)
+
+    await coll._enrich_transcripts_and_comments(limit=5)
+
+    sqls = [c.args[0] for c in coll.pool._conn.fetch.await_args_list]
+    transcript_sql = next(s for s in sqls if "youtube_transcripts" in s)
+    comments_sql = next(s for s in sqls if "youtube_comments" in s)
+    assert "v.last_transcript_attempt_at < NOW() - INTERVAL '24 hours'" in transcript_sql
+    assert "v.last_comments_attempt_at < NOW() - INTERVAL '24 hours'" in comments_sql
+
+
+@pytest.mark.asyncio
+async def test_enrichment_select_returns_next_candidate_after_recent_failure(monkeypatch):
+    coll = _new_collector(monkeypatch)
+    coll._fetch_transcripts = True
+    coll._fetch_comments_enabled = False
+    coll._download_delay = 0
+    coll._youtube_channel_is_verified = AsyncMock(return_value=False)
+    coll._fetch_transcript = AsyncMock()
+    failed_id = "uuid-failed-today"
+    next_id = "uuid-next-oldest"
+
+    async def _fetch(sql, *args):
+        # Simulate the DB: the today-attempted video is filtered out by the
+        # recency predicate, so the next-newest eligible row comes back.
+        if "youtube_transcripts" in sql:
+            assert "last_transcript_attempt_at" in sql
+            return [{"id": next_id, "platform_video_id": "nextvid", "platform_channel_id": "UC1"}]
+        return []
+
+    coll.pool._conn.fetch = AsyncMock(side_effect=_fetch)
+
+    await coll._enrich_transcripts_and_comments(limit=1)
+
+    coll._fetch_transcript.assert_awaited_once_with(next_id, "nextvid")
+    fetched_ids = [c.args[0] for c in coll._fetch_transcript.await_args_list]
+    assert failed_id not in fetched_ids
+
+
+@pytest.mark.asyncio
+async def test_community_pass_orders_by_last_scan_and_prefers_never_scanned(monkeypatch):
+    coll = _new_collector(monkeypatch)
+    coll.pool._conn.fetch = AsyncMock(return_value=[
+        {"platform_channel_id": "UC_never_scanned"},
+        {"platform_channel_id": "UC_recently_scanned"},
+    ])
+    coll._collect_community_posts = AsyncMock(return_value=1)
+
+    total = await coll._community_pass(batch_size=2)
+
+    sql = coll.pool._conn.fetch.await_args.args[0]
+    assert "ORDER BY last_community_scan_at ASC NULLS FIRST" in sql
+    assert [c.args[0] for c in coll._collect_community_posts.await_args_list] == [
+        "UC_never_scanned",
+        "UC_recently_scanned",
+    ]
+    assert total == 2

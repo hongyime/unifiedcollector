@@ -26,12 +26,20 @@ class LegacyQueueSpec:
     target_type_field: str | None = None
     metadata_fields: tuple[str, ...] = ("source",)
     hop_field: str | None = None
+    filter_by_platform: bool = False
+
+
+def _platform_clause(spec: LegacyQueueSpec, alias: str = "q") -> str:
+    return f" AND {alias}.platform = '{spec.platform}'" if spec.filter_by_platform else ""
 
 
 LEGACY_QUEUE_SPECS: dict[str, LegacyQueueSpec] = {
     "instagram": LegacyQueueSpec(
-        "instagram", "instagram_spider_queue", "platform_user_id",
-        metadata_fields=("source", "source_post_id", "username"),
+        "instagram", "spider_queue", "node_id",
+        record_id_is_uuid=False,
+        record_id_field="node_id",
+        metadata_fields=("discovery_type",),
+        filter_by_platform=True,
     ),
     "instagram_targets": LegacyQueueSpec(
         "instagram", "instagram_spider_targets", "username",
@@ -152,6 +160,7 @@ async def mirror_legacy_queue_batch(
                 f"""SELECT q.id::text AS source_record_id, to_jsonb(q)::text AS record
                     FROM {spec.table} q
                     WHERE ($1::uuid IS NULL OR q.id > $1::uuid)
+                    {_platform_clause(spec)}
                     ORDER BY q.id ASC
                     LIMIT $2""",
                 cursor, limit,
@@ -162,6 +171,7 @@ async def mirror_legacy_queue_batch(
                            to_jsonb(q)::text AS record
                     FROM {spec.table} q
                     WHERE ($1::text IS NULL OR q.{spec.record_id_field}::text > $1::text)
+                    {_platform_clause(spec)}
                     ORDER BY q.{spec.record_id_field}::text ASC
                     LIMIT $2""",
                 cursor, limit,
@@ -191,7 +201,7 @@ async def mirror_legacy_queue_batch(
                 _timestamp(record.get("next_attempt_at")),
                 record.get("parent_node_id"),
                 record.get(spec.hop_field) if spec.hop_field else record.get("hop_distance"),
-                record.get("source") or record.get("discovered_from"),
+                record.get("source") or record.get("discovered_from") or record.get("discovery_type"),
                 record.get("edge_type"),
                 json.dumps(_metadata(spec, record), default=str),
                 terminal_reason,
@@ -252,14 +262,14 @@ async def _identity_mismatches(
                AND s.source_record_id = q.{record_id}::text
                AND s.sync_generation = $2
                AND s.retired_at IS NULL
-             WHERE s.source_record_id IS NULL""",
+             WHERE s.source_record_id IS NULL{_platform_clause(spec)}""",
         spec.table, generation,
     )
     extra_in_shadow = await conn.fetchval(
         f"""SELECT COUNT(*)
               FROM spider_queue_legacy_shadow s
               LEFT JOIN {spec.table} q
-                ON q.{record_id}::text = s.source_record_id
+                ON q.{record_id}::text = s.source_record_id{_platform_clause(spec)}
              WHERE s.source_table = $1
                AND s.sync_generation = $2
                AND s.retired_at IS NULL
@@ -274,7 +284,7 @@ async def _identity_mismatches(
                AND s.source_record_id = q.{record_id}::text
                AND s.sync_generation = $2
                AND s.retired_at IS NULL
-             WHERE COALESCE(LOWER(BTRIM(q.status)), 'pending') <> s.legacy_status""",
+             WHERE COALESCE(LOWER(BTRIM(q.status)), 'pending') <> s.legacy_status{_platform_clause(spec)}""",
         spec.table, generation,
     )
     return int(missing_from_shadow), int(extra_in_shadow), int(status_mismatches)
@@ -351,8 +361,9 @@ async def compare_legacy_queue_statuses(
                 "SELECT set_config('statement_timeout', $1, true)",
                 f"{statement_timeout_ms}ms",
             )
+            source_where = f" WHERE platform = '{spec.platform}'" if spec.filter_by_platform else ""
             source_rows = await conn.fetch(
-                f"SELECT status, COUNT(*)::bigint AS count FROM {spec.table} GROUP BY status"
+                f"SELECT status, COUNT(*)::bigint AS count FROM {spec.table}{source_where} GROUP BY status"
             )
             shadow_rows = await conn.fetch(
                 """SELECT status, COUNT(*)::bigint AS count

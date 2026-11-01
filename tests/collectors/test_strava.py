@@ -1310,3 +1310,37 @@ async def test_backfill_feed_history_walks_n_days_and_skips_covered(monkeypatch)
     # First day was covered → skipped. Remaining 2 days each return 1 activity.
     assert total == 2
     assert len(fetched_dates) == 2
+
+
+# ── startup reclaim ──────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_reclaim_stranded_spider_queue_once(monkeypatch):
+    _set_web_env(monkeypatch)
+    coll = StravaCollector()
+    pool = _make_pool()
+    conn = pool._conn
+    coll.set_pool(pool)
+    table = {"stranded": "processing", "queued": "pending"}
+
+    async def _execute(sql, *args):
+        if "SET status = 'pending'" in sql and "processing" in sql:
+            n = 0
+            for key, status in table.items():
+                if status == "processing":
+                    table[key] = "pending"
+                    n += 1
+            return f"UPDATE {n}"
+        return "UPDATE 0"
+
+    conn.execute = AsyncMock(side_effect=_execute)
+
+    await coll._reclaim_stranded_spider_queue()
+
+    assert table == {"stranded": "pending", "queued": "pending"}
+    conn.execute.assert_awaited_once()
+    assert "strava_spider_queue" in conn.execute.await_args.args[0]
+
+    await coll._reclaim_stranded_spider_queue()
+    conn.execute.assert_awaited_once()

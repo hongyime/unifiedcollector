@@ -1836,9 +1836,12 @@ async def test_download_media_refreshes_expired_file_reference(monkeypatch, tmp_
 
 @pytest.mark.asyncio
 async def test_on_message_deleted_retries_transient_db_timeout(monkeypatch):
+    from src.collectors.telegram.mixins import realtime as realtime_mixin
+
     coll = _make_collector(monkeypatch)
     coll._realtime_write_retry_delay = 0
     worker = _make_worker(coll)
+    monkeypatch.setattr(realtime_mixin.archive_fallback, "enqueue", AsyncMock())
     coll.pool.conn.execute.side_effect = [TimeoutError(), "UPDATE 1"]
     event = SimpleNamespace(chat_id=12345, deleted_ids=[99])
 

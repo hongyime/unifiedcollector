@@ -60,6 +60,30 @@ export async function controlBase(): Promise<string> {
   return _cachedControlBase as string;
 }
 
+/**
+ * The bridge (ig_ingest) requires this header on every route except GET
+ * /health and /livez. The operator enters the shared secret in the popup,
+ * which stores it as `uc_bridge_secret`.
+ */
+export async function getBridgeSecret(): Promise<string> {
+  try {
+    const stored = await chrome.storage.local.get("uc_bridge_secret");
+    const secret = stored && stored.uc_bridge_secret;
+    return typeof secret === "string" ? secret.trim() : "";
+  } catch (e) {
+    return "";
+  }
+}
+
+/**
+ * Headers for a request to the bridge. Returns `{}` when no secret is stored
+ * so the bridge rejects the request loudly instead of accepting a bogus one.
+ */
+export async function bridgeHeaders(): Promise<Record<string, string>> {
+  const secret = await getBridgeSecret();
+  return secret ? { "X-UC-Bridge-Secret": secret } : {};
+}
+
 export interface PostJsonResult {
   response: Response;
   body: string;
@@ -76,7 +100,7 @@ export async function postJsonWithTimeout(url: string, payload: unknown, timeout
   try {
     const r = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...(await bridgeHeaders()) },
       body: JSON.stringify(payload),
       signal: ctrl.signal,
     });

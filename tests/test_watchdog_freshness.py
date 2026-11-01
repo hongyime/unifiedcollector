@@ -79,7 +79,7 @@ async def test_watchdog_skips_stale_restart_during_active_429_cooldown(monkeypat
     async def fake_restart(container: str) -> None:
         restarted.append(container)
 
-    async def fake_mark_degraded(db, source: str, age: float, restarted_any: bool, detail: str | None = None) -> None:
+    async def fake_mark_degraded(db, source: str, age: float, restarted_any: bool, detail: str | None = None, **kwargs) -> None:
         degraded.append((source, age, restarted_any, detail))
 
     async def fake_notify(text: str) -> None:
@@ -142,7 +142,7 @@ async def test_watchdog_bypasses_cooldown_and_restarts_realtime_source(monkeypat
     async def fake_restart(container: str) -> None:
         restarted.append(container)
 
-    async def fake_mark_degraded(db, source: str, age: float, restarted_any: bool, detail: str | None = None) -> None:
+    async def fake_mark_degraded(db, source: str, age: float, restarted_any: bool, detail: str | None = None, **kwargs) -> None:
         degraded.append((source, age, restarted_any, detail))
 
     async def fake_notify(text: str) -> None:
@@ -193,7 +193,7 @@ async def test_watchdog_clears_stale_marker_after_source_recovers(monkeypatch):
     async def fake_restart(container: str) -> None:
         restarted.append(container)
 
-    async def fake_mark_degraded(db, source: str, age: float, restarted_any: bool, detail: str | None = None) -> None:
+    async def fake_mark_degraded(db, source: str, age: float, restarted_any: bool, detail: str | None = None, **kwargs) -> None:
         degraded.append((source, age, restarted_any, detail))
 
     monkeypatch.setattr(freshness, "_restart", fake_restart)
@@ -211,12 +211,13 @@ async def test_watchdog_clears_stale_marker_after_source_recovers(monkeypatch):
 
     assert restarted == []
     assert degraded == []
-    assert len(executed) == 1
+    assert len(executed) == 2
     query, args = executed[0]
     assert "UPDATE source_health" in query
     assert "LIKE 'stale %watchdog%'" in query
     assert "LIKE 'watchdog waiting for qr pairing%'" in query
     assert args == ("website",)
+    assert "INSERT INTO source_controls" in executed[1][0]
 
 
 @pytest.mark.asyncio
@@ -239,12 +240,14 @@ async def test_mark_degraded_words_whatsapp_qr_pairing_as_operator_action(monkey
         "waiting for QR pairing; not restarted",
     )
 
-    assert len(executed) == 1
-    _query, args = executed[0]
+    assert len(executed) == 2
+    assert "INSERT INTO source_health" in executed[0][0]
+    args = executed[0][1]
     assert args == (
         "whatsapp",
         "watchdog waiting for QR pairing; not restarted; newest row 20s ago",
     )
+    assert "INSERT INTO source_controls" in executed[1][0]
 
 
 @pytest.mark.asyncio
@@ -271,7 +274,7 @@ async def test_watchdog_does_not_restart_whatsapp_waiting_for_qr(monkeypatch):
     async def fake_restart(container: str) -> None:
         restarted.append(container)
 
-    async def fake_mark_degraded(db, source: str, age: float, restarted_any: bool, detail: str | None = None) -> None:
+    async def fake_mark_degraded(db, source: str, age: float, restarted_any: bool, detail: str | None = None, **kwargs) -> None:
         degraded.append((source, age, restarted_any, detail))
 
     async def fake_whatsapp_pairing_needed() -> str:
@@ -310,7 +313,7 @@ async def test_watchdog_defers_whatsapp_restart_when_bridge_health_unavailable(m
     async def fake_restart(container: str) -> None:
         restarted.append(container)
 
-    async def fake_mark_degraded(db, source: str, age: float, restarted_any: bool, detail: str | None = None) -> None:
+    async def fake_mark_degraded(db, source: str, age: float, restarted_any: bool, detail: str | None = None, **kwargs) -> None:
         degraded.append((source, age, restarted_any, detail))
 
     async def fake_whatsapp_pairing_needed() -> str:

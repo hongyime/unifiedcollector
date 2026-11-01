@@ -1,5 +1,6 @@
 from src.core.spider_queue_compat import (
     LEGACY_QUEUE_SPECS,
+    mirror_legacy_queue_batch,
     normalize_legacy_status,
 )
 from src.core.spider_graph_store import bounded_limit, shared_spider_enabled
@@ -23,6 +24,51 @@ def test_legacy_queue_specs_cover_current_dedicated_queues():
     assert LEGACY_QUEUE_SPECS["github"].target_type_field == "target_type"
     assert not LEGACY_QUEUE_SPECS["instagram_targets"].record_id_is_uuid
     assert LEGACY_QUEUE_SPECS["x"].table == "x_profile_targets"
+    instagram = LEGACY_QUEUE_SPECS["instagram"]
+    assert instagram.table == "spider_queue"
+    assert instagram.record_id_field == "node_id"
+    assert instagram.filter_by_platform is True
+
+
+class _FakeConn:
+    def __init__(self, queries):
+        self.queries = queries
+
+    async def fetch(self, query, *args):
+        self.queries.append(query)
+        return []
+
+
+class _FakePool:
+    def __init__(self, conn):
+        self._conn = conn
+
+    def acquire(self):
+        pool = self
+
+        class _Ctx:
+            async def __aenter__(self):
+                return pool._conn
+
+            async def __aexit__(self, *exc):
+                return False
+
+        return _Ctx()
+
+
+async def test_instagram_mirror_query_filters_by_platform():
+    queries: list[str] = []
+    pool = _FakePool(_FakeConn(queries))
+    await mirror_legacy_queue_batch(pool, "instagram", limit=10)
+    assert len(queries) == 1
+    assert "q.platform = 'instagram'" in queries[0]
+
+
+async def test_tiktok_mirror_query_has_no_platform_filter():
+    queries: list[str] = []
+    pool = _FakePool(_FakeConn(queries))
+    await mirror_legacy_queue_batch(pool, "tiktok", limit=10)
+    assert "q.platform" not in queries[0]
 
 
 def test_shared_spider_rollout_is_per_platform_and_disabled_by_default(monkeypatch):

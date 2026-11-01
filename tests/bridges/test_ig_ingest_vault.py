@@ -92,10 +92,14 @@ class _NoDownloadSession:
 
 
 class _DownloadResponse:
-    def __init__(self, data: bytes):
+    def __init__(self, data: bytes, chunk_cap: int | None = None):
         self.status = 200
+        self.url = "https://scontent.cdninstagram.com/v/t51/image.jpg"
         self.headers = {"content-type": "image/jpeg"}
         self._data = data
+        self._pos = 0
+        self._chunk_cap = chunk_cap
+        self.content = self
 
     async def __aenter__(self):
         return self
@@ -103,8 +107,17 @@ class _DownloadResponse:
     async def __aexit__(self, exc_type, exc, tb):
         return False
 
-    async def read(self):
-        return self._data
+    async def read(self, n=-1):
+        if self._pos >= len(self._data):
+            return b""
+        if n is None or n < 0:
+            n = len(self._data) - self._pos
+        if self._chunk_cap is not None:
+            n = min(n, self._chunk_cap)
+        end = min(self._pos + n, len(self._data))
+        chunk = self._data[self._pos:end]
+        self._pos = end
+        return chunk
 
 
 class _DownloadSession:
@@ -891,7 +904,7 @@ def test_extension_ingest_writes_media_to_vault_blob(monkeypatch, tmp_path, plat
             {
                 "content_id": "abc123",
                 "kind": "story",
-                "url": "https://cdn.example.test/image.jpg",
+                "url": "https://scontent.cdninstagram.com/v/t51/image.jpg",
                 "entity_name": "Bryan",
                 "meta": {"caption": "hello"},
             },
@@ -1029,7 +1042,7 @@ def test_threads_synthetic_media_ids_include_sha_suffix(monkeypatch, tmp_path):
             _DownloadSession(first),
             "threads",
             "foryou",
-            {"content_id": "img_same", "url": "https://cdn.example.test/first.jpg"},
+            {"content_id": "img_same", "url": "https://scontent.cdninstagram.com/v/t51/first.jpg"},
         )
     )
     saved_second = asyncio.run(
@@ -1038,7 +1051,7 @@ def test_threads_synthetic_media_ids_include_sha_suffix(monkeypatch, tmp_path):
             _DownloadSession(second),
             "threads",
             "foryou",
-            {"content_id": "img_same", "url": "https://cdn.example.test/second.jpg"},
+            {"content_id": "img_same", "url": "https://scontent.cdninstagram.com/v/t51/second.jpg"},
         )
     )
 

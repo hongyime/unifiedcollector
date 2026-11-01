@@ -193,6 +193,9 @@ GLOBAL_ALLOWLIST = {
     "DB_POOL_MIN_SIZE", "DB_POOL_MAX_SIZE",
     "PGUSER", "PGPASSWORD", "PGHOST", "PGDATABASE",
     "POSTGRES_DB",
+    # Required DB/broker/bridge secrets guarded by compose `:?` (set in .env)
+    "POSTGRES_PASSWORD", "RABBITMQ_PASSWORD", "REDIS_PASSWORD",
+    "WHATSAPP_MEDIA_BRIDGE_SECRET", "BRIDGE_SHARED_SECRET",
     "REDIS_HOST", "REDIS_URL",
     # WhatsApp bridge inject via `environment:` (Node.js side; not Python)
     "SESSION_NAME", "AUTH_STORAGE_PATH", "SYNC_FULL_HISTORY",

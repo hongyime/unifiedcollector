@@ -164,6 +164,36 @@ async def test_collect_disabled_does_not_search(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_collect_runs_well_known_scan_even_when_exposure_disabled(monkeypatch):
+    monkeypatch.setenv("EXPOSURE_ENABLED", "0")
+    scanner = AsyncMock(return_value={"skipped": None})
+    monkeypatch.setattr("src.collectors.exposure.run_well_known_scan", scanner)
+
+    coll = ExposureCollector()
+    coll.pool = object()
+    coll.search_query = AsyncMock()
+
+    await coll.collect(["example.edu.sg"])
+
+    scanner.assert_awaited_once_with(coll.pool)
+    coll.search_query.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_collect_skips_well_known_scan_without_pool(monkeypatch):
+    monkeypatch.setenv("EXPOSURE_ENABLED", "0")
+    scanner = AsyncMock()
+    monkeypatch.setattr("src.collectors.exposure.run_well_known_scan", scanner)
+
+    coll = ExposureCollector()
+    coll.pool = None
+
+    await coll.collect(["example.edu.sg"])
+
+    scanner.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_upsert_exposure_finding_serializes_metadata(monkeypatch):
     coll = ExposureCollector()
     calls = []

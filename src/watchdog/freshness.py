@@ -74,10 +74,12 @@ if "--healthcheck" in sys.argv:
     _run_healthcheck()
 
 import asyncio
+from datetime import datetime, timezone
 
 import aiohttp
 import asyncpg
 from src.core.source_freshness import GITHUB_PROGRESS_QUERY, STRAVA_PROGRESS_QUERY
+from src.core.source_states import SourceState, set_source_state
 
 # Realtime sources hold a persistent connection (MTProto / Baileys WS / Matrix
 # sync). When they go stale past threshold, the connection itself is what's
@@ -255,11 +257,14 @@ async def _mark_degraded(
     age: float,
     restarted: bool,
     detail: str | None = None,
+    state: SourceState = SourceState.SOURCE_DEAD,
+    blocked_until: datetime | None = None,
 ) -> None:
     """Record a stale source in source_health so it's queryable, not just a log line.
 
     Self-clearing: the worker's _mark_source_healthy UPSERTs status='running' on the
     next observed progress, so a source that recovers flips back automatically.
+    Also mirrors the state into source_controls (Fudan taxonomy) for the dashboard.
     """
     if source == "whatsapp" and detail and "qr pairing" in detail.lower():
         note = f"watchdog {detail}; newest row {age:.0f}s ago"
@@ -276,6 +281,12 @@ async def _mark_degraded(
         )
     except Exception as e:
         log.error("source_health upsert failed for %s: %s", source, e)
+    # Write-through mirror into the Fudan source_controls table. Best-effort:
+    # set_source_state logs and swallows its own errors, so a mirror failure can
+    # never abort the per-source pass.
+    await set_source_state(
+        db, source, state, stop_reason=note, blocked_until=blocked_until,
+    )
 
 
 async def _mark_running_if_stale_watchdog(db: asyncpg.Connection, source: str) -> None:
@@ -660,7 +671,10 @@ async def _tick(db: asyncpg.Connection) -> None:
                         "%s STALE (%.0fs > %ds) but bridge is awaiting QR pairing — not restarting",
                         src, age, thresh,
                     )
-                    await _mark_degraded(db, src, age, False, pairing_detail)
+                    await _mark_degraded(
+                        db, src, age, False, pairing_detail,
+                        state=SourceState.AUTH_FAILED,
+                    )
                     continue
 
             cooldown = await _active_source_cooldown(db, src, now)
@@ -687,6 +701,8 @@ async def _tick(db: asyncpg.Connection) -> None:
                     age,
                     False,
                     f"active HTTP 429 cooldown {seconds}s left; not restarted",
+                    state=SourceState.RATE_LIMITED,
+                    blocked_until=datetime.fromtimestamp(now + seconds, tz=timezone.utc),
                 )
                 if now - _last_cooldown_stale_alert.get(src, 0) >= max(COOLDOWN, 3600):
                     _last_cooldown_stale_alert[src] = now
@@ -801,6 +817,7 @@ async def _tick(db: asyncpg.Connection) -> None:
                 )
         else:
             await _mark_running_if_stale_watchdog(db, src)
+            await set_source_state(db, src, SourceState.HEALTHY)
             # Source recovered — drop any pending decision card so a future stall
             # posts a fresh card instead of reusing a stale token.
             _pending_decision_cards.pop(f"{src}|{','.join(containers)}", None)

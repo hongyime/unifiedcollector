@@ -441,6 +441,7 @@ class StravaCollector(BaseCollector):
         self._my_athlete_id: str | None = None
         # Only ingest activities that carry media (photos) or a map/GPS polyline.
         self._require_media_or_map = os.getenv("STRAVA_REQUIRE_MEDIA_OR_MAP", "false").lower() == "true"
+        self._spider_queue_recovered = False
 
     def _archive_raw_payload(
         self,
@@ -1042,7 +1043,29 @@ class StravaCollector(BaseCollector):
             else:
                 logger.info("strava visible graph paused: graph migration is not applied")
 
+    async def _reclaim_stranded_spider_queue(self):
+        """Return stranded 'processing' rows to 'pending' once per process."""
+        if self.pool is None or self._spider_queue_recovered:
+            return
+        self._spider_queue_recovered = True
+        try:
+            async with self.pool.acquire() as conn:
+                result = await conn.execute(
+                    "UPDATE strava_spider_queue SET status = 'pending' "
+                    "WHERE status = 'processing'"
+                )
+            count = int(result.rsplit(" ", 1)[-1]) if isinstance(result, str) else 0
+            if count:
+                logger.warning(
+                    "strava spider: recovered %d interrupted queue item(s)", count,
+                )
+        except Exception as exc:
+            logger.warning(
+                "strava spider: queue recovery failed: %s", type(exc).__name__,
+            )
+
     async def _process_spider_queue(self):
+        await self._reclaim_stranded_spider_queue()
         max_per_cycle = int(os.getenv("STRAVA_SPIDER_MAX_PER_CYCLE", "10"))
         await refresh_account_proximity_cache(self.pool)
         # Prune stale pending entries to prevent unbounded queue growth.

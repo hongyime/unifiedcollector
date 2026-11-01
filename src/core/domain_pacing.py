@@ -200,56 +200,58 @@ class DomainPacer:
         """Acquire a polite request slot for ``url`` and yield its domain key."""
         domain = registrable_domain_from_url(url)
         entry_lock = await self._domain_entry_lock(domain)
-        async with entry_lock:
-            async with self._lock:
-                needs_active_domain = self._domain_refs[domain] <= 0
-            if needs_active_domain:
-                await self._active_domain_sem.acquire()
-            try:
+        active_held = False
+        ref_held = False
+        sem_held = False
+        inflight_held = False
+        try:
+            async with entry_lock:
+                async with self._lock:
+                    needs_active_domain = self._domain_refs[domain] <= 0
+                if needs_active_domain:
+                    await self._active_domain_sem.acquire()
+                    active_held = True
                 async with self._lock:
                     self._domain_refs[domain] += 1
                     self._active_domains.add(domain)
-            except BaseException:
-                # Cancelled before the ref increment: hand the active-domain permit back or the cap erodes.
-                if needs_active_domain:
-                    self._active_domain_sem.release()
-                raise
+                    ref_held = True
 
-        sem: asyncio.Semaphore | None = None
-        acquired_sem = False
-        counted_inflight = False
-        try:
             sem = await self._domain_sem(domain)
             await sem.acquire()
-            acquired_sem = True
+            sem_held = True
             async with self._lock:
                 self._active_domains.add(domain)
                 self._inflight[domain] += 1
-                counted_inflight = True
                 self._counters["requests_started"] += 1
+                inflight_held = True
             delay = self.delay_seconds + (random.uniform(0, self.jitter_seconds) if self.jitter_seconds else 0.0)
             if delay > 0:
                 await asyncio.sleep(delay)
             yield domain
         finally:
-            # Covers cancel-during-acquire and cancel-during-delay, which the yield-only finally missed.
-            if sem is not None and acquired_sem:
+            if sem_held:
                 sem.release()
-            release_active_domain = False
-            async with self._lock:
-                if counted_inflight:
+            if inflight_held:
+                async with self._lock:
                     if self._inflight[domain] > 0:
                         self._inflight[domain] -= 1
                     if self._inflight[domain] <= 0:
                         self._inflight.pop(domain, None)
-                if self._domain_refs[domain] > 0:
-                    self._domain_refs[domain] -= 1
-                if self._domain_refs[domain] <= 0:
-                    self._domain_refs.pop(domain, None)
-                    if domain in self._active_domains:
-                        self._active_domains.discard(domain)
-                        release_active_domain = True
-            if release_active_domain:
+            if ref_held:
+                release_active_domain = False
+                async with self._lock:
+                    if self._domain_refs[domain] > 0:
+                        self._domain_refs[domain] -= 1
+                    if self._domain_refs[domain] <= 0:
+                        self._domain_refs.pop(domain, None)
+                        if domain in self._active_domains:
+                            self._active_domains.discard(domain)
+                            release_active_domain = True
+                # Ownership of the active-domain permit follows the refcount.
+                active_held = False
+                if release_active_domain:
+                    self._active_domain_sem.release()
+            if active_held:
                 self._active_domain_sem.release()
 
 

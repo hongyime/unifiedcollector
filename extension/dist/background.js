@@ -72,13 +72,26 @@
     }
     return _cachedControlBase;
   }
+  async function getBridgeSecret() {
+    try {
+      const stored = await chrome.storage.local.get("uc_bridge_secret");
+      const secret = stored && stored.uc_bridge_secret;
+      return typeof secret === "string" ? secret.trim() : "";
+    } catch (e) {
+      return "";
+    }
+  }
+  async function bridgeHeaders() {
+    const secret = await getBridgeSecret();
+    return secret ? { "X-UC-Bridge-Secret": secret } : {};
+  }
   async function postJsonWithTimeout(url, payload, timeoutMs = 1e4) {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
       const r = await fetch(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...await bridgeHeaders() },
         body: JSON.stringify(payload),
         signal: ctrl.signal
       });
@@ -125,7 +138,7 @@
     } catch (_) {
     }
   });
-  function _reportSwCrash(detail) {
+  async function _reportSwCrash(detail) {
     try {
       chrome.storage.local.get("ucLog").then(({ ucLog = [] }) => {
         ucLog.push({ t: Date.now(), level: "error", msg: "sw_crash", detail });
@@ -139,7 +152,7 @@
     try {
       fetch("http://127.0.0.1:8765/social/sw-crash", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...await bridgeHeaders() },
         body: JSON.stringify({
           ...detail,
           extension_version: chrome.runtime.getManifest && chrome.runtime.getManifest().version || null,
@@ -984,11 +997,11 @@
       await log("warn", `${platform && platform.label ? platform.label : "scraper"} recovery failed: ${e && e.message ? e.message : e}`);
     }
   }
-  async function fetchJsonWithTimeout(url, timeoutMs = 12e3) {
+  async function fetchJsonWithTimeout(url, timeoutMs = 12e3, headers = {}) {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
-      const r = await fetch(url, { signal: ctrl.signal });
+      const r = await fetch(url, { signal: ctrl.signal, headers });
       const j = await r.json().catch(() => ({}));
       return { response: r, json: j };
     } finally {
@@ -1407,7 +1420,7 @@
       const base = await ingestBase();
       const r = await fetch(base + "/social/cookies", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...await bridgeHeaders() },
         body: JSON.stringify(withExtensionVersion({
           platform: "instagram",
           account,
@@ -1427,7 +1440,7 @@
       const base = await ingestBase();
       const r = await fetch(base + "/social/cookies", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...await bridgeHeaders() },
         body: JSON.stringify(withExtensionVersion({
           platform: "strava",
           account,
@@ -2155,13 +2168,14 @@
     form.append("file", blob, safeUploadFilename(payload.item || {}, blob));
     let r = await fetchWithAbort(base + "/social/ingest-upload-binary", {
       method: "POST",
+      headers: { ...await bridgeHeaders() },
       body: form
     }, BROWSER_UPLOAD_POST_TIMEOUT_MS);
     if (r.status !== 404 && r.status !== 405) return r;
     const b64 = arrayBufferToBase64(await blob.arrayBuffer());
     return fetchWithAbort(base + "/social/ingest-upload", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...await bridgeHeaders() },
       body: JSON.stringify({
         ...payload,
         item: {
@@ -2283,7 +2297,7 @@
     try {
       const r = await fetch(base + "/social/browser-media-candidates", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...await bridgeHeaders() },
         body: JSON.stringify(withExtensionVersion({
           platform: msg.platform || "instagram",
           username: msg.username || "unknown",
@@ -2403,7 +2417,7 @@
             try {
               const account = String(msg.account || msg.owner || "").trim();
               const qs = account ? `?account=${encodeURIComponent(account)}` : "";
-              const r = await fetch(base + "/social/ig_cooldown" + qs);
+              const r = await fetch(base + "/social/ig_cooldown" + qs, { headers: await bridgeHeaders() });
               sendResponse(await r.json());
             } catch (e) {
               sendResponse({ cooling: false, secs_left: 0, streak: 0 });
@@ -2412,7 +2426,7 @@
           }
           case "getTargets": {
             try {
-              const r = await fetch(base + `/social/targets?platform=${encodeURIComponent(msg.platform || "instagram")}`);
+              const r = await fetch(base + `/social/targets?platform=${encodeURIComponent(msg.platform || "instagram")}`, { headers: await bridgeHeaders() });
               const j = await r.json();
               await setStatus({ ingestOk: true, lastIngestCheck: Date.now() });
               sendResponse(j.targets || []);
@@ -2427,7 +2441,7 @@
             try {
               const owner = String(msg.owner || "").trim();
               const qs = owner ? `?owner=${encodeURIComponent(owner)}` : "";
-              const r = await fetch(base + "/social/x-profile-target" + qs);
+              const r = await fetch(base + "/social/x-profile-target" + qs, { headers: await bridgeHeaders() });
               const j = await r.json().catch(() => ({}));
               sendResponse({ ok: r.ok, ...j });
             } catch (e) {
@@ -2439,7 +2453,7 @@
             try {
               const r = await fetch(base + "/social/x-profile-target-result", {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers: { "Content-Type": "application/json", ...await bridgeHeaders() },
                 body: JSON.stringify(withExtensionVersion({
                   username: msg.username,
                   status: msg.status || "success",
@@ -2458,7 +2472,7 @@
             try {
               const owner = String(msg.owner || "").trim();
               const qs = owner ? `?owner=${encodeURIComponent(owner)}` : "";
-              const r = await fetch(base + "/social/tiktok-revisit-target" + qs);
+              const r = await fetch(base + "/social/tiktok-revisit-target" + qs, { headers: await bridgeHeaders() });
               const j = await r.json().catch(() => ({}));
               sendResponse({ ok: r.ok, ...j });
             } catch (e) {
@@ -2478,7 +2492,7 @@
               if (platform) params.set("platform", platform);
               if (owner) params.set("owner", owner);
               const qs = params.toString() ? "?" + params.toString() : "";
-              const r = await fetch(base + "/social/browser-revisit-target" + qs);
+              const r = await fetch(base + "/social/browser-revisit-target" + qs, { headers: await bridgeHeaders() });
               const j = await r.json().catch(() => ({}));
               sendResponse({ ok: r.ok, ...j });
             } catch (e) {
@@ -2490,7 +2504,7 @@
             try {
               const platform = String(msg.platform || "").trim().toLowerCase();
               const qs = new URLSearchParams({ platform });
-              const r = await fetch(base + "/social/native-scrape-target?" + qs.toString());
+              const r = await fetch(base + "/social/native-scrape-target?" + qs.toString(), { headers: await bridgeHeaders() });
               const j = await r.json().catch(() => ({}));
               const tabId = sender && sender.tab && Number.isInteger(sender.tab.id) ? sender.tab.id : null;
               if (r.ok && tabId !== null && j.target && j.target.id != null) {
@@ -2544,7 +2558,7 @@
             try {
               const r = await fetch(base + "/social/native-scrape", {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers: { "Content-Type": "application/json", ...await bridgeHeaders() },
                 body: JSON.stringify(withExtensionVersion({
                   platform: msg.platform,
                   target_id: msg.target_id ?? null,
@@ -2569,7 +2583,7 @@
             try {
               const r = await fetch(base + "/social/browser-revisit-result", {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers: { "Content-Type": "application/json", ...await bridgeHeaders() },
                 body: JSON.stringify(withExtensionVersion({
                   platform: msg.platform,
                   content_id: msg.content_id,
@@ -2595,7 +2609,7 @@
             try {
               const r = await fetch(base + "/social/tiktok-revisit-result", {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers: { "Content-Type": "application/json", ...await bridgeHeaders() },
                 body: JSON.stringify(withExtensionVersion({
                   content_id: msg.content_id,
                   claim_attempt: msg.claim_attempt ?? null,
@@ -2625,7 +2639,7 @@
               const tiktokUploadOnlyProgress = platform === "tiktok" && allItems.length > 0 && urlItems.length === 0;
               const r = await fetch(base + "/social/ingest", {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers: { "Content-Type": "application/json", ...await bridgeHeaders() },
                 body: JSON.stringify(withExtensionVersion({
                   platform,
                   username: msg.username,
@@ -2674,7 +2688,7 @@
             try {
               const r = await fetch(base + "/social/discover", {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers: { "Content-Type": "application/json", ...await bridgeHeaders() },
                 body: JSON.stringify(withExtensionVersion({ platform: msg.platform || "instagram", source: msg.source, hop: msg.hop, discovered: msg.discovered }))
               });
               const j = await r.json().catch(() => ({}));
@@ -2690,7 +2704,7 @@
             try {
               const r = await fetch(base + "/social/target-status", {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers: { "Content-Type": "application/json", ...await bridgeHeaders() },
                 body: JSON.stringify(withExtensionVersion({
                   platform: msg.platform || "instagram",
                   username: msg.username,
@@ -2708,7 +2722,7 @@
             try {
               const r = await fetch(base + "/social/posts", {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers: { "Content-Type": "application/json", ...await bridgeHeaders() },
                 body: JSON.stringify(withExtensionVersion({
                   platform: msg.platform || "instagram",
                   username: msg.username,
@@ -2729,7 +2743,7 @@
             try {
               const r = await fetch(base + "/social/comments", {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers: { "Content-Type": "application/json", ...await bridgeHeaders() },
                 body: JSON.stringify(withExtensionVersion({ platform: msg.platform || "instagram", post_id: msg.post_id, comments: msg.comments }))
               });
               const j = await r.json().catch(() => ({}));
@@ -2745,7 +2759,7 @@
             try {
               const r = await fetch(base + "/social/seed", {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers: { "Content-Type": "application/json", ...await bridgeHeaders() },
                 body: JSON.stringify(withExtensionVersion({ platform: msg.platform || "instagram", users: msg.users }))
               });
               const j = await r.json().catch(() => ({}));
@@ -2760,7 +2774,7 @@
             try {
               const r = await fetch(base + "/social/profile", {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers: { "Content-Type": "application/json", ...await bridgeHeaders() },
                 body: JSON.stringify(withExtensionVersion({
                   platform: msg.platform || "instagram",
                   profile: msg.profile,
@@ -2777,7 +2791,7 @@
             try {
               const r = await fetch(base + "/social/users", {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers: { "Content-Type": "application/json", ...await bridgeHeaders() },
                 body: JSON.stringify(withExtensionVersion({ platform: msg.platform || "instagram", context: msg.context || "seen", owner: msg.owner || null, users: msg.users }))
               });
               const j = await r.json().catch(() => ({}));
@@ -2793,7 +2807,7 @@
             try {
               const r = await fetch(base + "/social/dm-frame", {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers: { "Content-Type": "application/json", ...await bridgeHeaders() },
                 body: JSON.stringify(withExtensionVersion({ platform: msg.platform, frame: msg.frame }))
               });
               sendResponse({ ok: r.ok });
@@ -2806,7 +2820,7 @@
             try {
               await fetch(base + "/social/dm-probe", {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers: { "Content-Type": "application/json", ...await bridgeHeaders() },
                 body: JSON.stringify(withExtensionVersion({
                   platform: msg.platform,
                   transport: msg.transport,
@@ -2825,7 +2839,7 @@
             try {
               await fetch(base + "/social/dm-sample", {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers: { "Content-Type": "application/json", ...await bridgeHeaders() },
                 body: JSON.stringify(withExtensionVersion({ platform: msg.platform, url: msg.url, size: msg.size, b64: msg.b64 }))
               });
               await log("info", `\u{1F9EA} ${msg.platform} DM sample: ${msg.size}B`);
@@ -2838,7 +2852,7 @@
             try {
               await fetch(base + "/social/dm-heartbeat", {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers: { "Content-Type": "application/json", ...await bridgeHeaders() },
                 body: JSON.stringify(withExtensionVersion({
                   platform: msg.platform,
                   probes_sent: msg.probes_sent || 0,
@@ -2854,7 +2868,7 @@
             try {
               await fetch(base + "/social/dm-decoded", {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers: { "Content-Type": "application/json", ...await bridgeHeaders() },
                 body: JSON.stringify(withExtensionVersion({
                   platform: msg.platform,
                   owner: msg.owner || "",
@@ -2880,7 +2894,7 @@
                 const ctl = await controlBase();
                 result = await fetchJsonWithTimeout(ctl + `/strava/route-capture-queue${query}`);
               } catch (e) {
-                result = await fetchJsonWithTimeout(base + `/social/strava-route-queue${query}`, 3e4);
+                result = await fetchJsonWithTimeout(base + `/social/strava-route-queue${query}`, 3e4, await bridgeHeaders());
               }
               sendResponse({ ok: result.response.ok, ...result.json });
             } catch (e) {
@@ -2892,7 +2906,7 @@
             try {
               const r = await fetch(base + "/social/strava-route-visit", {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers: { "Content-Type": "application/json", ...await bridgeHeaders() },
                 body: JSON.stringify(withExtensionVersion({
                   activity_id: msg.activity_id,
                   activity_url: msg.activity_url || null,
@@ -2913,7 +2927,7 @@
               const pointCount = msg.point_count || msg.streams && msg.streams.latlng && msg.streams.latlng.length || 0;
               const r = await fetch(base + "/social/strava-streams", {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers: { "Content-Type": "application/json", ...await bridgeHeaders() },
                 body: JSON.stringify(withExtensionVersion({
                   platform: "strava",
                   activity_id: msg.activity_id,

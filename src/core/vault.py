@@ -16,6 +16,7 @@ import shutil
 import tempfile
 import time
 import hashlib
+from uuid import uuid4
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -572,11 +573,27 @@ def _finalize_write(tmp: Path, path: Path) -> None:
     """
     try:
         tmp.replace(path)
+        return
     except OSError:
         # NTFS and some network filesystems reject atomic rename.
         # Copy+delete is slower but works everywhere.
-        shutil.copy2(tmp, path)
-        tmp.unlink(missing_ok=True)
+        pass
+
+    # Copy beside the destination so a failed copy cannot poison the sha256 blob.
+    partial = path.with_name(f"{path.name}.part-{uuid4().hex[:8]}")
+    try:
+        shutil.copy2(tmp, partial)
+        with partial.open("rb") as handle:
+            os.fsync(handle.fileno())
+        os.replace(partial, path)
+    except BaseException:
+        for leftover in (partial, tmp):
+            try:
+                leftover.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
+    tmp.unlink(missing_ok=True)
 
 def _atomic_write_text(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)

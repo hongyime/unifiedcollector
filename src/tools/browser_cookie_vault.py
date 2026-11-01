@@ -633,7 +633,7 @@ async def _serve_health(vault: CookieVault, port: int, stop_event: asyncio.Event
     app = _build_health_app(vault)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", port)
+    site = web.TCPSite(runner, "127.0.0.1", port)
     await site.start()
     logger.info("health endpoint listening on :%d", port)
     try:

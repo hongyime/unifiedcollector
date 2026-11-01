@@ -13,7 +13,7 @@ def test_chrome_cdp_launcher_uses_robust_startup_flags():
 
     assert "[int]$RemoteDebuggingPort = 9336" in script
     assert "--disable-dev-shm-usage" in script
-    assert "--remote-debugging-address=0.0.0.0" in script
+    assert "--remote-debugging-address" not in script
     assert "--remote-allow-origins=*" in script
     assert "--no-first-run" in script
     assert "--no-default-browser-check" in script

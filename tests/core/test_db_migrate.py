@@ -93,6 +93,72 @@ async def test_apply_all_defers_when_advisory_lock_check_fails(caplog):
     )
 
 
+async def _no_sleep(_seconds):
+    return None
+
+
+@pytest.mark.asyncio
+async def test_apply_all_with_retry_returns_after_deferrals(monkeypatch):
+    summaries = iter([
+        {"deferred": True},
+        {"deferred": True},
+        {"deferred": False, "schemas": 1},
+    ])
+    calls = []
+
+    async def fake_apply_all(_pool):
+        summary = next(summaries)
+        calls.append(summary)
+        return summary
+
+    monkeypatch.setattr(migrate, "apply_all", fake_apply_all)
+    monkeypatch.setattr(migrate.asyncio, "sleep", _no_sleep)
+
+    summary = await migrate.apply_all_with_retry(object(), timeout_s=5, poll_s=0.01)
+
+    assert summary["deferred"] is False
+    assert len(calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_apply_all_with_retry_raises_after_timeout(monkeypatch):
+    clock = iter([0.0, 0.0, 100.0])
+    calls = []
+
+    async def fake_apply_all(_pool):
+        calls.append(1)
+        return {"deferred": True}
+
+    monkeypatch.setattr(migrate, "apply_all", fake_apply_all)
+    monkeypatch.setattr(migrate.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr(migrate, "monotonic", lambda: next(clock))
+
+    with pytest.raises(RuntimeError, match="^migrations deferred too long$"):
+        await migrate.apply_all_with_retry(object(), timeout_s=10, poll_s=0.01)
+
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_apply_all_with_retry_returns_first_success_without_sleep(monkeypatch):
+    calls = []
+
+    async def fake_apply_all(_pool):
+        calls.append(1)
+        return {"deferred": False, "schemas": 2}
+
+    async def fail_sleep(_seconds):
+        raise AssertionError("should not sleep when not deferred")
+
+    monkeypatch.setattr(migrate, "apply_all", fake_apply_all)
+    monkeypatch.setattr(migrate.asyncio, "sleep", fail_sleep)
+
+    summary = await migrate.apply_all_with_retry(object(), timeout_s=5, poll_s=0.01)
+
+    assert summary["schemas"] == 2
+    assert len(calls) == 1
+
+
 def test_gan_face_migration_archived_not_applied():
     # W1 split blocker: entity_faces is analyzer-owned, so the collector must
     # never apply 20260930_add_gan_face_columns.sql. It is moved to _archive/

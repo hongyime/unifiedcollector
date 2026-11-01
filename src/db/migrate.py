@@ -27,10 +27,12 @@ which would destroy live data if re-run every boot).
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import os
 from pathlib import Path
+from time import monotonic
 
 logger = logging.getLogger(__name__)
 
@@ -282,6 +284,25 @@ async def apply_all(pool) -> dict:
             summary["migrations_skipped"],
         )
     return summary
+
+
+async def apply_all_with_retry(pool, timeout_s: float = 300.0, poll_s: float = 2.0) -> dict:
+    """Wait for a deferred :func:`apply_all` instead of booting on a stale ledger.
+
+    ``apply_all`` returns early with ``deferred`` when another instance holds the
+    advisory lock or DDL hit lock_timeout. Proceeding then races that instance's
+    migration (tables appear underneath us mid-boot). Poll until a run completes;
+    a lock held past ``timeout_s`` surfaces as a boot error the caller's retry
+    loop can handle.
+    """
+    deadline = monotonic() + timeout_s
+    while True:
+        summary = await apply_all(pool)
+        if not summary["deferred"]:
+            return summary
+        if monotonic() >= deadline:
+            raise RuntimeError("migrations deferred too long")
+        await asyncio.sleep(poll_s)
 
 
 async def backfill_ledger_for_existing_db(pool) -> int:

@@ -427,13 +427,12 @@ async def wa_link_stats(_user: dict = Depends(require_role("viewer"))):
 
 
 @router.get("/whatsapp/qr/{bridge}")
-async def whatsapp_qr(bridge: str):
+async def whatsapp_qr(bridge: str, _user: dict = Depends(require_role("viewer"))):
     """Proxy the live QR / status from a wa-bridge.
 
     bridge is '1' or '2'. Returns {status, qr, ready, error}. The bridge
     regenerates the QR on its own cadence; the client polls this endpoint and
-    re-renders, so a QR never goes stale on screen. Unauthenticated like the
-    bridge's own /qr route (link page is behind the dashboard already).
+    re-renders, so a QR never goes stale on screen.
     """
     if bridge not in ("1", "2"):
         raise HTTPException(400, "bridge must be 1 or 2")
@@ -676,7 +675,7 @@ async def whatsapp_pairing_code(
 
 
 @router.get("/whatsapp/link")
-async def whatsapp_link_page():
+async def whatsapp_link_page(_user: dict = Depends(require_role("viewer"))):
     """Self-contained QR linking page with auto-refresh.
 
     Polls /whatsapp/qr/{1,2} every 3s, re-renders the QR image, and flips each
@@ -729,13 +728,14 @@ async def whatsapp_link_page():
  </div>
 <script>
 function esc(s){return String(s||'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));}
+function authHeaders(){try{const t=localStorage.getItem('auth_token');return t?{Authorization:'Bearer '+t}:{};}catch(e){return {};}}
 async function fetchJsonWithRetry(url, tries){
   let lastErr=null;
   for(let i=0;i<(tries||2);i++){
     const ctrl=new AbortController();
     const timer=setTimeout(()=>ctrl.abort(),12000);
     try{
-      const r=await fetch(url,{cache:'no-store',credentials:'same-origin',signal:ctrl.signal});
+      const r=await fetch(url,{cache:'no-store',credentials:'same-origin',signal:ctrl.signal,headers:authHeaders()});
       clearTimeout(timer);
       if(!r.ok) throw new Error('HTTP '+r.status);
       return await r.json();
@@ -755,7 +755,7 @@ async function pairCode(b){
   try{
     const r=await fetch('/whatsapp/'+b+'/pairing-code',{
       method:'POST',
-      headers:{'Content-Type':'application/json'},
+      headers:{'Content-Type':'application/json',...authHeaders()},
       credentials:'same-origin',
       body:JSON.stringify({phone})
     });
@@ -786,8 +786,8 @@ async function pollSession(b){
     if(!s || !s.ok){ iEl.innerHTML=''; return; }
     if(s.connected && s.phone_number){
       const parts = [];
-      parts.push('<div class="phone">+' + s.phone_number + '</div>');
-      if(s.push_name) parts.push('<div class="name">' + s.push_name + '</div>');
+      parts.push('<div class="phone">+' + esc(s.phone_number) + '</div>');
+      if(s.push_name) parts.push('<div class="name">' + esc(s.push_name) + '</div>');
       iEl.innerHTML = parts.join('');
     } else if(!s.connected){
       iEl.innerHTML='';
@@ -807,23 +807,23 @@ async function poll(b){
       return;
     }
     if(d.qr){
-      qEl.innerHTML='<img src="'+d.qr+'" width="264" height="264" style="image-rendering:pixelated">';
+      qEl.innerHTML='<img src="'+esc(d.qr)+'" width="264" height="264" style="image-rendering:pixelated">';
       qEl.style.background='#fff';
       sEl.innerHTML='<span class="dot wait"></span> Waiting for scan&hellip; (auto-refreshing)';
       tEl.innerHTML='<span class="dot wait"></span>';
     } else if(d.status==='unreachable'){
       qEl.innerHTML='&#9888;'; qEl.style.background='#3d1414'; qEl.style.color='#ef4444'; qEl.style.fontSize='60px';
-      sEl.innerHTML='<span class="dot err"></span> Bridge unreachable: '+(d.error||'');
+      sEl.innerHTML='<span class="dot err"></span> Bridge unreachable: '+esc(d.error||'');
       tEl.innerHTML='<span class="dot err"></span>';
     } else if(d.status==='refreshing_qr'||d.status==='requesting_fresh_qr'||d.status==='waiting_for_fresh_qr'||d.status==='fresh_qr_reconnect_requested'){
       qEl.innerHTML='<span class="spinner"></span>'; qEl.style.background='#fff'; qEl.style.color='#111b21'; qEl.style.fontSize='16px';
       sEl.innerHTML='<span class="dot wait"></span> Waiting for the next QR code&hellip;';
       tEl.innerHTML='<span class="dot wait"></span>';
     } else {
-      sEl.innerHTML='<span class="dot wait"></span> '+(d.status||'starting')+'&hellip;';
+      sEl.innerHTML='<span class="dot wait"></span> '+esc(d.status||'starting')+'&hellip;';
     }
   }catch(e){
-    sEl.innerHTML='<span class="dot wait"></span> Dashboard poll missed; retrying automatically ('+(e&&e.message?e.message:e)+')';
+    sEl.innerHTML='<span class="dot wait"></span> Dashboard poll missed; retrying automatically ('+esc(e&&e.message?e.message:e)+')';
     tEl.innerHTML='<span class="dot wait"></span>';
   }
   setTimeout(()=>poll(b),3000);

@@ -14,8 +14,10 @@ extracted. Step 15 will collapse the residual ``Scheduler`` shims.
 """
 from __future__ import annotations
 
+from .archive_fallback import ArchiveFallbackHandler
 from .base import PeriodicHandler, SchedulerContext
 from .bridge_unpaired_alert import BridgeUnpairedAlertHandler
+from .browser_rotation import BrowserRotationHandler
 from .cookie_check import CookieCheckHandler
 from .gc_collection_runs import GcCollectionRunsHandler
 from .graph_edges import BuildGraphEdgesHandler
@@ -47,6 +49,8 @@ HANDLERS: list[PeriodicHandler] = [
     PostgresIdleTxnAlertHandler(),
     WhatsappStagingMergeHandler(),
     HostMemoryAlertHandler(),
+    ArchiveFallbackHandler(),
+    BrowserRotationHandler(),
 ]
 
 __all__ = [

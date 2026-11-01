@@ -335,3 +335,118 @@ async def test_record_domain_pacing_event_serializes_metadata_for_jsonb():
     assert "$7::jsonb" in conn.query
     assert conn.args[1] == "example.com"
     assert conn.args[-1] == '{"pages": 2}'
+
+
+def _cancel_test_pacer(**overrides):
+    options = dict(
+        source="test",
+        env_prefix="TEST_DOMAIN_PACING_CANCEL",
+        max_active_domains=1,
+        max_per_domain=2,
+        delay_seconds=5.0,
+        jitter_seconds=0.0,
+    )
+    options.update(overrides)
+    return DomainPacer(**options)
+
+
+async def _enter_slot(pacer: DomainPacer, url: str) -> None:
+    async with pacer.slot(url):
+        return None
+
+
+@pytest.mark.asyncio
+async def test_slot_cancelled_during_delay_releases_domain_permit(monkeypatch):
+    pacer = _cancel_test_pacer()
+    sleeping = asyncio.Event()
+
+    async def fake_sleep(_delay: float) -> None:
+        sleeping.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    sem = await pacer._domain_sem("a.example")
+    baseline = sem._value
+
+    task = asyncio.create_task(_enter_slot(pacer, "https://a.example/1"))
+    await sleeping.wait()
+
+    assert sem._value == baseline - 1
+    assert pacer.snapshot().active_domains == 1
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert sem._value == baseline
+    snapshot = pacer.snapshot()
+    assert snapshot.active_domains == 0
+    assert snapshot.per_domain_inflight == {}
+
+
+@pytest.mark.asyncio
+async def test_slot_cancelled_while_waiting_for_active_domain_permit():
+    pacer = _cancel_test_pacer(max_active_domains=1, delay_seconds=0.0)
+    holding = asyncio.Event()
+    release = asyncio.Event()
+
+    async def hold() -> None:
+        async with pacer.slot("https://a.example/1"):
+            holding.set()
+            await release.wait()
+
+    first = asyncio.create_task(hold())
+    await holding.wait()
+    active_sem = pacer._active_domain_sem
+    assert active_sem._value == 0
+
+    second = asyncio.create_task(_enter_slot(pacer, "https://b.example/1"))
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert not second.done()
+
+    second.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await second
+
+    assert active_sem._value == 0
+    assert pacer.snapshot().active_domains == 1
+
+    release.set()
+    await first
+    assert active_sem._value == 1
+    assert pacer.snapshot().active_domains == 0
+
+
+@pytest.mark.asyncio
+async def test_repeated_slot_cancellations_do_not_wedge_pacer(monkeypatch):
+    pacer = _cancel_test_pacer(max_active_domains=2, max_per_domain=1)
+    sleeping = asyncio.Event()
+
+    async def fake_sleep(_delay: float) -> None:
+        sleeping.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    for index in range(6):
+        url = f"https://d{index}.example/1"
+        sleeping.clear()
+        task = asyncio.create_task(_enter_slot(pacer, url))
+        await sleeping.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        snapshot = pacer.snapshot()
+        assert snapshot.active_domains == 0
+        domain = registrable_domain_from_url(url)
+        assert pacer._domain_sems[domain]._value == pacer.max_per_domain
+
+    assert pacer._active_domain_sem._value == pacer.max_active_domains
+
+    pacer.delay_seconds = 0.0
+    async with pacer.slot("https://d0.example/1"):
+        assert pacer.snapshot().active_domains == 1
+    assert pacer.snapshot().active_domains == 0
+    assert pacer._active_domain_sem._value == pacer.max_active_domains

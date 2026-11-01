@@ -586,6 +586,39 @@
     return null;
   }
 
+  // src/shared/ingest_client.ts
+  var DEFAULT_INGEST = "http://127.0.0.1:8765";
+  var DEFAULT_CONTROL = "http://127.0.0.1:8700";
+  var _cachedIngestBase = null;
+  var _cachedControlBase = null;
+  var _cacheListenerAttached = false;
+  function _attachCacheListener() {
+    if (_cacheListenerAttached) return;
+    try {
+      chrome.storage.onChanged.addListener((changes, area) => {
+        if (area !== "local") return;
+        if (changes.ingestBase) _cachedIngestBase = changes.ingestBase.newValue || DEFAULT_INGEST;
+        if (changes.controlBase) _cachedControlBase = changes.controlBase.newValue || DEFAULT_CONTROL;
+      });
+      _cacheListenerAttached = true;
+    } catch (e) {
+    }
+  }
+  _attachCacheListener();
+  async function getBridgeSecret() {
+    try {
+      const stored = await chrome.storage.local.get("uc_bridge_secret");
+      const secret = stored && stored.uc_bridge_secret;
+      return typeof secret === "string" ? secret.trim() : "";
+    } catch (e) {
+      return "";
+    }
+  }
+  async function bridgeHeaders() {
+    const secret = await getBridgeSecret();
+    return secret ? { "X-UC-Bridge-Secret": secret } : {};
+  }
+
   // src/content.ts
   (() => {
     const UC_CONTENT_VERSION = (() => {
@@ -868,7 +901,7 @@
         const response = await withDeadline(
           fetch(DIRECT_INGEST_BASE + request.path, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: { "Content-Type": "application/json", ...await bridgeHeaders() },
             body: JSON.stringify(request.payload)
           }),
           timeoutMs,

@@ -7,6 +7,7 @@ import pytest
 
 from src.core.recon_egress_guard import (
     MAX_RECON_EGRESS_BYTES,
+    _refresh_database_policy,
     UnsafeReconTarget,
     install_network_policy,
     is_public_address,
@@ -194,3 +195,34 @@ def test_firewall_install_checks_nft_before_guard_socket_exists(monkeypatch):
 
     install_network_policy("postgres", runner=runner)
     assert calls[-1] == ["nft", "-nn", "list", "table", "inet", "recon_egress"]
+
+
+def test_database_address_refresh_reinstalls_only_after_docker_dns_changes(monkeypatch):
+    installs = []
+
+    monkeypatch.setattr(
+        "src.core.recon_egress_guard._database_addresses",
+        lambda *_args: ("172.20.0.12",),
+    )
+    monkeypatch.setattr(
+        "src.core.recon_egress_guard.install_network_policy",
+        lambda host: installs.append(host) or ("172.20.0.12",),
+    )
+
+    addresses, refreshed = _refresh_database_policy("postgres", ("172.20.0.12",))
+    assert addresses == ("172.20.0.12",)
+    assert not refreshed
+    assert installs == []
+
+    monkeypatch.setattr(
+        "src.core.recon_egress_guard._database_addresses",
+        lambda *_args: ("172.20.0.13",),
+    )
+    monkeypatch.setattr(
+        "src.core.recon_egress_guard.install_network_policy",
+        lambda host: installs.append(host) or ("172.20.0.13",),
+    )
+    addresses, refreshed = _refresh_database_policy("postgres", addresses)
+    assert addresses == ("172.20.0.13",)
+    assert refreshed
+    assert installs == ["postgres"]

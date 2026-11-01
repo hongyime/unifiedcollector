@@ -23,8 +23,11 @@ Usage:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import logging
+from datetime import datetime
 from enum import Enum
+
+logger = logging.getLogger(__name__)
 
 
 class SourceState(str, Enum):
@@ -72,3 +75,68 @@ def classify_state(status_code: int | None, error_text: str = "") -> SourceState
         if kw in error_lower:
             return SourceState.AUTH_FAILED
     return SourceState.SOURCE_DEAD
+
+
+_ERROR_STATES = frozenset({
+    SourceState.RATE_LIMITED,
+    SourceState.AUTH_FAILED,
+    SourceState.SOURCE_DEAD,
+})
+
+
+async def set_source_state(
+    pool,
+    source: str,
+    state: SourceState,
+    *,
+    enabled: bool | None = None,
+    stop_reason: str | None = None,
+    blocked_until: datetime | None = None,
+) -> None:
+    """Upsert one source's control row into ``source_controls``.
+
+    Mirrors collector health for the dashboard. Error states (RATE_LIMITED /
+    AUTH_FAILED / SOURCE_DEAD) bump ``consecutive_failures``; HEALTHY resets it
+    to 0 and clears blocked_until/stop_reason; PAUSED leaves the counter alone.
+    ``enabled`` is only changed when explicitly passed.
+
+    Best-effort by design: a failed mirror write is logged, never raised, so it
+    can neither abort a collector nor break the watchdog's per-source pass.
+    """
+    state = SourceState(state)
+    try:
+        await pool.execute(
+            """
+            INSERT INTO source_controls
+                (source_name, state, enabled, last_success, last_attempt,
+                 blocked_until, stop_reason, consecutive_failures, updated_at)
+            VALUES ($1, $2, COALESCE($3, TRUE),
+                    CASE WHEN $2 = 'HEALTHY' THEN NOW() ELSE NULL END,
+                    NOW(), $4, $5,
+                    CASE WHEN $6 THEN 1 ELSE 0 END, NOW())
+            ON CONFLICT (source_name) DO UPDATE SET
+                state = EXCLUDED.state,
+                enabled = CASE WHEN $3::boolean IS NULL THEN source_controls.enabled
+                               ELSE $3::boolean END,
+                last_success = COALESCE(EXCLUDED.last_success, source_controls.last_success),
+                last_attempt = EXCLUDED.last_attempt,
+                blocked_until = CASE WHEN EXCLUDED.state = 'HEALTHY' THEN NULL
+                                     ELSE COALESCE(EXCLUDED.blocked_until, source_controls.blocked_until) END,
+                stop_reason = CASE WHEN EXCLUDED.state = 'HEALTHY' THEN NULL
+                                   ELSE COALESCE(EXCLUDED.stop_reason, source_controls.stop_reason) END,
+                consecutive_failures = CASE
+                    WHEN EXCLUDED.state IN ('RATE_LIMITED', 'AUTH_FAILED', 'SOURCE_DEAD')
+                        THEN source_controls.consecutive_failures + 1
+                    WHEN EXCLUDED.state = 'HEALTHY' THEN 0
+                    ELSE source_controls.consecutive_failures END,
+                updated_at = NOW()
+            """,
+            source,
+            state.value,
+            enabled,
+            blocked_until,
+            stop_reason,
+            state in _ERROR_STATES,
+        )
+    except Exception:
+        logger.error("set_source_state failed for %s (%s)", source, state.value, exc_info=True)

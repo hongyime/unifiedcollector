@@ -22,7 +22,6 @@ import json
 import logging
 import os
 import re
-import time
 from abc import abstractmethod
 from dataclasses import dataclass
 from typing import Optional
@@ -43,6 +42,35 @@ _FOLLOW_GRAPH_PROBE_SOURCES = frozenset({"snapchat", "pinterest"})
 _PUBLIC_DISCOVERY_PLATFORMS = frozenset({"airbnb", "pinterest", "snapchat"})
 _FOLLOW_GRAPH_TARGET_BATCH = 10
 _TRUTHY_FLAGS = frozenset({"1", "true", "yes", "on"})
+
+PROFILE_PROBE_MAX_ATTEMPTS_DEFAULT = 5
+PROFILE_PROBE_BACKOFF_BASE_SECONDS_DEFAULT = 3600
+PROFILE_PROBE_BACKOFF_CAP_SECONDS = 86400
+
+# probe_profile() implementations mostly swallow transport failures into
+# ProfileResult.error strings ("http:TimeoutException", "http:503"); only the
+# raised path sees the original exception type.
+_TRANSIENT_ERROR_MARKERS = ("timeout", "connect", "network", "protocol", "readerror")
+
+
+def _is_transient_probe_error(exc: BaseException | None, message: str) -> bool:
+    """True when a probe failure is worth retrying with backoff."""
+    if exc is not None:
+        if isinstance(exc, (asyncio.TimeoutError, TimeoutError, ConnectionError, OSError)):
+            return True
+        if any(marker in type(exc).__name__.lower() for marker in _TRANSIENT_ERROR_MARKERS):
+            return True
+    text = (message or "").lower()
+    if "http:" in text:
+        detail = text.split("http:", 1)[1].split(":", 1)[0].strip()
+        if detail.isdigit():
+            code = int(detail)
+            return code == 429 or code >= 500
+        return any(marker in detail for marker in _TRANSIENT_ERROR_MARKERS)
+    # Challenge pages, malformed payloads, unexpected redirects: bounded retry
+    # is safer than permanently dropping a possibly-real target.
+    return True
+
 
 _FOLLOW_GRAPH_SOURCE_SQL = """
     WITH followed AS (
@@ -120,9 +148,7 @@ class ProfileOnlyCollector(BaseCollector):
       - ``<SOURCE>_PROBE_BATCH``    default 10
       - ``<SOURCE>_PROBE_QPS``      default 0.5
       - ``<SOURCE>_PROBE_STALE_DAYS`` default 30
-      - ``NATIVE_PUBLIC_DISCOVERY_ENABLED`` default 0 for Airbnb/Pinterest/Snapchat;
-        the source-scoped ``<SOURCE>_PROBE_NATIVE_PUBLIC_DISCOVERY_ENABLED``
-        overrides it when explicitly set.
+      - ``NATIVE_PUBLIC_DISCOVERY_ENABLED`` default 0 for Airbnb/Pinterest/Snapchat
     """
 
     PROFILE_TABLE: str = ""
@@ -158,11 +184,34 @@ class ProfileOnlyCollector(BaseCollector):
         except ValueError:
             return self.PROBE_QPS_DEFAULT
 
+    @property
+    def probe_max_attempts(self) -> int:
+        try:
+            return max(
+                1,
+                int(os.getenv(
+                    "PROFILE_PROBE_MAX_ATTEMPTS",
+                    str(PROFILE_PROBE_MAX_ATTEMPTS_DEFAULT),
+                )),
+            )
+        except ValueError:
+            return PROFILE_PROBE_MAX_ATTEMPTS_DEFAULT
+
+    @property
+    def probe_backoff_base_seconds(self) -> int:
+        try:
+            return max(
+                1,
+                int(os.getenv(
+                    "PROFILE_PROBE_BACKOFF_BASE_SECONDS",
+                    str(PROFILE_PROBE_BACKOFF_BASE_SECONDS_DEFAULT),
+                )),
+            )
+        except ValueError:
+            return PROFILE_PROBE_BACKOFF_BASE_SECONDS_DEFAULT
+
     def _native_public_discovery_enabled(self) -> bool:
-        """Public-discovery gate with one precedence for all readers:
-        explicit ``<SOURCE>_PROBE_NATIVE_PUBLIC_DISCOVERY_ENABLED`` wins,
-        then the global ``NATIVE_PUBLIC_DISCOVERY_ENABLED``, else disabled.
-        """
+        """Use an explicit source override before the global discovery gate."""
         scoped = os.getenv(
             f"{self.SOURCE_NAME.upper()}_PROBE_NATIVE_PUBLIC_DISCOVERY_ENABLED"
         )
@@ -216,7 +265,8 @@ class ProfileOnlyCollector(BaseCollector):
 
         allow_public_discovery = (
             self.SOURCE_NAME not in _PUBLIC_DISCOVERY_PLATFORMS
-            or self._native_public_discovery_enabled()
+            or self._env("NATIVE_PUBLIC_DISCOVERY_ENABLED", "0").strip().lower()
+            in {"1", "true", "yes", "on"}
         )
 
         async with self.pool.acquire() as conn:
@@ -233,6 +283,7 @@ class ProfileOnlyCollector(BaseCollector):
                 SELECT id, username
                 FROM profile_probe_queue
                 WHERE source = $1 AND status = 'pending'
+                  AND (next_probe_at IS NULL OR next_probe_at <= NOW())
                   AND (
                       enqueued_by LIKE 'followed:%'
                       OR (
@@ -283,13 +334,24 @@ class ProfileOnlyCollector(BaseCollector):
                 result = await self.probe_profile(username)
             except Exception as exc:
                 logger.warning("%s probe_profile(%s) failed: %s", self.SOURCE_NAME, username, exc)
-                await self._mark_error(queue_id, str(exc)[:200])
+                message = str(exc)[:200]
+                await self._mark_attempt(
+                    self.SOURCE_NAME,
+                    username,
+                    message,
+                    _is_transient_probe_error(exc, message),
+                )
                 summary["errors"] += 1
                 await asyncio.sleep(interval)
                 continue
 
             if result.error and not result.exists:
-                await self._mark_error(queue_id, result.error[:200])
+                await self._mark_attempt(
+                    self.SOURCE_NAME,
+                    username,
+                    result.error[:200],
+                    _is_transient_probe_error(None, result.error),
+                )
                 summary["errors"] += 1
                 await asyncio.sleep(interval)
                 continue
@@ -330,17 +392,54 @@ class ProfileOnlyCollector(BaseCollector):
                 queue_id,
             )
 
-    async def _mark_error(self, queue_id: int, message: str) -> None:
+    async def _mark_attempt(
+        self, source: str, username: str, message: str, transient: bool,
+    ) -> None:
+        """Record one probe failure; retry transient errors with backoff.
+
+        Transient failures re-enter 'pending' until ``probe_max_attempts`` is
+        reached. Non-transient failures go straight to terminal 'error'.
+        """
         async with self.pool.acquire() as conn:
-            await conn.execute(
+            attempts = await conn.fetchval(
                 """
                 UPDATE profile_probe_queue
-                SET status='error', probed_at=now(), error_message=$2
-                WHERE id=$1
+                SET attempts = attempts + 1, probed_at = now(), error_message = $3
+                WHERE source = $1 AND username = $2
+                RETURNING attempts
                 """,
-                queue_id,
+                source,
+                username,
                 message,
             )
+            if attempts is None:
+                return
+            if transient and attempts < self.probe_max_attempts:
+                delay = min(
+                    self.probe_backoff_base_seconds * 2 ** (attempts - 1),
+                    PROFILE_PROBE_BACKOFF_CAP_SECONDS,
+                )
+                await conn.execute(
+                    """
+                    UPDATE profile_probe_queue
+                    SET status='pending',
+                        next_probe_at = now() + ($3 * interval '1 second')
+                    WHERE source = $1 AND username = $2
+                    """,
+                    source,
+                    username,
+                    delay,
+                )
+            else:
+                await conn.execute(
+                    """
+                    UPDATE profile_probe_queue
+                    SET status='error', next_probe_at = NULL
+                    WHERE source = $1 AND username = $2
+                    """,
+                    source,
+                    username,
+                )
 
     # --- profile write. Subclass may override for platform-specific INSERT. ---
 

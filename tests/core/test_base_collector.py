@@ -309,6 +309,11 @@ async def test_duplicate_skip_keeps_canonical_vault_blob_for_cross_path_media(tm
     monkeypatch.setattr(base_collector, "VAULT_ROOT", vault_root)
     coll = _collector(monkeypatch)
     coll.SOURCE_NAME = source
+    monkeypatch.setattr(
+        base_collector,
+        "write_media_sidecar",
+        lambda **_kwargs: SimpleNamespace(enabled=False, ok=True, relative_path=None, error=None),
+    )
     data = b"shared blob"
     digest = hashlib.sha256(data).hexdigest()
     blob = vault_root / "media" / "blobs" / digest[:2] / digest[2:4] / f"{digest}.jpg"
@@ -335,6 +340,11 @@ async def test_duplicate_skip_can_remove_legacy_occurrence_file(tmp_path, monkey
     vault_root = tmp_path / "vault"
     monkeypatch.setattr(base_collector, "VAULT_ROOT", vault_root)
     coll = _collector(monkeypatch)
+    monkeypatch.setattr(
+        base_collector,
+        "write_media_sidecar",
+        lambda **_kwargs: SimpleNamespace(enabled=False, ok=True, relative_path=None, error=None),
+    )
     data = b"legacy duplicate"
     digest = hashlib.sha256(data).hexdigest()
     legacy = tmp_path / "media" / "github" / "dup.jpg"
@@ -560,3 +570,120 @@ async def test_heartbeat_source_health_is_throttled(monkeypatch):
     ]
     assert len(calls) == 2
     assert calls[0][1] == "github"
+
+
+class _TrackingConn:
+    def __init__(self, *, fetchval_result=None):
+        self.fetchval_result = fetchval_result
+        self.execute_calls = []
+
+    async def fetchval(self, *_args, **_kwargs):
+        return self.fetchval_result
+
+    async def execute(self, *args, **kwargs):
+        self.execute_calls.append((args, kwargs))
+        return "INSERT 0 1"
+
+    async def fetchrow(self, *_args, **_kwargs):
+        return None
+
+
+class _TrackingPool:
+    """Tracks whether a pooled connection is held during a call."""
+
+    def __init__(self, *, fetchval_result=None):
+        self.conn = _TrackingConn(fetchval_result=fetchval_result)
+        self.active = False
+
+    @asynccontextmanager
+    async def acquire(self):
+        self.active = True
+        try:
+            yield self.conn
+        finally:
+            self.active = False
+
+
+@pytest.mark.asyncio
+async def test_sidecar_written_before_pool_acquire_and_inserted(tmp_path, monkeypatch):
+    media_file = tmp_path / "asset.jpg"
+    media_file.write_bytes(b"asset")
+    digest = hashlib.sha256(b"asset").hexdigest()
+    monkeypatch.setenv("COLLECTOR_MEDIA_DB_CONSISTENCY_TIMEOUT_SECONDS", "0")
+
+    coll = _Collector()
+    pool = _TrackingPool()
+    coll.pool = pool
+    seen = {}
+
+    def fake_sidecar(**kwargs):
+        seen["acquire_active"] = pool.active
+        return SimpleNamespace(
+            enabled=True,
+            ok=True,
+            relative_path="sidecars/media/github/asset.json",
+            error=None,
+        )
+
+    monkeypatch.setattr(base_collector, "write_media_sidecar", fake_sidecar)
+
+    inserted = await coll.insert_media_item(
+        entity_id="u1",
+        entity_name="User One",
+        content_type="image",
+        content_id="m1",
+        filename="asset.jpg",
+        file_path=str(media_file),
+        file_size=media_file.stat().st_size,
+        sha256=digest,
+        metadata={},
+    )
+
+    assert inserted is True
+    assert seen["acquire_active"] is False
+    sidecar_updates = [
+        args for args, _kwargs in pool.conn.execute_calls
+        if "vault_sidecar" in str(args)
+    ]
+    assert sidecar_updates
+    assert "sidecars/media/github/asset.json" in str(sidecar_updates[-1])
+
+
+@pytest.mark.asyncio
+async def test_duplicate_unlink_runs_after_pool_release(tmp_path, monkeypatch):
+    legacy = tmp_path / "media" / "github" / "dup.jpg"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_bytes(b"legacy")
+    digest = hashlib.sha256(b"legacy").hexdigest()
+
+    coll = _Collector()
+    pool = _TrackingPool(fetchval_result=1)
+    coll.pool = pool
+    observed = {}
+
+    monkeypatch.setattr(
+        base_collector,
+        "write_media_sidecar",
+        lambda **_kwargs: SimpleNamespace(enabled=False, ok=True, relative_path=None, error=None),
+    )
+
+    def fake_unlink(path):
+        observed["acquire_active"] = pool.active
+        observed["path"] = path
+
+    monkeypatch.setattr(base_collector, "_unlink_duplicate_media_file", fake_unlink)
+
+    inserted = await coll.insert_media_item(
+        entity_id="u1",
+        entity_name="User One",
+        content_type="image",
+        content_id="dup-1",
+        filename=legacy.name,
+        file_path=str(legacy),
+        file_size=legacy.stat().st_size,
+        sha256=digest,
+    )
+
+    assert inserted is False
+    assert observed["path"] == str(legacy)
+    assert observed["acquire_active"] is False

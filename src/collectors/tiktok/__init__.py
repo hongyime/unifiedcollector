@@ -555,7 +555,6 @@ class TiktokCollector(BaseCollector):
         self._sem = asyncio.Semaphore(int(os.getenv("TIKTOK_DOWNLOAD_CONCURRENCY", "3")))
         self._cookies_valid = False
         self._tracker_file = Path(os.getenv("TIKTOK_TRACKER_FILE", "data/tiktok_tracker.json"))
-        self._tracked_ids: set[str] = set()
         # FAMOUS-FILTER (Bryan): older hard skip knob kept for compatibility.
         # New default behavior is profile-first/profile-only via
         # TIKTOK_VIDEO_FOLLOWER_CAP below.
@@ -1024,7 +1023,6 @@ class TiktokCollector(BaseCollector):
         )
 
     async def collect(self, targets: list[str]):
-        await self._load_tracker_state()
         await self._sync_persisted_local_tool_cooldown()
         self._metadata_cooldown_media_fallbacks_used = 0
         from src.core.spider_graph_store import shared_spider_enabled
@@ -2398,17 +2396,6 @@ class TiktokCollector(BaseCollector):
         except OSError:
             logger.debug("tiktok fallback playwright: temp cleanup failed for %s", path, exc_info=True)
 
-    async def _load_tracker_state(self):
-        if self.pool:
-            try:
-                async with self.pool.acquire() as conn:
-                    rows = await conn.fetch("SELECT platform_post_id FROM tiktok_posts")
-                    self._tracked_ids = {r["platform_post_id"] for r in rows}
-            except Exception as e: logger.debug("_load_tracker_state failed: %s", e)
-
-    async def _record_download(self, username: str, video_id: str, file_path: str):
-        self._tracked_ids.add(video_id)
-
     @staticmethod
     def _build_tiktok_source_url(item: dict) -> str | None:
         """Canonical TikTok post URL (media_items.source_url). Content-id
@@ -2693,7 +2680,8 @@ class TiktokCollector(BaseCollector):
             return 0
         spider = self.make_spider_discover(max_hops=max_hops)
         try:
-            return await spider.run(seeds=[seed])
+            await spider.seed(seed)
+            return await spider.run()
         except Exception as e:
             logger.warning("spider_related_creators %s: %s", seed, e)
             return 0
