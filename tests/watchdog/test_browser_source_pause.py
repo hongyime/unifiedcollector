@@ -1,11 +1,11 @@
 
 import os
-
-os.environ.setdefault("DATABASE_URL", "postgresql://collector:x@127.0.0.1:5999/unifiedcollector")
+from unittest.mock import patch
 
 import pytest
 
-from src.watchdog import freshness
+with patch.dict(os.environ, {"DATABASE_URL": "postgresql://collector:x@127.0.0.1:5999/unifiedcollector"}):
+    from src.watchdog import freshness
 
 
 class _FakeDB:
