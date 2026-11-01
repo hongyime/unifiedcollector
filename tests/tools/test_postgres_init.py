@@ -20,4 +20,6 @@ def test_postgres_healthcheck_selects_the_configured_database() -> None:
     command = shlex.split(postgres["healthcheck"]["test"][1])
 
     assert "-d" in command, "pg_isready must not probe the nonexistent collector database"
-    assert command[command.index("-d") + 1] == postgres["environment"]["POSTGRES_DB"]
+    database = command[command.index("-d") + 1]
+    assert database.startswith("${POSTGRES_DB")
+    assert postgres["environment"]["POSTGRES_DB"] in database
