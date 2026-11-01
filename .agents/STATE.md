@@ -1,6 +1,6 @@
 # Collector production recovery resumed (2026-10-23)
 
-- 2026-11-01: The recovery plan checklist was reconciled against the authoritative recovery worktree and its durable evidence: 54 numbered tasks are verified complete (including the owner-approved Task 55 recon remediation). Task 54 is partial/no-go; Task 56 refreshes the immutable release after an extension-version Compose drift; F1–F4 remain. The `.omo` plan/evidence root is intentionally Git-ignored and private; this state record is the committed shared summary. Continue autonomously through the remaining gates and only stop for a real authority or safety blocker.
+- 2026-11-01: The recovery plan checklist was reconciled against the authoritative recovery worktree and its durable evidence: 55 numbered tasks are verified complete (including the owner-approved Task 55 recon remediation and Task 56's r47 release refresh). Task 54 is partial/no-go; F1–F4 remain. The `.omo` plan/evidence root is intentionally Git-ignored and private; this state record is the committed shared summary. Continue autonomously through the remaining gates and only stop for a real authority or safety blocker.
 
 - 2026-11-01: Task 54 is now explicitly partial/no-go, not silently pending: dashboard health is current, but the final source gate exits `2` only for Snapchat after six bounded public probes yielded no durable metadata/media. Beeper remains human/local-secret-blocked and browser transport is not fail-closed certified. Continue autonomously with F1–F4 and report these gaps; do not declare recovery complete.
 
