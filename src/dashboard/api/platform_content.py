@@ -34,6 +34,11 @@ from src.core.seen_targets import (
     seen_target_summary_by_source,
 )
 from src.core.optional_rollout import optional_rollout_report
+from src.core.messaging_chats import list_messaging_chats
+from src.core.messaging_members import list_messaging_members
+from src.core.messaging_messages import get_messaging_messages
+from src.core.profile_status import list_profiles
+from src.core.profile_posts import get_profile_posts
 
 logger = logging.getLogger(__name__)
 
@@ -153,107 +158,22 @@ async def list_telegram_chats(owner: str | None = None, limit: int = 100,
                               _user: dict = Depends(require_role("viewer"))):
     """Recent Telegram chats, newest activity first."""
     _ = owner
-    limit = max(1, min(limit, 500))
     pool = await _get_pool()
-    async with pool.acquire() as conn:
-        if await conn.fetchval("SELECT to_regclass('telegram_chats')") is None:
-            return []
-        rows = await conn.fetch(
-            """
-            SELECT c.platform_chat_id,
-                   c.title,
-                   c.username,
-                   c.type,
-                   c.description,
-                   c.members_count,
-                   c.updated_at,
-                   c.collected_at
-            FROM telegram_chats c
-            ORDER BY c.updated_at DESC NULLS LAST
-            LIMIT $1
-            """,
-            limit,
-        )
-    return [dict(r) for r in rows]
+    return await list_messaging_chats(pool, source="telegram", limit=limit)
 
 
 @router.get("/telegram/chat/{chat_id}")
 async def telegram_chat_detail(chat_id: str, limit: int = 200,
                                _user: dict = Depends(require_role("viewer"))):
     """Chat metadata + newest N messages for one Telegram chat."""
-    limit = max(1, min(limit, 1000))
-    pool = await _get_pool()
-    async with pool.acquire() as conn:
-        if await conn.fetchval("SELECT to_regclass('telegram_chats')") is None:
-            return {"chat": None, "messages": []}
-        chat_row = await conn.fetchrow(
-            """
-            SELECT id,
-                   platform_chat_id,
-                   title,
-                   username,
-                   type,
-                   description,
-                   members_count,
-                   updated_at,
-                   collected_at
-            FROM telegram_chats
-            WHERE platform_chat_id = $1
-            """,
-            chat_id,
-        )
-        if not chat_row:
-            return {"chat": None, "messages": []}
-        chat = dict(chat_row)
-        chat_uuid = chat.pop("id")
-        chat["message_count"] = int(
-            await conn.fetchval(
-                "SELECT COUNT(*) FROM telegram_messages WHERE chat_id = $1",
-                chat_uuid,
-            )
-            or 0
-        )
-        rows = await conn.fetch(
-            """
-            WITH picked AS (
-                SELECT id
-                FROM telegram_messages
-                WHERE chat_id = $1
-                ORDER BY platform_created_at DESC NULLS LAST, collected_at DESC
-                LIMIT $3
-            )
-            SELECT m.platform_message_id,
-                   m.text,
-                   m.caption,
-                   m.media_type,
-                   m.media_file_id,
-                   m.is_edited,
-                   m.edit_date,
-                   m.reply_to_message_id,
-                   m.platform_created_at,
-                   m.collected_at,
-                   (m.metadata->>'deleted' = 'true' IS TRUE)  AS is_deleted,
-                   m.metadata->>'deleted_at'                  AS deleted_at,
-                   u.platform_user_id                 AS sender_platform_id,
-                   u.username                         AS sender_username,
-                   u.first_name                       AS sender_first_name,
-                   u.last_name                        AS sender_last_name,
-                   mi.id                              AS media_item_id
-            FROM picked p
-            JOIN telegram_messages m ON m.id = p.id
-            LEFT JOIN telegram_users u ON u.id = m.sender_id
-            LEFT JOIN media_items mi
-                   ON mi.source = 'telegram'
-                  AND mi.entity_id = $2
-                  AND mi.content_id = split_part(m.platform_message_id, ':', 2)
-            ORDER BY m.platform_created_at DESC NULLS LAST, m.collected_at DESC
-            """,
-            chat_uuid, chat_id, limit,
-        )
-    return {
-        "chat": chat,
-        "messages": [dict(r) for r in rows],
-    }
+    return await get_messaging_messages(await _get_pool(), source="telegram", chat_id=chat_id, limit=limit)
+
+
+@router.get("/telegram/chat/{chat_id}/members")
+async def telegram_chat_members(chat_id: str, limit: int = 100,
+                                _user: dict = Depends(require_role("viewer"))):
+    """Bounded native Telegram member roster for one accessible chat."""
+    return await list_messaging_members(await _get_pool(), source="telegram", chat_id=chat_id, limit=limit)
 
 
 # ---------------------------------------------------------------------------
@@ -264,110 +184,15 @@ async def telegram_chat_detail(chat_id: str, limit: int = 200,
 async def list_tiktok_profiles(limit: int = 100,
                                _user: dict = Depends(require_role("viewer"))):
     """TikTok profiles, biggest audience first."""
-    limit = max(1, min(limit, 500))
     pool = await _get_pool()
-    async with pool.acquire() as conn:
-        if await conn.fetchval("SELECT to_regclass('tiktok_profiles')") is None:
-            return []
-        rows = await conn.fetch(
-            """
-            SELECT p.platform_user_id,
-                   p.username,
-                   p.nickname,
-                   p.avatar_url,
-                   p.bio,
-                   p.followers_count,
-                   p.following_count,
-                   p.heart_count,
-                   p.video_count,
-                   p.is_verified,
-                   p.updated_at,
-                   p.collected_at,
-                   (SELECT MAX(create_time) FROM tiktok_posts WHERE profile_id = p.id) AS last_post_at,
-                   (SELECT COUNT(*)         FROM tiktok_posts WHERE profile_id = p.id) AS posts_collected
-            FROM tiktok_profiles p
-            ORDER BY p.followers_count DESC NULLS LAST,
-                     p.updated_at      DESC NULLS LAST
-            LIMIT $1
-            """,
-            limit,
-        )
-    return [dict(r) for r in rows]
+    return await list_profiles(pool, source="tiktok", limit=limit)
 
 
 @router.get("/tiktok/profile/{username}")
 async def tiktok_profile_detail(username: str, limit: int = 200,
                                 _user: dict = Depends(require_role("viewer"))):
     """Profile metadata + newest N posts for one TikTok account."""
-    limit = max(1, min(limit, 500))
-    pool = await _get_pool()
-    async with pool.acquire() as conn:
-        if await conn.fetchval("SELECT to_regclass('tiktok_profiles')") is None:
-            return {"profile": None, "posts": []}
-        profile_row = await conn.fetchrow(
-            """
-            SELECT id,
-                   platform_user_id,
-                   username,
-                   nickname,
-                   avatar_url,
-                   bio,
-                   followers_count,
-                   following_count,
-                   heart_count,
-                   video_count,
-                   digg_count,
-                   is_verified,
-                   is_private,
-                   updated_at,
-                   collected_at
-            FROM tiktok_profiles
-            WHERE username = $1
-            """,
-            username,
-        )
-        if not profile_row:
-            return {"profile": None, "posts": []}
-        profile = dict(profile_row)
-        profile_uuid = profile.pop("id")
-        rows = await conn.fetch(
-            """
-            SELECT p.platform_post_id,
-                   p.title,
-                   p.description,
-                   p.video_url,
-                   p.cover_image_url,
-                   p.hashtags,
-                   p.view_count,
-                   p.like_count,
-                   p.comment_count,
-                   p.share_count,
-                   p.duration,
-                   p.music_title,
-                   p.music_author,
-                   p.create_time,
-                   p.collected_at,
-                   mi.id                     AS media_item_id,
-                   mi.content_type           AS media_content_type,
-                   mi.source_url             AS media_source_url
-            FROM tiktok_posts p
-            LEFT JOIN media_items mi
-                   ON mi.source = 'tiktok'
-                  AND mi.content_id = p.platform_post_id
-            WHERE p.profile_id = $1
-            ORDER BY p.create_time DESC NULLS LAST, p.collected_at DESC
-            LIMIT $2
-            """,
-            profile_uuid, limit,
-        )
-        posts = []
-        for r in rows:
-            d = dict(r)
-            d["post_url"] = d.pop("media_source_url") or (
-                f"https://www.tiktok.com/@{username}/video/{d['platform_post_id']}"
-            )
-            posts.append(d)
-    return {"profile": profile, "posts": posts}
+    return await get_profile_posts(await _get_pool(), source="tiktok", username=username, limit=limit)
 
 
 # ---------------------------------------------------------------------------
@@ -377,83 +202,14 @@ async def tiktok_profile_detail(username: str, limit: int = 200,
 @router.get("/threads/profiles")
 async def list_threads_profiles(limit: int = 100, _user: dict = Depends(require_role("viewer"))):
     """Threads profiles derived from collected posts."""
-    limit = max(1, min(limit, 500))
     pool = await _get_pool()
-    async with pool.acquire() as conn:
-        if await conn.fetchval("SELECT to_regclass('threads_posts')") is None:
-            return []
-        rows = await conn.fetch(
-            """
-            SELECT p.author_username AS username,
-                   COUNT(p.id) AS posts_collected,
-                   MAX(p.platform_created_at) AS last_post_at,
-                   (SELECT profile_photo_url FROM social_users WHERE platform='threads' AND username=p.author_username ORDER BY times_seen DESC LIMIT 1) AS avatar_url
-            FROM threads_posts p
-            GROUP BY p.author_username
-            ORDER BY posts_collected DESC
-            LIMIT $1
-            """,
-            limit,
-        )
-    return [dict(r) for r in rows]
+    return await list_profiles(pool, source="threads", limit=limit)
 
 
 @router.get("/threads/profile/{username}")
 async def threads_profile_detail(username: str, limit: int = 200, _user: dict = Depends(require_role("viewer"))):
     """Posts for one Threads account."""
-    limit = max(1, min(limit, 500))
-    pool = await _get_pool()
-    async with pool.acquire() as conn:
-        if await conn.fetchval("SELECT to_regclass('threads_posts')") is None:
-            return {"profile": None, "posts": []}
-
-        profile_info = await conn.fetchrow(
-            """
-            SELECT p.author_username AS username,
-                   COUNT(p.id) AS posts_collected,
-                   MAX(p.platform_created_at) AS last_post_at,
-                   (SELECT profile_photo_url FROM social_users WHERE platform='threads' AND username=p.author_username ORDER BY times_seen DESC LIMIT 1) AS avatar_url
-            FROM threads_posts p
-            WHERE p.author_username = $1
-            GROUP BY p.author_username
-            """,
-            username
-        )
-        if not profile_info:
-            return {"profile": None, "posts": []}
-
-        posts = await conn.fetch(
-            """
-            SELECT p.platform_post_id,
-                   p.caption,
-                   p.hashtags,
-                   p.likes_count,
-                   p.comments_count,
-                   p.reposts_count,
-                   p.media_type,
-                   p.platform_created_at,
-                   p.collected_at,
-                   mi.id AS media_item_id,
-                   mi.content_type AS media_content_type
-            FROM threads_posts p
-            LEFT JOIN media_items mi
-                   ON mi.source = 'threads'
-                  AND mi.entity_id = p.author_username
-                  AND mi.content_id = p.platform_post_id
-            WHERE p.author_username = $1
-            ORDER BY p.platform_created_at DESC NULLS LAST, p.collected_at DESC
-            LIMIT $2
-            """,
-            username, limit,
-        )
-
-    out_posts = []
-    for r in posts:
-        d = dict(r)
-        d["post_url"] = f"https://www.threads.net/@{username}/post/{d['platform_post_id']}"
-        out_posts.append(d)
-
-    return {"profile": dict(profile_info), "posts": out_posts}
+    return await get_profile_posts(await _get_pool(), source="threads", username=username, limit=limit)
 
 
 # ---------------------------------------------------------------------------
@@ -740,97 +496,15 @@ async def github_repo_detail(full_name: str, limit: int = 200, _user: dict = Dep
 @router.get("/lemon8/profiles")
 async def list_lemon8_profiles(limit: int = 100, _user: dict = Depends(require_role("viewer"))):
     """Lemon8 profiles and collection stats."""
-    limit = max(1, min(limit, 500))
     pool = await _get_pool()
-    async with pool.acquire() as conn:
-        if await conn.fetchval("SELECT to_regclass('lemon8_profiles')") is None:
-            return []
-        rows = await conn.fetch(
-            """
-            SELECT p.id,
-                   p.platform_user_id,
-                   p.username,
-                   p.nickname,
-                   p.avatar_url,
-                   p.bio,
-                   p.followers_count,
-                   p.following_count,
-                   p.like_count,
-                   p.updated_at,
-                   (SELECT COUNT(*) FROM lemon8_posts WHERE profile_id = p.id) AS posts_collected,
-                   (SELECT MAX(platform_created_at) FROM lemon8_posts WHERE profile_id = p.id) AS last_post_at
-            FROM lemon8_profiles p
-            ORDER BY p.followers_count DESC NULLS LAST, p.updated_at DESC
-            LIMIT $1
-            """,
-            limit,
-        )
-    return [dict(r) for r in rows]
+    return await list_profiles(pool, source="lemon8", limit=limit)
 
 
 @router.get("/lemon8/profile/{username}")
 async def lemon8_profile_detail(username: str, limit: int = 200, _user: dict = Depends(require_role("viewer"))):
     """Posts for one Lemon8 account."""
-    limit = max(1, min(limit, 500))
     pool = await _get_pool()
-    async with pool.acquire() as conn:
-        if await conn.fetchval("SELECT to_regclass('lemon8_profiles')") is None:
-            return {"profile": None, "posts": []}
-
-        profile_row = await conn.fetchrow(
-            """
-            SELECT p.id,
-                   p.platform_user_id,
-                   p.username,
-                   p.nickname,
-                   p.avatar_url,
-                   p.bio,
-                   p.followers_count,
-                   p.following_count,
-                   p.like_count,
-                   p.updated_at
-            FROM lemon8_profiles p
-            WHERE p.username = $1
-            """,
-            username
-        )
-        if not profile_row:
-            return {"profile": None, "posts": []}
-
-        profile = dict(profile_row)
-        profile_uuid = profile.pop("id")
-
-        posts = await conn.fetch(
-            """
-            SELECT p.platform_post_id,
-                   p.title,
-                   p.description,
-                   p.music_title,
-                   p.like_count,
-                   p.comment_count,
-                   p.share_count,
-                   p.platform_created_at,
-                   p.collected_at,
-                   mi.id AS media_item_id,
-                   mi.content_type AS media_content_type
-            FROM lemon8_posts p
-            LEFT JOIN media_items mi
-                   ON mi.source = 'lemon8'
-                  AND mi.content_id = p.platform_post_id
-            WHERE p.profile_id = $1
-            ORDER BY p.platform_created_at DESC NULLS LAST, p.collected_at DESC
-            LIMIT $2
-            """,
-            profile_uuid, limit,
-        )
-
-    out_posts = []
-    for r in posts:
-        d = dict(r)
-        d["post_url"] = f"https://www.lemon8-app.com/{username}/post/{d['platform_post_id']}"
-        out_posts.append(d)
-
-    return {"profile": profile, "posts": out_posts}
+    return await get_profile_posts(pool, source="lemon8", username=username, limit=limit)
 
 
 # ---------------------------------------------------------------------------
@@ -844,120 +518,19 @@ async def list_beeper_chats(
     _user: dict = Depends(require_role("viewer")),
 ):
     """Beeper chats and collection stats."""
-    limit = max(1, min(limit, 500))
-    pool = await _get_pool()
-    async with pool.acquire() as conn:
-        if await conn.fetchval("SELECT to_regclass('beeper_shadow_chats')") is None:
-            return []
-        where = ""
-        args: list = [limit]
-        if network:
-            args.append(network)
-            where = "WHERE c.network = $2"
-        rows = await conn.fetch(
-            f"""
-            SELECT c.chat_id,
-                   c.local_chat_id,
-                   c.network,
-                   c.title,
-                   c.img_url,
-                   c.chat_type,
-                   (c.chat_type = 'dm') AS is_direct,
-                   c.account_id,
-                   c.last_seen_at,
-                   (SELECT COUNT(*) FROM beeper_shadow_messages WHERE chat_id = c.chat_id) AS messages_collected,
-                   (SELECT MAX(timestamp) FROM beeper_shadow_messages WHERE chat_id = c.chat_id) AS last_message_at
-            FROM beeper_shadow_chats c
-            {where}
-            ORDER BY c.last_seen_at DESC NULLS LAST
-            LIMIT $1
-            """,
-            *args,
-        )
-    return [dict(r) for r in rows]
+    return await list_messaging_chats(await _get_pool(), source="beeper", limit=limit, network=network)
+
+
+@router.get("/beeper/chat/{chat_id:path}/members")
+async def beeper_chat_members(chat_id: str, limit: int = 100, _user: dict = Depends(require_role("viewer"))):
+    """Bounded durable Beeper roster for one captured chat."""
+    return await list_messaging_members(await _get_pool(), source="beeper", chat_id=chat_id, limit=limit)
 
 
 @router.get("/beeper/chat/{chat_id:path}")
 async def beeper_chat_detail(chat_id: str, limit: int = 200, _user: dict = Depends(require_role("viewer"))):
     """Messages for one Beeper chat."""
-    limit = max(1, min(limit, 500))
-    pool = await _get_pool()
-    async with pool.acquire() as conn:
-        if await conn.fetchval("SELECT to_regclass('beeper_shadow_chats')") is None:
-            return {"chat": None, "messages": []}
-
-        chat_row = await conn.fetchrow(
-            """
-            SELECT c.chat_id,
-                   c.local_chat_id,
-                   c.network,
-                   c.title,
-                   c.img_url,
-                   c.chat_type,
-                   (c.chat_type = 'dm') AS is_direct,
-                   c.account_id,
-                   c.last_seen_at
-            FROM beeper_shadow_chats c
-            WHERE c.chat_id = $1
-            """,
-            chat_id
-        )
-        if not chat_row:
-            return {"chat": None, "messages": []}
-
-        chat = dict(chat_row)
-
-        messages = await conn.fetch(
-            """
-            SELECT m.message_id,
-                   m.network,
-                   m.sender_id,
-                   m.sender_name,
-                   m.text,
-                   m.timestamp,
-                   m.sort_key,
-                   (m.msg_type IN ('IMAGE','VIDEO','STICKER','FILE','VOICE','AUDIO')
-                    OR (m.attachments IS NOT NULL
-                        AND m.attachments::text NOT IN ('null','[]','{}'))) AS is_media,
-                   NULL::text AS media_url,
-                   m.msg_type AS media_type,
-                   m.is_deleted,
-                   m.deleted_at,
-                   m.ingested_at
-            FROM beeper_shadow_messages m
-            WHERE m.chat_id = $1
-            ORDER BY m.timestamp DESC NULLS LAST
-            LIMIT $2
-            """,
-            chat_id, limit,
-        )
-
-        mids = [m["message_id"] for m in messages]
-        media_map: dict[str, str] = {}
-        if mids:
-            media_rows = await conn.fetch(
-                """
-                SELECT DISTINCT ON (split_part(content_id, '_', 1))
-                       split_part(content_id, '_', 1) AS mid,
-                       id AS media_item_id
-                FROM media_items
-                WHERE source = 'beeper'
-                  AND split_part(content_id, '_', 1) = ANY($1::text[])
-                ORDER BY split_part(content_id, '_', 1), collected_at
-                """,
-                mids,
-            )
-            media_map = {r["mid"]: r["media_item_id"] for r in media_rows}
-
-    out_messages = []
-    for r in messages:
-        d = dict(r)
-        d["media_item_id"] = media_map.get(d["message_id"])
-        out_messages.append(d)
-
-    out_messages.reverse()
-
-    return {"chat": chat, "messages": out_messages}
+    return await get_messaging_messages(await _get_pool(), source="beeper", chat_id=chat_id, limit=limit)
 
 
 # ---------------------------------------------------------------------------

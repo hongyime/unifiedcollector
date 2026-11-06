@@ -12,7 +12,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PROPOSAL = ROOT / ".omo/evidence/collector-production-recovery/task-11-reconciliation-proposal.json"
+PROPOSAL = ROOT / "tests/fixtures/evidence/collector-production-recovery/task-11-reconciliation-proposal.json"
 COMPOSE = ROOT / "docker/docker-compose.yml"
 
 

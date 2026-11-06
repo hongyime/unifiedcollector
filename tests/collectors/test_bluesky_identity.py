@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from unittest.mock import AsyncMock
 
 import httpx
 
-from src.collectors.bluesky import _parse_indexed_at
+from src.collectors import bluesky as bluesky_module
+from src.collectors.bluesky import BlueskyCollector, _parse_indexed_at
 from src.collectors.bluesky.identity import (
     _canonical_handle,
     resolve_and_enqueue_bluesky_candidates,
 )
+from src.core.profile_only_collector import ProfileResult
 
 
 class _FakeConnection:
@@ -110,3 +113,40 @@ async def test_rate_limit_defers_rest_of_batch_without_queueing():
     assert pool.conn.cache_rows == []
     assert pool.conn.queue_rows == []
     assert result == {"resolved": 0, "unresolvable": 0, "queued": 0, "deferred": 2}
+
+
+class _StreamConnection:
+    async def fetch(self, _query: str, dids: list[str]):
+        return [{"did": dids[0], "username": "tracked.bsky.social"}]
+
+
+class _StreamPool:
+    def __init__(self) -> None:
+        self.conn = _StreamConnection()
+
+    @asynccontextmanager
+    async def acquire(self):
+        yield self.conn
+
+
+async def test_native_cycle_hydrates_only_a_tracked_stream_did(monkeypatch):
+    tracked = "did:plc:abcdefghijklmnopqrstuvwx"
+    untracked = "did:plc:zyxwvutsrqponmlkjihgfedc"
+    collector = BlueskyCollector()
+    collector.set_pool(_StreamPool())
+    monkeypatch.setattr(bluesky_module, "run_bluesky_stream_canary", AsyncMock(return_value={"processed": 1}))
+    monkeypatch.setattr(
+        bluesky_module,
+        "run_bluesky_profile_change_stream",
+        AsyncMock(return_value={"processed": 2, "profile_dids": [tracked, untracked]}),
+    )
+    collector.probe_profile = AsyncMock(return_value=ProfileResult(
+        exists=True, username=tracked, fields={"did": tracked}, raw_payload={"did": tracked},
+    ))
+    collector._upsert_profile = AsyncMock()
+
+    summary = await collector.run_native_cycle()
+
+    assert summary["processed"] == 1
+    collector.probe_profile.assert_awaited_once_with(tracked)
+    collector._upsert_profile.assert_awaited_once()

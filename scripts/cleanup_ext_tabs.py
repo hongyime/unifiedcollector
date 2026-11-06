@@ -10,7 +10,7 @@ import time
 import urllib.parse
 import urllib.request
 
-CDP = os.getenv("UC_CHROME_CDP_URL", f"http://127.0.0.1:{os.getenv('UC_CHROME_CDP_PORT', '9336')}")
+CDP = os.getenv("UC_CHROME_CDP_URL", f"http://127.0.0.1:{os.getenv('UC_CHROME_CDP_PORT', '9223')}")
 PRIMARY_ID = "pkmdmcklnjdeocoeigmlakhomhhcpafb"
 KNOWN_IDS = {PRIMARY_ID, "nkeimhogjdpnpccoofpliimaahmaaome"}
 

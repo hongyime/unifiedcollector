@@ -32,6 +32,7 @@ from .status_delta import StatusDeltaHandler
 from .wa_staging_merge import WhatsappStagingMergeHandler
 from .watchdog_stale_alert import WatchdogStaleAlertHandler
 from .host_memory_alert import HostMemoryAlertHandler
+from .memory_recovery import MemoryRecoveryHandler
 
 HANDLERS: list[PeriodicHandler] = [
     HeartbeatHandler(),
@@ -49,6 +50,7 @@ HANDLERS: list[PeriodicHandler] = [
     PostgresIdleTxnAlertHandler(),
     WhatsappStagingMergeHandler(),
     HostMemoryAlertHandler(),
+    MemoryRecoveryHandler(),
     ArchiveFallbackHandler(),
     BrowserRotationHandler(),
 ]
@@ -72,4 +74,5 @@ __all__ = [
     "PostgresIdleTxnAlertHandler",
     "WhatsappStagingMergeHandler",
     "HostMemoryAlertHandler",
+    "MemoryRecoveryHandler",
 ]

@@ -393,11 +393,22 @@
   const OrigSend = XMLHttpRequest.prototype.send;
   XMLHttpRequest.prototype.open = function (method, url) {
     this.__uc_url = url;
+    this.__uc_method = String(method || "GET").toUpperCase();
     return OrigOpen.apply(this, arguments);
   };
   XMLHttpRequest.prototype.send = function () {
     try {
       const url = String(this.__uc_url || "");
+      if (platform === "x" && this.__uc_method === "GET") {
+        try {
+          const observed = new URL(url, location.href);
+          if (/^(?:www\.)?(?:x\.com|twitter\.com)$/i.test(observed.hostname) &&
+              /^\/i\/api\/2\//.test(observed.pathname) &&
+              !/graphql/i.test(observed.pathname)) {
+            window.postMessage({ __uc: true, type: "x_observed_xhr_get", url: observed.href }, "*");
+          }
+        } catch (e) {}
+      }
       if (platform === "tiktok" && tkListRe.test(url)) {
         this.addEventListener("load", function () {
           try { if (typeof this.responseText === "string") harvestTikTokList(url, this.responseText); } catch (e) {}
@@ -415,8 +426,9 @@
     return OrigSend.apply(this, arguments);
   };
 
-  // TikTok DM observation hook. It passively decodes frames on TikTok's frontier socket.
-  if (platform === "tiktok") {
+  // Direct-message collection was retired. Keep the old implementation out of
+  // the page world until it can be deleted with its historical migration.
+  if (false && platform === "tiktok") {
     // Keep the liveness pulse outside the descriptor/proxy setup below. If a
     // site bundle changes window.WebSocket in a way we do not expect, the
     // watchdog should still learn that the page-world hook loaded.
@@ -462,7 +474,7 @@
       // 24-byte SAMPLE_MIN_BYTES floor still skips MQTT/heartbeat pings.
       const SAMPLE_MAX = 200, SAMPLE_MIN_BYTES = 24;
       // P1.3: WS-hook heartbeat counters. shipSample/probe increment these;
-      // _postDmHeartbeat emits them to background.js for /social/dm-heartbeat.
+      // _postDmHeartbeat formerly emitted the retired hook telemetry.
       function abToB64(buf) {
         let s = ""; const b = new Uint8Array(buf);
         for (let i = 0; i < b.length; i++) s += String.fromCharCode(b[i]);
@@ -553,7 +565,7 @@
       function _bigToStr(b) { return typeof b === "bigint" ? b.toString() : String(b); }
 
       // TikTok frontier DM decoder. Given a raw binary WS frame, returns
-      // {threads: [...], messages: [...]} shaped for POST /social/dm-decoded,
+      // {threads: [...], messages: [...]} shaped for the retired bridge payload,
       // or null when the frame isn't a user-event message. Structure derived
       // empirically — see tmp/dm_analysis/decode_raw.py + inspect_unknown.py
       // and src/db/migrations/add_tiktok_dm.sql for the field map.

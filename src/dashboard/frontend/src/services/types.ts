@@ -291,6 +291,21 @@ export interface SourceMediaFreshness {
   next_action: string;
 }
 
+export interface TelegramHistoryThroughput {
+  active_history_workers: number;
+  queue_depth?: number;
+  historical_lag_since?: string | null;
+  historical_lag_seconds?: number | null;
+  accounts: Array<{
+    account_identity: string;
+    claim_budget: number;
+    active_claims: number;
+    write_rate: number;
+    flood_waits: number;
+    cooldown_until?: string | null;
+  }>;
+}
+
 export interface SourceCollectionMatrixRow {
   source: string;
   display_name?: string | null;
@@ -300,10 +315,12 @@ export interface SourceCollectionMatrixRow {
   status_label?: string;
   status_severity?: "ok" | "warning" | "error" | string;
   collection_mode: string | null;
+  collection_modes?: string[];
   collection_methods: string[];
   freshness_basis: string | null;
   age_seconds: number | null;
   stale_after_seconds: number | null;
+  freshness_target_seconds?: number | null;
   detail: string | null;
   source_health_status?: string | null;
   source_health_error?: string | null;
@@ -320,6 +337,7 @@ export interface SourceCollectionMatrixRow {
   media_stats_unavailable?: boolean;
   media_stats_error?: string | null;
   media_freshness: SourceMediaFreshness;
+  history_throughput?: TelegramHistoryThroughput;
   rate_limit: SourceRateLimitState;
   extension_issues: BrowserExtensionIssue[];
   blocker: SourceBlocker;
@@ -343,6 +361,18 @@ export interface SourceCollectionMatrix {
     issues: BrowserExtensionIssue[];
   } | null;
   errors?: Array<{ section: string; error: string }>;
+}
+
+export interface SourceRecoveryProfile {
+  source_name: string;
+  account_identity: string | null;
+  state: string;
+  reason: string | null;
+  restricted_until: string | null;
+  stale_since: string | null;
+  clean_passes?: number;
+  clean?: number;
+  active?: boolean;
 }
 
 export interface RunIngestionCounts {
@@ -402,6 +432,8 @@ export interface MediaStats {
   age_seconds?: number | null;
   stale_after_seconds?: number | null;
   collection_mode?: string | null;
+  collection_modes?: string[];
+  freshness_target_seconds?: number | null;
   freshness_basis?: string | null;
   health_detail?: string | null;
   source_health_status?: string | null;
@@ -603,34 +635,6 @@ export interface UserHistoryEntry {
   caption: string | null;
   message_type: string | null;
   collected_at: string;
-}
-
-// TikTok DMs — captured through the extension's WS-hook client-side decoder
-// (Option B of #39). Table columns match tiktok_dm{,_thread}; API endpoints
-// under /tiktok/dms/. Thread IDs are the conversation_id string
-// '0:1:UID_A:UID_B' — kept as `thread_id` in the API shape.
-export interface TtDmThread {
-  thread_id: string;
-  conversation_type: number | null;
-  participants: string[] | null;
-  owner_account: string | null;
-  last_activity: string | null;
-  message_count?: number;
-  last_message_ts?: string | null;
-}
-export interface TtDmMessage {
-  message_id: string;
-  sender_id: string | null;
-  sender_secuid: string | null;
-  text: string | null;
-  awe_type: number | null;
-  message_type: number | null;
-  timestamp: string | null;
-  is_from_me: boolean;
-  owner_account: string | null;
-  client_message_id: string | null;
-  is_stranger: boolean | null;
-  media_url: string | null;
 }
 
 // TikTok public feed — /tiktok/profiles + /tiktok/profile/{username}. Backs

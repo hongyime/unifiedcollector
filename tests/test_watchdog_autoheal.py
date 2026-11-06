@@ -9,6 +9,8 @@ import time
 import types
 from unittest.mock import AsyncMock
 
+import pytest
+
 
 def _make_service():
     # Import lazily so this file can run even if other deps are heavy.
@@ -64,6 +66,75 @@ async def test_telegram_dlq_handler_retries_exact_media(monkeypatch):
     assert retry.await_count == 2
     retry.assert_any_await(456, worker=worker_a, chat_id="-100123")
     retry.assert_any_await(456, worker=worker_b, chat_id="-100123")
+
+
+async def test_telegram_dlq_handler_defers_until_workers_are_ready():
+    from src.core.dlq_consumer import DeferredError
+    from src.worker import WorkerService
+
+    svc = WorkerService()
+    svc._collectors = {
+        "telegram": types.SimpleNamespace(
+            _workers=[],
+            download_message_media=AsyncMock(),
+        ),
+    }
+
+    with pytest.raises(DeferredError, match="workers are not ready") as exc_info:
+        await svc._retry_telegram_media_dlq({
+            "entity_id": "-100123",
+            "content_id": "-100123_456",
+        })
+
+    assert exc_info.value.delay_seconds == 60
+
+
+async def test_telegram_dlq_handler_defers_while_history_claims_are_active():
+    from src.core.dlq_consumer import DeferredError
+    from src.worker import WorkerService
+
+    worker = types.SimpleNamespace(account=types.SimpleNamespace(name="acct1"))
+    scheduler = types.SimpleNamespace(
+        snapshot=lambda _account: {"active_claims": 1},
+    )
+    svc = WorkerService()
+    download = AsyncMock()
+    svc._collectors = {
+        "telegram": types.SimpleNamespace(
+            _workers=[worker],
+            _history_scheduler=scheduler,
+            download_message_media=download,
+        ),
+    }
+
+    with pytest.raises(DeferredError, match="history claims are active") as exc_info:
+        await svc._retry_telegram_media_dlq({
+            "entity_id": "-100123",
+            "content_id": "-100123_456",
+        })
+
+    assert exc_info.value.delay_seconds == 300
+    download.assert_not_awaited()
+
+
+async def test_telegram_storage_deferred_media_does_not_spend_retry(monkeypatch):
+    from src.core.dlq_consumer import DeferredError
+    from src import worker as worker_mod
+    from src.worker import WorkerService
+
+    svc = WorkerService()
+    monkeypatch.setattr(
+        worker_mod,
+        "historical_media_storage_gate",
+        lambda: types.SimpleNamespace(allowed=False, reason="reserve active"),
+    )
+
+    with pytest.raises(DeferredError, match="reserve active"):
+        await svc._retry_telegram_media_dlq({
+            "entity_id": "-100123",
+            "content_id": "-100123_456",
+            "error_message": "historical media storage paused: reserve active",
+        })
 
 
 async def test_dlq_handler_requeues_non_exact_rows(monkeypatch):

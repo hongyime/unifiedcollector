@@ -1,0 +1,1 @@
+Sanitized blocked browser transport certification fixture.

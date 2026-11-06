@@ -23,6 +23,8 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends
 
 from src.db.connection import get_pool
+from src.core.backfill_lanes import list_backfill_lanes
+from src.core.link_approval_status import list_link_approvals
 from src.dashboard.api.auth import require_role
 from src.dashboard.api.helpers import (
     _acquire_dashboard_conn,
@@ -48,15 +50,13 @@ async def _get_pool():
 router = APIRouter()
 
 
-@router.get("/api/backfill-equilibrium")
-async def backfill_equilibrium(_user: dict = Depends(require_role("viewer"))):
+async def get_backfill_equilibrium(pool) -> dict:
     """Read-only backfill drain state for the dashboard.
 
     Queue tables tell us how far each platform is from historical equilibrium:
     pending/processing rows are backlog; terminal rows are drained work. Beeper
     and Matrix expose explicit backfill-state tables, so include those too.
     """
-    pool = await _get_pool()
     generated_at = datetime.now(timezone.utc).isoformat()
 
     queue_tables = {
@@ -208,6 +208,64 @@ async def backfill_equilibrium(_user: dict = Depends(require_role("viewer"))):
                 "backfill_complete_pct": pct(complete, total),
             }
 
+        if await table_exists(conn, "backfill_lanes"):
+            lane_rows = await conn.fetch(
+                """
+                SELECT source,
+                       COUNT(*)::int AS total,
+                       COUNT(*) FILTER (WHERE status = 'complete')::int AS complete,
+                       COUNT(*) FILTER (WHERE status IN ('pending','leased','cooldown_deferred'))::int AS queue_depth,
+                       COUNT(*) FILTER (WHERE status = 'leased')::int AS leased,
+                       COUNT(*) FILTER (WHERE status = 'failed')::int AS failed,
+                       MAX(latest_durable_write_at) AS latest_durable_write_at,
+                       MIN(created_at) FILTER (WHERE status IN ('pending','leased','cooldown_deferred')) AS historical_lag_since,
+                       FLOOR(EXTRACT(EPOCH FROM now() - MIN(created_at) FILTER
+                           (WHERE status IN ('pending','leased','cooldown_deferred'))))::bigint AS historical_lag_seconds
+                FROM backfill_lanes
+                WHERE lane = 'backfill'
+                GROUP BY source
+                """
+            )
+            for lane in lane_rows:
+                source = str(lane["source"])
+                total = int(lane["total"] or 0)
+                complete = int(lane["complete"] or 0)
+                queue_depth = int(lane["queue_depth"] or 0)
+                common_lane = {
+                    "total": total,
+                    "completed": complete,
+                    "queue_depth": queue_depth,
+                    "leased": int(lane["leased"] or 0),
+                    "failed": int(lane["failed"] or 0),
+                    "latest_durable_write_at": lane["latest_durable_write_at"],
+                    "historical_lag_since": lane["historical_lag_since"],
+                    "historical_lag_seconds": (
+                        int(lane["historical_lag_seconds"])
+                        if lane["historical_lag_seconds"] is not None else None
+                    ),
+                    "backfill_complete_pct": pct(complete, total),
+                }
+                platform = platforms.setdefault(source, {"platform": source})
+                platform["common_lane"] = common_lane
+                if "total" not in platform:
+                    platform.update({
+                        "queue_table": "backfill_lanes",
+                        **common_lane,
+                    })
+
+        if await table_exists(conn, "telegram_account_throughput"):
+            throughput_rows = await conn.fetch(
+                """SELECT account_identity, claim_budget, active_claims, claims_done,
+                          written_messages, write_rate, flood_waits, cooldown_until, updated_at
+                   FROM telegram_account_throughput ORDER BY account_identity"""
+            )
+            if throughput_rows:
+                telegram = platforms.setdefault("telegram", {"platform": "telegram"})
+                telegram["account_throughput"] = [dict(row) for row in throughput_rows]
+                telegram["active_history_workers"] = sum(
+                    int(row["active_claims"] or 0) for row in throughput_rows
+                )
+
         for platform, target in (await target_counts(conn)).items():
             platforms.setdefault(platform, {"platform": platform}).update(target)
 
@@ -220,6 +278,23 @@ async def backfill_equilibrium(_user: dict = Depends(require_role("viewer"))):
     }
     totals["backfill_complete_pct"] = pct(totals["completed"], totals["total"])
     return {"generated_at": generated_at, "totals": totals, "platforms": rows}
+
+
+@router.get("/api/backfill-equilibrium")
+async def backfill_equilibrium(_user: dict = Depends(require_role("viewer"))):
+    return await get_backfill_equilibrium(await _get_pool())
+
+
+@router.get("/api/backfill-lanes")
+async def backfill_lanes(source: str | None = None, limit: int = 100,
+                         _user: dict = Depends(require_role("viewer"))):
+    return await list_backfill_lanes(await _get_pool(), source=source, limit=limit)
+
+
+@router.get("/api/link-approvals")
+async def link_approvals(source: str | None = None, limit: int = 100,
+                         _user: dict = Depends(require_role("viewer"))):
+    return await list_link_approvals(await _get_pool(), source=source, limit=limit)
 
 
 def _derive_instagram_stuck_stage(report: dict) -> str:

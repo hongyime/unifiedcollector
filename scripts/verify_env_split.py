@@ -94,7 +94,6 @@ SERVICE_SOURCES: dict[str, list[str]] = {
     "collector_tiktok": COMMON_WORKER_PATHS + ["src/collectors/tiktok", "src/core/tiktok_browser.py"],
     "collector_github": COMMON_WORKER_PATHS + ["src/collectors/github"],
     "collector_snapchat": PROFILE_PROBE_PATHS + ["src/collectors/snapchat"],
-    "collector_paypal": PROFILE_PROBE_PATHS + ["src/collectors/paypal"],
     "collector_airbnb": PROFILE_PROBE_PATHS + ["src/collectors/airbnb"],
     "collector_bluesky": PROFILE_PROBE_PATHS + ["src/collectors/bluesky"],
     "collector_pinterest": PROFILE_PROBE_PATHS + ["src/collectors/pinterest"],

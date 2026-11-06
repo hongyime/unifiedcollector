@@ -66,6 +66,34 @@ class VaultHealth:
 
 
 @dataclass(frozen=True)
+class HistoricalMediaStorageGate:
+    allowed: bool
+    free_bytes: int | None
+    reserve_bytes: int | None
+    reason: str | None = None
+
+
+HISTORICAL_MEDIA_MIN_FREE_BYTES = 750 * 1024**3
+
+
+def historical_media_storage_gate(root: Path = VAULT_ROOT) -> HistoricalMediaStorageGate:
+    """Reserve the larger of 750 GiB or 20% of the vault for historical media."""
+    try:
+        usage = shutil.disk_usage(root)
+    except OSError as exc:
+        return HistoricalMediaStorageGate(False, None, None, f"storage check failed: {exc}")
+    reserve_bytes = max(HISTORICAL_MEDIA_MIN_FREE_BYTES, usage.total // 5)
+    if usage.free <= reserve_bytes:
+        return HistoricalMediaStorageGate(
+            False,
+            int(usage.free),
+            int(reserve_bytes),
+            f"free space {usage.free} is at or below historical-media reserve {reserve_bytes}",
+        )
+    return HistoricalMediaStorageGate(True, int(usage.free), int(reserve_bytes))
+
+
+@dataclass(frozen=True)
 class SidecarResult:
     enabled: bool
     ok: bool

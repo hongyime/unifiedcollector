@@ -303,6 +303,23 @@ async def test_seed_known_ids_keeps_partial_page_on_timeout(monkeypatch, caplog)
 
 
 @pytest.mark.asyncio
+async def test_known_id_seed_is_bounded_and_evicted_ids_rely_on_database_dedupe(monkeypatch):
+    rows = [{"content_id": f"id-{index:05d}"} for index in range(50_002)]
+    coll = _Collector()
+    coll.pool = _SeedPool(rows)
+    coll.reconciler.load_state = AsyncMock()
+
+    await coll._seed_known_ids()
+
+    assert len(coll._known_ids) == 50_000
+    assert "id-00000" not in coll._known_ids
+    assert "id-50001" in coll._known_ids
+    # An evicted value is intentionally treated as unknown; media_items UNIQUE
+    # protection owns the harmless duplicate insert attempt.
+    assert coll.is_known("id-00000") is False
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("source", ["github", "lemon8"])
 async def test_duplicate_skip_keeps_canonical_vault_blob_for_cross_path_media(tmp_path, monkeypatch, source):
     vault_root = tmp_path / "vault"

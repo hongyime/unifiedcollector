@@ -12,14 +12,14 @@ from pathlib import Path
 
 import pytest
 
-from src.core.source_states import SourceState, set_source_state
+from src.core.source_states import SourceState, clear_automatic_source_state, provider_backoff_seconds, provider_failure, record_provider_block, set_source_state
 from src.db import migrate
 
 _MIGRATION_NAME = "20261029_add_source_controls.sql"
 _MIGRATION = migrate.MIGRATIONS_DIR / _MIGRATION_NAME
 _ROUTER = (
     Path(__file__).resolve().parents[2]
-    / "src" / "dashboard" / "api" / "source_controls.py"
+    / "src" / "core" / "source_controls.py"
 )
 
 
@@ -32,6 +32,20 @@ class _FakeConn:
         if self.raise_exc is not None:
             raise self.raise_exc
         self.calls.append((sql, args))
+
+
+class _FakePool:
+    def __init__(self, conn):
+        self.conn = conn
+
+    def acquire(self):
+        return self
+
+    async def __aenter__(self):
+        return self.conn
+
+    async def __aexit__(self, *args):
+        return None
 
 
 @pytest.mark.asyncio
@@ -114,6 +128,36 @@ async def test_set_source_state_sets_enabled_when_explicitly_passed():
     )
 
 
+def test_provider_backoff_honors_retry_after_and_caps_exponential():
+    assert provider_backoff_seconds("45", 99) == 45
+    assert provider_backoff_seconds(None, 1) == 30
+    assert provider_backoff_seconds(None, 99) == 21600
+
+
+def test_provider_failure_extracts_http_status_and_retry_after():
+    response = type("Response", (), {"status_code": 429, "headers": {"Retry-After": "45"}})()
+    exc = type("ProviderError", (Exception,), {"response": response})()
+    assert provider_failure(exc) == (429, "45")
+
+
+@pytest.mark.asyncio
+async def test_record_provider_block_persists_retry_after_state():
+    conn = _FakeConn()
+    response = type("Response", (), {"status_code": 429, "headers": {"Retry-After": "45"}})()
+    exc = type("ProviderError", (Exception,), {"response": response})()
+
+    assert await record_provider_block(_FakePool(conn), "snapchat", exc, failures=3) == 45
+    assert conn.calls[0][1][0:2] == ("snapchat", "RATE_LIMITED")
+    assert conn.calls[0][1][4] == "HTTP 429; retry in 45s"
+
+
+@pytest.mark.asyncio
+async def test_recovery_never_overrides_manual_pause():
+    conn = _FakeConn()
+    await clear_automatic_source_state(conn, "tiktok")
+    assert "state <> 'PAUSED'" in conn.calls[0][0]
+
+
 def _executable_statements() -> list[str]:
     body = "\n".join(
         line for line in _MIGRATION.read_text(encoding="utf-8").splitlines()
@@ -158,7 +202,7 @@ def test_migration_has_no_comment_on():
 
 def test_migration_defines_every_column_the_route_selects():
     body = _ROUTER.read_text(encoding="utf-8")
-    select = body.split("SELECT", 1)[1].split("FROM source_controls", 1)[0]
+    select = body.rsplit("SELECT", 1)[1].split("FROM source_controls", 1)[0]
     columns = [c.strip() for c in select.replace("\n", " ").split(",") if c.strip()]
     assert len(columns) == 9
     migration = _MIGRATION.read_text(encoding="utf-8")

@@ -4,6 +4,7 @@ import hashlib
 from types import SimpleNamespace
 
 import pytest
+from asyncpg.exceptions import UniqueViolationError
 
 from src.bridges import ig_ingest
 
@@ -149,6 +150,30 @@ def test_download_allowed_https_host_succeeds(monkeypatch, tmp_path):
 
     assert saved is True
     assert session.calls == [ALLOWED_URL]
+
+
+def test_download_treats_concurrent_sha256_conflict_as_duplicate(monkeypatch, tmp_path):
+    _allowlist(monkeypatch, "*.cdninstagram.com")
+    _allow_writes(monkeypatch, tmp_path)
+    pool = _FakePool()
+    original_execute = pool.conn.execute
+
+    async def conflict_on_media_insert(query, *args):
+        if "INSERT INTO media_items" in query:
+            raise UniqueViolationError("uq_media_source_sha256")
+        return await original_execute(query, *args)
+
+    monkeypatch.setattr(pool.conn, "execute", conflict_on_media_insert)
+    stats = {}
+    saved = asyncio.run(
+        ig_ingest._download_and_save(
+            pool, _RecordingSession(data=b"jpegbytes"), "instagram", "alice",
+            {"content_id": "different-dom-id", "url": ALLOWED_URL}, stats,
+        )
+    )
+
+    assert saved is False
+    assert stats["duplicate_sha256"] == 1
 
 
 def test_download_rejects_http_before_request(monkeypatch, tmp_path):

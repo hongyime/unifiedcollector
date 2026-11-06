@@ -222,49 +222,9 @@ async def collectors_action_queue(
     limit: int = 50,
     _user: dict = Depends(require_role("viewer")),
 ):
-    from src.core.collection_action_queue import ensure_collection_action_queue
+    from src.core.collection_action_queue import list_collection_actions
 
-    normalized_status = str(status or "open").strip().lower()
-    if normalized_status not in {"open", "resolved", "all"}:
-        normalized_status = "open"
-    bounded_limit = min(max(int(limit or 50), 1), 200)
-    pool = await _get_pool()
-    conn = await _acquire_dashboard_conn(pool)
-    try:
-        await ensure_collection_action_queue(conn)
-        if normalized_status == "all":
-            rows = await conn.fetch(
-                """
-                SELECT source, action_type, scope_key, status, priority, reason,
-                       evidence, first_seen_at, last_seen_at, resolved_at
-                FROM collection_action_queue
-                ORDER BY status ASC, priority ASC, last_seen_at DESC
-                LIMIT $1
-                """,
-                bounded_limit,
-            )
-        else:
-            rows = await conn.fetch(
-                """
-                SELECT source, action_type, scope_key, status, priority, reason,
-                       evidence, first_seen_at, last_seen_at, resolved_at
-                FROM collection_action_queue
-                WHERE status = $1
-                ORDER BY priority ASC, last_seen_at DESC
-                LIMIT $2
-                """,
-                normalized_status,
-                bounded_limit,
-            )
-    finally:
-        await _release_dashboard_conn(pool, conn, "collection action queue list")
-    return {
-        "status": "ok",
-        "filter": normalized_status,
-        "limit": bounded_limit,
-        "count": len(rows),
-        "actions": [dict(row) for row in rows],
-    }
+    return await list_collection_actions(await _get_pool(), status=status, limit=limit)
 
 
 @router.get("/collectors/{source}")

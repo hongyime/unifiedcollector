@@ -330,6 +330,49 @@ def test_effective_module_set_is_passed_to_spiderfoot_command(monkeypatch, tmp_p
     assert raw_reports[0].parent.stat().st_mode & 0o777 == 0o700
 
 
+def test_spiderfoot_timeout_stays_bounded_when_pipe_cleanup_hangs(monkeypatch, tmp_path):
+    monkeypatch.setenv("SPIDERFOOT_CLI", sys.executable)
+    monkeypatch.setenv("SPIDERFOOT_STATE_ROOT", str(tmp_path))
+    monkeypatch.setenv("RECON_EVIDENCE_ROOT", str(tmp_path / "evidence"))
+
+    class Process:
+        pid = 12345
+
+        def __init__(self):
+            self.calls = 0
+            self.returncode = None
+
+        async def communicate(self):
+            self.calls += 1
+            await asyncio.Event().wait()
+
+    process = Process()
+
+    async def launch(*_args, **_kwargs):
+        return process
+
+    real_wait_for = asyncio.wait_for
+    waits = 0
+
+    async def bounded_wait_for(coro, timeout):
+        nonlocal waits
+        waits += 1
+        if waits == 2:
+            coro.close()
+            raise asyncio.TimeoutError
+        return await real_wait_for(coro, timeout)
+
+    monkeypatch.setattr(recon_spiderfoot.asyncio, "create_subprocess_exec", launch)
+    monkeypatch.setattr(recon_spiderfoot.asyncio, "wait_for", bounded_wait_for)
+    monkeypatch.setattr(recon_spiderfoot.os, "killpg", lambda *_args: None)
+
+    with pytest.raises(RuntimeError, match="SpiderFoot timed out after 0.01s"):
+        asyncio.run(_run_spiderfoot_cli(
+            {"target_value": "public.example"}, ["sfp_dnsresolve"], timeout_seconds=0.01,
+        ))
+    assert process.calls == 1
+
+
 def test_maigret_raw_report_is_retained_privately(monkeypatch, tmp_path):
     evidence = tmp_path / "private"
     monkeypatch.setenv("RECON_EVIDENCE_ROOT", str(evidence))

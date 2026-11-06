@@ -11,7 +11,6 @@ call time so that test monkey-patches keep working.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import sys
@@ -21,6 +20,7 @@ from fastapi import APIRouter, Depends
 
 from src.db.connection import get_pool
 from src.dashboard.api.auth import require_role
+from src.core.account_status import get_runtime_account_status
 
 logger = logging.getLogger(__name__)
 
@@ -242,6 +242,8 @@ async def platform_summary(name: str, _user: dict = Depends(require_role("viewer
                 out["age_seconds"] = cur["age_seconds"]
                 out["stale_after_seconds"] = cur.get("stale_after_seconds")
                 out["collection_mode"] = cur.get("collection_mode")
+                out["collection_modes"] = cur.get("collection_modes")
+                out["freshness_target_seconds"] = cur.get("freshness_target_seconds")
                 out["freshness_basis"] = cur.get("freshness_basis")
                 out["health_detail"] = cur.get("detail")
                 out["source_health_status"] = cur.get("source_health_status")
@@ -254,55 +256,18 @@ async def platform_summary(name: str, _user: dict = Depends(require_role("viewer
 @router.get("/accounts")
 async def accounts_overview(_user: dict = Depends(require_role("viewer"))):
     """Unified cross-platform account/session state — telegram accounts, whatsapp
-    bridge devices, and cookie-auth sources — with health, so one panel covers all
+    bridge devices, Beeper accounts, and cookie-auth sources — with health, so one panel covers all
     platforms instead of a telegram-only view.
     """
-    _wa_bridge_base = _lookup("_wa_bridge_base")
     _audit_cookie_file = _lookup("_audit_cookie_file")
     _COOKIE_SOURCES = _lookup("_COOKIE_SOURCES") or {}
     pool = await _get_pool()
-    async with pool.acquire() as conn:
-        try:
-            tg = [dict(r) for r in await conn.fetch(
-                "SELECT name, phone, status, last_connected_at, last_error "
-                "FROM telegram_user_accounts ORDER BY name")]
-        except Exception:
-            tg = []
-        health = {}
-        try:
-            for r in await conn.fetch("SELECT source, status, last_success_at, last_error FROM source_health"):
-                health[r["source"]] = dict(r)
-        except Exception:
-            pass
-
-    # WhatsApp bridges (health) — concurrent, off the event loop.
-    async def _wa_health(bridge: str) -> dict:
-        base = _wa_bridge_base(bridge)
-        import urllib.request
-
-        def _do():
-            with urllib.request.urlopen(f"{base}/health", timeout=6) as r:
-                return __import__("json").loads(r.read().decode())
-        try:
-            h = await asyncio.to_thread(_do)
-            return {"session": bridge, "ready": bool(h.get("whatsapp_ready")),
-                    "status": "connected" if h.get("whatsapp_ready") else "awaiting_scan",
-                    "needs_scan": bool(h.get("needs_scan")),
-                    "auth_state": h.get("auth_state")}
-        except Exception as exc:  # noqa: BLE001
-            return {"session": bridge, "ready": False, "status": "unreachable", "error": str(exc)}
-
-    wa = await asyncio.gather(_wa_health("1"), _wa_health("2"))
-
-    # Persisted per-account validity (collector-tested each cycle).
-    async with pool.acquire() as conn:
-        try:
-            cs_rows = {
-                (r["platform"], r["account"]): (r["status"], r["reason"])
-                for r in await conn.fetch("SELECT platform, account, status, reason FROM cookie_status")
-            }
-        except Exception:
-            cs_rows = {}
+    runtime = await get_runtime_account_status(pool)
+    tg = runtime["telegram"]
+    wa = runtime["whatsapp"]
+    beeper = runtime["beeper"]
+    health = runtime["health"]
+    cs_rows = runtime["cookie_status"]
 
     stale_days = int(os.getenv("COOKIE_STALE_DAYS", "30"))
     cred_dir = Path(os.getenv("COLLECTOR_CREDENTIALS_DIR", "/app/credentials"))
@@ -341,6 +306,7 @@ async def accounts_overview(_user: dict = Depends(require_role("viewer"))):
     return {
         "telegram": tg,
         "whatsapp": list(wa),
+        "beeper": beeper,
         "cookies": cookies,
         "health": {k: v.get("status") for k, v in health.items()},
     }

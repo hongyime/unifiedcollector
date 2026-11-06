@@ -29,6 +29,7 @@ Env knobs (all optional; safe defaults):
   REALTIME_POST_FEED_DEDUPE_BY_MEDIA   default "1"  (sha/url dedupe)
   REALTIME_POST_FEED_GLOBAL_MEDIA_DEDUPE_SOURCES
                                       default public/social sources
+  REALTIME_POST_FEED_EXCLUDED_SOURCES default empty (comma-separated source names)
   REALTIME_POST_FEED_SKIP_VIDEO_THUMBNAILS default "1"  (skip poster-only video rows)
   REALTIME_POST_FEED_SOURCE_SUMMARY_SECONDS default "900" (per-source status digest)
   REDIS_URL / REDIS_HOST / REDIS_PASSWORD  (same pattern as io_pacer)
@@ -336,6 +337,9 @@ def _passes_filter(payload: dict) -> bool:
 
 
 def _skip_reason(payload: dict) -> str | None:
+    excluded_sources = _csv_set("REALTIME_POST_FEED_EXCLUDED_SOURCES", frozenset())
+    if str(payload.get("source") or "").strip().lower() in excluded_sources:
+        return "source_excluded"
     if _is_own_logs_chat_telegram(payload):
         return "filtered_by_policy"
     include_profiles = _flag("REALTIME_POST_FEED_INCLUDE_PROFILES", "0")

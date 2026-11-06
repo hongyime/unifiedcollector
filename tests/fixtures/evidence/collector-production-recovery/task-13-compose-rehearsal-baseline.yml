@@ -1,0 +1,8 @@
+name: unifiedcollector-recovery-rehearsal
+services:
+  postgres:
+    container_name: uc-rehearsal-postgres
+    restart: "no"
+    ports: []
+  schema_init:
+    container_name: uc-rehearsal-schema-init

@@ -16,11 +16,24 @@ export const lsGet = (k: string, d: string): string => {
   }
 };
 
-/** Set a string in localStorage, silently no-op on quota / block. */
-export const lsSet = (k: string, v: string): void => {
+/** Set a string in localStorage, reporting quota / block failures to callers. */
+export const lsSet = (k: string, v: string): boolean => {
   try {
     localStorage.setItem(k, v);
-  } catch (e) { /* quota / blocked */ }
+    return true;
+  } catch (e) {
+    return false;
+  }
+};
+
+/** Remove a localStorage key without letting blocked storage abort a scrape. */
+export const lsRemove = (k: string): boolean => {
+  try {
+    localStorage.removeItem(k);
+    return true;
+  } catch (e) {
+    return false;
+  }
 };
 
 /** Parse an integer stored under `k`, defaulting to 0. */

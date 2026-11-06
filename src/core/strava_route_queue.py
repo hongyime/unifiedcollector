@@ -141,6 +141,7 @@ async def fetch_strava_route_capture_queue(
                 LEFT JOIN strava_gps_streams s ON s.activity_id = a.id
                 WHERE (a.summary_polyline IS NULL OR a.summary_polyline = '')
                   AND COALESCE(a.stream_status, '') NOT IN ('ok', 'incomplete', 'truncated_empty', 'ok_unverifiable')
+                  AND COALESCE((a.metadata->>'browser_stream_empty_defer_until')::timestamptz, '-infinity'::timestamptz) <= now()
                   AND (
                         s.latlng IS NULL
                      OR s.latlng = '[]'::jsonb
@@ -180,6 +181,7 @@ async def fetch_strava_route_capture_queue(
                 LEFT JOIN strava_athletes ath ON ath.id = a.athlete_id
                 WHERE (a.summary_polyline IS NULL OR a.summary_polyline = '')
                   AND COALESCE(a.stream_status, '') NOT IN ('ok', 'incomplete', 'truncated_empty', 'ok_unverifiable')
+                  AND COALESCE((a.metadata->>'browser_stream_empty_defer_until')::timestamptz, '-infinity'::timestamptz) <= now()
                   AND (
                         s.latlng IS NULL
                      OR s.latlng = '[]'::jsonb

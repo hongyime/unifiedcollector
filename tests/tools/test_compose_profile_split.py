@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 
 COMPOSE = Path(__file__).resolve().parents[2] / "docker" / "docker-compose.yml"
-_SOURCES = ("snapchat", "paypal", "airbnb", "bluesky", "pinterest")
+_SOURCES = ("snapchat", "airbnb", "bluesky", "pinterest")
 
 
 def _service_block(name: str) -> str:
@@ -21,14 +21,8 @@ def test_each_profile_probe_has_its_own_service() -> None:
     for source in _SOURCES:
         block = _service_block(f"collector_{source}")
         assert f"python -m src.collectors.profile_only_runner --source {source}\n" in block
-        assert (source != "paypal" and f"{source.upper()}_PROBE_ENABLED:" in block) or (source == "paypal" and "PAYPAL_PROBE_ENABLED" not in block)
+        assert f"{source.upper()}_PROBE_ENABLED:" in block
 
-
-def test_profile_services_do_not_enable_the_other_probes() -> None:
-    paypal = _service_block("collector_paypal")
-    assert "PAYPAL_PROBE_ENABLED:" not in paypal
-    assert "SNAPCHAT_PROBE_ENABLED:" not in paypal
-    assert "AIRBNB_PROBE_ENABLED:" not in paypal
 
 def test_profile_services_share_one_compose_anchor() -> None:
     text = COMPOSE.read_text(encoding="utf-8")

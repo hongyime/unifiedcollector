@@ -18,17 +18,22 @@ from src.cli.commands import (
     backfill_discovered_links,
     core_ops,
     coverage,
+    dm_purge,
+    handoff_freshness,
     media_repair,
     optional_rollout,
     realtime,
     rebuild,
     recon,
     schedule_target,
+    verified_exclusion,
 )
 
 _MODULES = [
     core_ops,
     coverage,
+    dm_purge,
+    handoff_freshness,
     recon,
     optional_rollout,
     realtime,
@@ -36,6 +41,7 @@ _MODULES = [
     media_repair,
     backfill_discovered_links,
     schedule_target,
+    verified_exclusion,
 ]
 
 

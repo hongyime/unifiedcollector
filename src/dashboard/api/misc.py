@@ -19,6 +19,9 @@ from fastapi import APIRouter, Depends, Query
 from src.db.connection import get_pool
 from src.dashboard.api.auth import require_role
 from src.dashboard.api.helpers import _MESSAGING_COVERAGE_CACHE
+from src.core.social_graph import get_social_graph
+from src.core.ephemeral_media_status import get_ephemeral_media_status
+from src.core.messaging_coverage import get_messaging_coverage
 
 logger = logging.getLogger(__name__)
 
@@ -44,58 +47,11 @@ async def social_graph(
     limit: int = Query(5000, description="Max edges to return", ge=1, le=50000),
     _user: dict = Depends(require_role("viewer"))
 ):
-    # Relationship edges live in TWO tables depending on the collector:
-    #   * graph_edges  (source, source_user, target_user, edge_type) — whatsapp
-    #   * follow_edges (platform, owner_account, target_uid/username, direction)
-    #     — instagram (and any future follow-graph collector)
-    # Query the right one for the requested platform and normalise follow_edges
-    # into the (source_user, target_user, edge_type) shape the frontend expects.
     pool = await _get_pool()
-    async with pool.acquire() as conn:
-        source_norm = (source or "").strip().lower()
-        if source_norm == "github" and await conn.fetchval("SELECT to_regclass('github_edges') IS NOT NULL"):
-            edges = await conn.fetch(
-                """
-                SELECT source_login AS source_user,
-                       target_login AS target_user,
-                       edge_type
-                FROM github_edges
-                ORDER BY last_seen DESC NULLS LAST
-                LIMIT $1
-                """,
-                limit,
-            )
-        else:
-            edges = await conn.fetch(
-                "SELECT source_user, target_user, edge_type FROM graph_edges WHERE source = $1 LIMIT $2",
-                source_norm, limit,
-            )
-            if not edges:
-                edges = await conn.fetch(
-                    """
-                    SELECT owner_account AS source_user,
-                           COALESCE(target_username, target_uid) AS target_user,
-                           direction AS edge_type
-                    FROM follow_edges
-                    WHERE platform = $1
-                    LIMIT $2
-                    """,
-                    source_norm, limit,
-                )
-    nodes = set()
-    edge_list = []
-    for e in edges:
-        nodes.add(e["source_user"])
-        nodes.add(e["target_user"])
-        edge_list.append(dict(e))
-    return {
-        "nodes": [{"id": n} for n in nodes],
-        "edges": edge_list,
-    }
+    return await get_social_graph(pool, source=source, limit=limit)
 
 
-@router.get("/messaging/coverage")
-async def messaging_coverage(_user: dict = Depends(require_role("viewer"))):
+async def _legacy_messaging_coverage(_user: dict = Depends(require_role("viewer"))):
     """Native-vs-Beeper messaging coverage.
 
     Native Telegram/WhatsApp tables are canonical. Beeper is a mirror for those
@@ -310,6 +266,12 @@ async def messaging_coverage(_user: dict = Depends(require_role("viewer"))):
     return out
 
 
+@router.get("/messaging/coverage")
+async def messaging_coverage(_user: dict = Depends(require_role("viewer"))):
+    """Native canonical counts alongside non-additive Beeper mirror coverage."""
+    return await get_messaging_coverage(await _get_pool())
+
+
 @router.get("/stories/overview")
 async def stories_overview(
     limit: int = Query(300, ge=1, le=2000),
@@ -320,35 +282,7 @@ async def stories_overview(
     the `kind` column (not content_type), across any source that captures them
     (instagram today; whatsapp status / telegram stories / tiktok as they land).
     """
-    pool = await _get_pool()
-    async with pool.acquire() as conn:
-        stats = await conn.fetchrow(
-            """
-            SELECT count(*) FILTER (WHERE kind='story')      AS stories,
-                   count(*) FILTER (WHERE kind='highlight')  AS highlights,
-                   count(DISTINCT entity_name)               AS accounts,
-                   count(DISTINCT source)                     AS sources,
-                   max(collected_at)                          AS newest
-            FROM media_items
-            WHERE kind IN ('story','highlight')
-            """
-        )
-        rows = await conn.fetch(
-            """
-            SELECT source, entity_name,
-                   count(*) FILTER (WHERE kind='story')     AS story_count,
-                   count(*) FILTER (WHERE kind='highlight') AS highlight_count,
-                   count(*)                                  AS total,
-                   max(collected_at)                         AS newest
-            FROM media_items
-            WHERE kind IN ('story','highlight')
-            GROUP BY source, entity_name
-            ORDER BY max(collected_at) DESC NULLS LAST
-            LIMIT $1
-            """,
-            limit,
-        )
-    return {"stats": dict(stats) if stats else {}, "accounts": [dict(r) for r in rows]}
+    return await get_ephemeral_media_status(await _get_pool(), limit=limit)
 
 
 @router.get("/worker/health")

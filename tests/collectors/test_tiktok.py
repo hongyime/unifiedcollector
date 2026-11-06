@@ -211,7 +211,7 @@ def test_constructor_defaults(monkeypatch):
     assert c._cookies_valid is False
     assert c._use_gallery_dl is False
     assert c._use_yt_dlp is False
-    assert c._browser_fallback is True
+    assert c._browser_fallback is False
     assert c._ytdlp_fallback is True
     assert c._video_follower_cap == 300
     assert c._profile_chunk_items == 60

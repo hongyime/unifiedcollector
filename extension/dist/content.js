@@ -12,7 +12,17 @@
   var lsSet = (k, v) => {
     try {
       localStorage.setItem(k, v);
+      return true;
     } catch (e) {
+      return false;
+    }
+  };
+  var lsRemove = (k) => {
+    try {
+      localStorage.removeItem(k);
+      return true;
+    } catch (e) {
+      return false;
     }
   };
   var lsNum = (k) => {
@@ -1550,12 +1560,11 @@
           clog("info", `${platform} owner graph @${owner}: ${active.side} +${users.length}`, platform);
         }
         if (active.side === "following") {
-          localStorage.setItem(stateKey, JSON.stringify({ owner, side: "followers" }));
+          if (!lsSet(stateKey, JSON.stringify({ owner, side: "followers" }))) return false;
           await sleep(jitter(2500));
           location.href = urls.followers;
         } else {
-          localStorage.removeItem(stateKey);
-          localStorage.setItem(lastKey, String(now));
+          if (!lsRemove(stateKey) || !lsSet(lastKey, String(now))) return false;
           await sleep(jitter(2500));
           location.href = homeUrl;
         }
@@ -1563,7 +1572,7 @@
       }
       const last = parseInt(lsGet(lastKey, "0"), 10) || 0;
       if (!active && now - last > FOLLOW_SWEEP_TTL_MS) {
-        localStorage.setItem(stateKey, JSON.stringify({ owner, side: "following" }));
+        if (!lsSet(stateKey, JSON.stringify({ owner, side: "following" }))) return false;
         await sleep(jitter(1500));
         location.href = urls.following;
         return true;
@@ -2346,8 +2355,8 @@
     async function finishTikTokRevisit(active, response, observed, username) {
       if (!active || !active.content_id) return;
       const stored = Number(response && response.upload && response.upload.stored || 0);
-      const status = observed > 0 ? "success" : "no_media";
-      const reason = observed > 0 ? "detail_page_harvested" : "detail_page_no_media";
+      const status = stored > 0 ? "success" : observed > 0 ? "failed" : "no_media";
+      const reason = stored > 0 ? "detail_page_harvested" : observed > 0 ? "detail_page_zero_store" : "detail_page_no_media";
       await sendTikTokRevisitResult(active, {
         type: "tiktokRevisitResult",
         content_id: active.content_id,
@@ -2679,6 +2688,19 @@
           maxPauseMs: forcedRecovery ? 1500 : 3500
         });
         const state = parseEmbeddedState(["__UNIVERSAL_DATA_FOR_REHYDRATION__", "SIGI_STATE", "sigi-persisted-data"]);
+        if (/^\/@[^/?#]+\/?$/.test(location.pathname || "")) {
+          const avatar = document.querySelector('[data-e2e="user-avatar"] img, [data-e2e="user-avatar"] picture img');
+          const profile = {
+            username: entity,
+            bio: textOf('[data-e2e="user-bio"]'),
+            followers_count: compactCount(textOf('[data-e2e="followers-count"]')),
+            profile_pic_url: avatar && (avatar.currentSrc || avatar.src) || null,
+            metadata: { source: "tiktok_profile_dom_canary", page_url: location.href }
+          };
+          if (profile.bio || profile.followers_count != null || profile.profile_pic_url) {
+            sendSideEffect({ type: "profile", platform: "tiktok", profile }, "tiktok", `TikTok @${entity} profile canary`, { timeoutMs: 12e3 });
+          }
+        }
         if (state) {
           deepCollectMedia(state, sink, entity, 0, "tiktok");
           const us = [];
@@ -3299,6 +3321,37 @@
     function xProgressKey() {
       return "uc_x_zero_progress_" + location.pathname.replace(/[^A-Za-z0-9_/-]/g, "_").slice(0, 180);
     }
+    let latestObservedXhrGet = null;
+    function rememberObservedXhrGet(url) {
+      try {
+        const observed = new URL(String(url || ""), location.href);
+        if (/^(?:www\.)?(?:x\.com|twitter\.com)$/i.test(observed.hostname) && /^\/i\/api\/2\//.test(observed.pathname) && !/graphql/i.test(observed.pathname)) {
+          latestObservedXhrGet = observed.href;
+        }
+      } catch (e) {
+      }
+    }
+    async function recoverWithObservedXhrGet() {
+      const wallKey2 = "uc_x_observed_get_recovery_wall";
+      const previous = lsNum(wallKey2);
+      if (!latestObservedXhrGet || previous && previous > Date.now()) return false;
+      const controller = new AbortController();
+      const deadline = setTimeout(() => controller.abort(), 8e3);
+      try {
+        const response = await fetch(latestObservedXhrGet, {
+          method: "GET",
+          credentials: "include",
+          signal: controller.signal
+        });
+        lsSet(wallKey2, String(Date.now() + 10 * 6e4));
+        return response.ok;
+      } catch (e) {
+        lsSet(wallKey2, String(Date.now() + 10 * 6e4));
+        return false;
+      } finally {
+        clearTimeout(deadline);
+      }
+    }
     function xProgressSample() {
       try {
         return compactSample(visiblePageText());
@@ -3523,6 +3576,8 @@
               return { targets: 1, saved: 0, posts: 0, discovered: 0 };
             }
           } else if (!xIsStatusPage() && zeroStreak >= 2) {
+            const observedRecovery = await recoverWithObservedXhrGet();
+            progressCounts.observed_xhr_get_recovery = observedRecovery;
             await xReportPageHealth("recoverable_error_shell", "x_timeline_zero_progress", progressCounts);
             clog("warn", `X ${feed}: no posts/media after ${zeroStreak} passes; scheduled tab reload`, "x");
             return { targets: 1, saved: 0, posts: 0, discovered: 0, skip_cycle_report: true };
@@ -4486,6 +4541,20 @@
       host: "snapchat.com",
       label: "Snapchat",
       async runCycle() {
+        const match = /^\/add\/([A-Za-z0-9._-]{1,100})\/?$/.exec(location.pathname || "");
+        const image = document.querySelector('meta[property="og:image"]');
+        const bitmojiUrl = match && image && image.getAttribute("content");
+        if (match && bitmojiUrl) {
+          sendSideEffect({
+            type: "profile",
+            platform: "snapchat",
+            profile: {
+              username: match[1],
+              bitmoji_url: bitmojiUrl,
+              metadata: { source: "snapchat_public_profile_dom_canary", page_url: location.href }
+            }
+          }, "snapchat", `Snapchat @${match[1]} profile canary`, { timeoutMs: 12e3 });
+        }
         return nativeScrapeCycle("snapchat");
       }
     };
@@ -4645,6 +4714,41 @@
     function passRestMs(platformId) {
       return PASS_REST_MS_BY_PLATFORM[platformId] || PASS_REST_MS;
     }
+    async function browserPacingProfile(platformId) {
+      const account = cooldownIdentity2(platformId);
+      const profile = await send({ type: "browserPacing", platform: platformId, account }, { retries: 0, timeoutMs: 7e3 }).catch(() => null);
+      return profile && profile.mode ? profile : { mode: "near_live_polling", volume_profile: "normal" };
+    }
+    function pacingCycleRestMs(platformId, pacing) {
+      const fallback = passRestMs(platformId);
+      const minimum = Number(pacing && pacing.cycle_rest_min_ms);
+      const maximum = Number(pacing && pacing.cycle_rest_max_ms);
+      if (Number.isFinite(minimum) && Number.isFinite(maximum) && minimum >= 3e4 && maximum >= minimum) {
+        return Math.round(minimum + Math.random() * (maximum - minimum));
+      }
+      return human(fallback);
+    }
+    function restrictedInstagramObservationDelayMs() {
+      return (90 + Math.floor(Math.random() * 61)) * 60 * 1e3;
+    }
+    async function observeRestrictedInstagramFollowingFeed() {
+      if (!/^\/$/.test(location.pathname || "/")) {
+        return { targets: 0, saved: 0, discovered: 0, restricted_observation: false, account: instagramLoggedInOwner() || "" };
+      }
+      const owner = instagramLoggedInOwner() || "following-feed";
+      const articles = document.querySelectorAll("article").length;
+      await send({
+        type: "ingest",
+        platform: "instagram",
+        username: owner,
+        items: [],
+        record_empty: true,
+        probe_reason: "restricted_following_feed_dom_observation",
+        probe_meta: { article_count: articles, path: location.pathname || "/" }
+      }, { retries: 0, timeoutMs: 12e3 }).catch(() => {
+      });
+      return { targets: 0, saved: 0, discovered: 0, restricted_observation: true, account: owner };
+    }
     async function mainLoop() {
       const p = currentPlatform();
       if (!p) return;
@@ -4658,7 +4762,33 @@
       });
       try {
         while (LOOP_RUNNING && ucContentScriptCurrent()) {
+          let pacing = { mode: "near_live_polling", volume_profile: "normal" };
           try {
+            pacing = await browserPacingProfile(p.id);
+            if (pacing.mode === "manually_paused") {
+              markLoopProgress();
+              await reportForcedCycleHealth(p, "manual_pause", "manual_pause", { volume_profile: "manual" });
+              await sleep(6e4);
+              continue;
+            }
+            if ((pacing.mode === "restricted" || pacing.mode === "recovery_exit") && p.id === "instagram") {
+              markLoopProgress();
+              const stats2 = await observeRestrictedInstagramFollowingFeed();
+              if (pacing.mode === "recovery_exit" && stats2.restricted_observation) {
+                await send({ type: "recoveryCleanPass", platform: "instagram", account: stats2.account }, { retries: 0, timeoutMs: 12e3 }).catch(() => {
+                });
+              }
+              await send({ type: "cycleReport", platform: p.label, ...stats2 }).catch(() => {
+              });
+              await sleep(restrictedInstagramObservationDelayMs());
+              continue;
+            }
+            if (pacing.mode === "cooldown") {
+              markLoopProgress();
+              await reportForcedCycleHealth(p, "provider_cooldown", "provider_cooldown", { volume_profile: "cooldown" });
+              await sleep(Math.max(3e4, Number(pacing.cooldown_rest_ms) || Math.min(passRestMs(p.id), 3e5)));
+              continue;
+            }
             const leftMs = wallLeftMs(p.id);
             if (leftMs > 0) {
               markLoopProgress();
@@ -4774,7 +4904,7 @@
           markLoopProgress();
           await send({ type: "loopStatus", platform: p.id, label: p.label, running: true, url: location.href }).catch(() => {
           });
-          await sleep(human(passRestMs(p.id)));
+          await sleep(pacingCycleRestMs(p.id, pacing));
         }
       } finally {
         LOOP_RUNNING = false;
@@ -5012,40 +5142,8 @@
       } else if (m.type === "users" && Array.isArray(m.users) && m.users.length) {
         send({ type: "users", platform: m.platform, context: m.context || "seen", owner: m.owner || null, users: m.users }).catch(() => {
         });
-      } else if (m.type === "tiktok_dm" && m.frame) {
-        send({ type: m.type, platform: m.platform, frame: m.frame }).catch(() => {
-        });
-      } else if (m.type === "dm_probe") {
-        send({
-          type: "dm_probe",
-          platform: m.platform,
-          transport: m.transport,
-          url: m.url,
-          frame_kind: m.frame_kind,
-          frame_size: m.frame_size
-        }).catch(() => {
-        });
-        clog("info", `DM ${m.transport} observed: ${m.frame_kind || "url"} ${m.frame_size ? m.frame_size + "B " : ""}${m.url}`, m.platform);
-      } else if (m.type === "dm_sample" && m.b64) {
-        send({ type: "dm_sample", platform: m.platform, url: m.url, size: m.size, b64: m.b64 }).catch(() => {
-        });
-      } else if (m.type === "dm_heartbeat") {
-        send({
-          type: "dm_heartbeat",
-          platform: m.platform,
-          probes_sent: m.probes_sent,
-          samples_shipped: m.samples_shipped
-        }).catch(() => {
-        });
-      } else if (m.type === "dm_decoded") {
-        send({
-          type: "dm_decoded",
-          platform: m.platform,
-          owner: m.owner || "",
-          threads: m.threads || [],
-          messages: m.messages || []
-        }).catch(() => {
-        });
+      } else if (m.type === "x_observed_xhr_get") {
+        rememberObservedXhrGet(m.url);
       } else if (m.type === "strava_streams" && m.activity_id) {
         if ((m.point_count || 0) > 1) markStravaStreamSeen(m.activity_id);
         else markStravaStreamAttempted(m.activity_id);

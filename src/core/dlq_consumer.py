@@ -63,6 +63,14 @@ class PermanentError(Exception):
     """Raise from a handler to mark the row failed immediately."""
 
 
+class DeferredError(Exception):
+    """Raise when work is intentionally paused and must not spend retries."""
+
+    def __init__(self, message: str, *, delay_seconds: float = 300.0):
+        super().__init__(message)
+        self.delay_seconds = max(1.0, delay_seconds)
+
+
 def compute_next_retry(
     retry_count: int,
     *,
@@ -277,6 +285,21 @@ class DLQConsumer:
             row["id"], row["source"], row["entity_id"], error_message[:200],
         )
 
+    async def _on_deferred(self, row: dict, error_message: str, delay_seconds: float) -> None:
+        await self._pool.execute(
+            """
+            UPDATE dead_letter_queue
+            SET status = 'pending', error_message = $2, last_attempt_at = NOW(),
+                next_retry_at = NOW() + $3 * INTERVAL '1 second'
+            WHERE id = $1
+            """,
+            row["id"], error_message[:8000], delay_seconds,
+        )
+        logger.info(
+            "DLQ id=%s source=%s deferred for %.0fs: %s",
+            row["id"], row["source"], delay_seconds, error_message[:200],
+        )
+
     async def _process_row(self, row: dict) -> None:
         handler = self._handlers.get(row["source"])
         if handler is None:
@@ -299,6 +322,8 @@ class DLQConsumer:
             )
         except PermanentError as e:
             await self._on_permanent(row, str(e))
+        except DeferredError as e:
+            await self._on_deferred(row, str(e), e.delay_seconds)
         except asyncio.CancelledError:
             # Don't count cancellation as a retry — release to pending.
             await self._pool.execute(

@@ -26,7 +26,6 @@ import { LinksPage } from "./features/whatsapp/LinksPage";
 import { WhatsAppLinkPage } from "./features/whatsapp/WhatsAppLinkPage";
 import { WhatsAppChatsPage } from "./features/whatsapp/WhatsAppChatsPage";
 import { StravaFeedPage } from "./features/strava/StravaFeedPage";
-import { TiktokDmPage } from "./features/tiktok/TiktokDmPage";
 import { TiktokFeedPage } from "./features/tiktok/TiktokFeedPage";
 import { ThreadsFeedPage } from "./features/threads/ThreadsFeedPage";
 import { YoutubeFeedPage } from "./features/youtube/YoutubeFeedPage";
@@ -73,7 +72,6 @@ const router = createBrowserRouter([
       { path: "whatsapp/link", element: <WhatsAppLinkPage /> },
       { path: "whatsapp/chats", element: <WhatsAppChatsPage /> },
       { path: "strava/feed", element: <StravaFeedPage /> },
-      { path: "tiktok/dms", element: <TiktokDmPage /> },
       { path: "tiktok/feed", element: <TiktokFeedPage /> },
       { path: "threads/feed", element: <ThreadsFeedPage /> },
       { path: "youtube/feed", element: <YoutubeFeedPage /> },

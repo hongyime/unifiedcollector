@@ -96,6 +96,50 @@ def test_rotator_scrape_config_uses_the_dashboard_control_plane():
     assert 'platformScrapeDisabled(platform, base)' not in source
 
 
+def test_browser_pacing_uses_control_plane_source_rest_windows():
+    content = (ROOT / "extension/src/content.ts").read_text(encoding="utf-8")
+    background = (ROOT / "extension/src/background.ts").read_text(encoding="utf-8")
+
+    assert "function pacingCycleRestMs(platformId, pacing)" in content
+    assert "await sleep(pacingCycleRestMs(p.id, pacing))" in content
+    assert "...profile, mode: \"cooldown\"" in background
+
+
+def test_follow_sweep_state_does_not_abort_on_origin_storage_quota():
+    content = (ROOT / "extension/src/content.ts").read_text(encoding="utf-8")
+    storage = (ROOT / "extension/src/shared/storage_helpers.ts").read_text(encoding="utf-8")
+    follow_sweep = content.split("async function maybeSweepFollowGraph", 1)[1].split(
+        "// ===========================================================================\n// Instagram",
+        1,
+    )[0]
+
+    assert "export const lsSet = (k: string, v: string): boolean" in storage
+    assert "export const lsRemove = (k: string): boolean" in storage
+    assert follow_sweep.count("lsSet(stateKey,") == 2
+    assert "lsSet(lastKey, String(now))" in follow_sweep
+    assert follow_sweep.count("return false;") >= 4
+    assert "lsRemove(stateKey)" in follow_sweep
+    assert "localStorage.setItem(stateKey" not in follow_sweep
+    assert "localStorage.setItem(lastKey" not in follow_sweep
+
+
+def test_tiktok_profile_canary_only_reads_an_existing_profile_page():
+    source = (ROOT / "extension/src/content.ts").read_text(encoding="utf-8")
+
+    assert 'tiktok_profile_dom_canary' in source
+    assert 'platform: "tiktok", profile' in source
+    assert 'data-e2e="followers-count"' in source
+
+
+def test_snapchat_profile_canary_only_reads_an_existing_public_profile_page():
+    source = (ROOT / "extension/src/content.ts").read_text(encoding="utf-8")
+
+    assert 'snapchat_public_profile_dom_canary' in source
+    assert 'meta[property="og:image"]' in source
+    assert 'platform: "snapchat"' in source
+    assert 'location.href = String(target.target_url)' not in source[source.index('const snapchat = {'):source.index('const airbnb = {')]
+
+
 def test_content_script_has_install_guard_for_manifest_reload():
     content = _read("extension/content.js").strip()
     # esbuild wraps every bundle in "use strict"; then an outer IIFE, and
@@ -128,6 +172,31 @@ def test_x_twitter_alias_is_registered_for_tabs_and_background():
     assert "function platformHosts(p)" in background
     assert "function platformUrlPatterns(p)" in background
     assert "platformHosts(p).includes(host)" in background
+
+
+def test_social_tabs_show_verified_sessions_separately_from_collection_evidence():
+    platforms = (ROOT / "extension/src/shared/platforms.ts").read_text(encoding="utf-8")
+    background = (ROOT / "extension/src/background.ts").read_text(encoding="utf-8")
+    tabs = (ROOT / "extension/src/tabs.ts").read_text(encoding="utf-8")
+
+    assert 'cookie: "__Host-sc-a-auth-session"' in platforms
+    assert 'cookie: "_aat"' in platforms
+    assert "cookieUrls:" in platforms
+    assert "const urls = [p.cookieUrl, ...(p.cookieUrls || [])].filter(Boolean);" in background
+    assert "signed in · session verified" in tabs
+    assert "Collection receipts are separate evidence." in tabs
+
+
+def test_browser_only_instagram_does_not_export_session_cookies():
+    background = (ROOT / "extension/src/background.ts").read_text(encoding="utf-8")
+    tabs = (ROOT / "extension/src/tabs.ts").read_text(encoding="utf-8")
+    tabs_html = (ROOT / "extension/tabs.html").read_text(encoding="utf-8")
+
+    assert "function syncCookies" not in background
+    assert 'case "syncBrowserSessions"' not in background
+    assert "/social/cookies" not in background
+    assert 'id="syncSessions"' not in tabs_html
+    assert 'type: "syncBrowserSessions"' not in tabs
 
 
 def test_x_is_auto_managed_by_scraper_tab_recovery():
@@ -580,6 +649,9 @@ def test_scraper_refresh_and_loop_nudges_close_canonical_duplicate_tabs():
     assert "closeDuplicateScraperTabRows(selection.duplicateRows, `refresh:${reason}`)" in refresh_block
     assert "closedDuplicates: closed.closed" in refresh_block
     assert "closeDuplicateScraperTabRows(selection.duplicateRows, `ensure_loops:${reason || \"nudge\"}`)" in loop_block
+    tab_lookup = background.split("async function tabForPlatform", 1)[1].split("async function isLoggedIn", 1)[0]
+    assert "selectCanonicalScraperTabRows(tabs)" in tab_lookup
+    assert "closeDuplicateScraperTabRows(selection.duplicateRows" in tab_lookup
 
 
 def test_auto_opened_scraper_tabs_are_unpinned_by_default():

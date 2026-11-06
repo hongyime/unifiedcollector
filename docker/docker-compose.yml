@@ -21,6 +21,8 @@ x-collector-common: &collector-common
   depends_on:
     postgres:
       condition: service_healthy
+    schema_init:
+      condition: service_completed_successfully
   restart: unless-stopped
 
 
@@ -72,12 +74,70 @@ services:
     oom_score_adj: -500
     mem_reservation: 2g
 
+  # The only service permitted to apply DDL during startup. Consumers wait for
+  # this one-shot phase instead of racing each other through apply_all().
+  schema_init:
+    image: unifiedcollector-collector:latest
+    container_name: unifiedcollector_schema_init
+    init: true
+    command: python -m src.db.dev_init
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
+    volumes:
+      - ../src:/app/src:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - ./env/common.env
+    restart: "no"
+
+  recon_egress_guard:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.spiderfoot
+    image: unifiedcollector-spiderfoot:latest
+    container_name: unifiedcollector_recon_egress_guard
+    init: true
+    command: python -m src.core.recon_egress_guard --serve --database-host unifiedcollector_postgres
+    environment:
+      RECON_MAX_EGRESS_BYTES: "${RECON_MAX_EGRESS_BYTES:-1073741824}"
+      RECON_EGRESS_GUARD_SOCKET: "/var/lib/unifiedcollector/recon-guard/status.sock"
+      RECON_EGRESS_GUARD_GID: "${RECON_GID:-1000}"
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_ADMIN
+      - CHOWN
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      postgres:
+        condition: service_healthy
+      schema_init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-m", "src.core.recon_egress_guard", "--check"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    volumes:
+      - /var/lib/unifiedcollector/recon-guard:/var/lib/unifiedcollector/recon-guard
+    restart: unless-stopped
+
   collector_spiderfoot:
     build:
       context: ..
       dockerfile: docker/Dockerfile.spiderfoot
     image: unifiedcollector-spiderfoot:latest
     container_name: unifiedcollector_spiderfoot
+    user: "${RECON_UID:-1000}:${RECON_GID:-1000}"
+    network_mode: "service:recon_egress_guard"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     init: true
     command: python -m src.recon_spiderfoot_service --poll-interval ${RECON_SPIDERFOOT_POLL_INTERVAL:-10} --workers ${RECON_SPIDERFOOT_WORKERS:-1}
     mem_limit: ${RECON_SPIDERFOOT_MEM:-2g}
@@ -99,6 +159,19 @@ services:
       SPIDERFOOT_ALLOW_INTRUSIVE: "${SPIDERFOOT_ALLOW_INTRUSIVE:-0}"
       SPIDERFOOT_TARGET_TIMEOUT_SECONDS: "${SPIDERFOOT_TARGET_TIMEOUT_SECONDS:-180}"
       SPIDERFOOT_STALE_TARGET_MINUTES: "${SPIDERFOOT_STALE_TARGET_MINUTES:-30}"
+      RECON_HEALTH_MAX_AGE_SECONDS: "${RECON_HEALTH_MAX_AGE_SECONDS:-360}"
+      RECON_MAX_TARGETS_PER_RUN: "${RECON_MAX_TARGETS_PER_RUN:-10}"
+      RECON_RUN_DEADLINE_SECONDS: "${RECON_RUN_DEADLINE_SECONDS:-1800}"
+      RECON_RUN_COOLDOWN_SECONDS: "${RECON_RUN_COOLDOWN_SECONDS:-3600}"
+      RECON_ADMISSION_POLICY_PATH: "/app/config/task-37-admission-policy.json"
+      RECON_ADMISSION_STATE_PATH: "/var/lib/unifiedcollector/recon-admission/task-37-admission-state.json"
+      RECON_ADMISSION_STATE_MODE: "0660"
+      RECON_ADMISSION_SHARED_GID: "${RECON_ADMISSION_SHARED_GID:-1000}"
+      RECON_EGRESS_GUARD_SOCKET: "/var/lib/unifiedcollector/recon-guard/status.sock"
+      RECON_EVIDENCE_ROOT: "/var/lib/unifiedcollector/recon-evidence"
+      RECON_MIN_DISK_FREE_BYTES: "${RECON_MIN_DISK_FREE_BYTES:-2147483648}"
+      RECON_MAX_EVIDENCE_BYTES: "${RECON_MAX_EVIDENCE_BYTES:-10737418240}"
+      RECON_SPIDERFOOT_HEARTBEAT_PATH: "/tmp/recon-spiderfoot-worker.heartbeat"
       SPIDERFOOT_STATE_ROOT: "${SPIDERFOOT_STATE_ROOT:-/tmp/spiderfoot-state}"
       # maigret: HTTP-only OSS account-enumeration engine (MIT), replaces the
       # DEAD sfp_accounts module for username targets.
@@ -113,7 +186,7 @@ services:
       MAIGRET_NUM_REQUESTS: "${MAIGRET_NUM_REQUESTS:-10}"
       MAIGRET_HTTP_TIMEOUT_SECONDS: "${MAIGRET_HTTP_TIMEOUT_SECONDS:-10}"
       MAIGRET_TARGET_TIMEOUT_SECONDS: "${MAIGRET_TARGET_TIMEOUT_SECONDS:-420}"
-      MAIGRET_REPORT_KEEPDIR: "${MAIGRET_REPORT_KEEPDIR:-}"
+      MAIGRET_REPORT_KEEPDIR: "${MAIGRET_REPORT_KEEPDIR:-/var/lib/unifiedcollector/recon-evidence/maigret}"
       # GHunt: email -> Google account enrichment. Isolated venv, not the system python.
       # See docker/Dockerfile.spiderfoot for the /opt/ghunt-venv install.
       # Creds.m is mounted READ-ONLY below; disable by unsetting GHUNT_CREDS.
@@ -125,23 +198,27 @@ services:
       DB_POOL_MAX_SIZE: "6"
       PYTHONUNBUFFERED: "1"
     volumes:
+      - /var/lib/unifiedcollector/recon-evidence:/var/lib/unifiedcollector/recon-evidence
+      - /var/lib/unifiedcollector/recon-admission:/var/lib/unifiedcollector/recon-admission
       - ../src:/app/src
+      - /var/lib/unifiedcollector/recon-guard:/var/lib/unifiedcollector/recon-guard:ro
+      - ./../config/task-37-admission-policy.json:/app/config/task-37-admission-policy.json:ro
       # GHunt credentials: set GHUNT_CREDS_HOST to an existing private session file.
       # Read-only bind so a bug in ghunt cannot rewrite the operator's file. Path
       # inside the container is GHUNT_CREDS (default /app/.ghunt/creds.m).
       - ${GHUNT_CREDS_HOST:-${USERPROFILE:-${HOME}}/.malfrats/ghunt/creds.m}:/app/.ghunt/creds.m:ro
     depends_on:
-      postgres:
+      recon_egress_guard:
         condition: service_healthy
     env_file:
       - ./env/common.env
       - ./env/recon.env
     healthcheck:
-      test: ["CMD-SHELL", "/opt/spiderfoot-venv/bin/python /opt/spiderfoot/sf.py -V >/dev/null 2>&1"]
-      interval: 90s
-      timeout: 90s
+      test: ["CMD", "python", "-m", "src.recon_spiderfoot_service", "--healthcheck"]
+      interval: 30s
+      timeout: 10s
       retries: 3
-      start_period: 120s
+      start_period: 180s
     restart: unless-stopped
 
   # P3-1: youtube runs in its OWN process/container, isolated from the main
@@ -200,6 +277,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      schema_init:
+        condition: service_completed_successfully
     env_file:
       - ./env/common.env
       - ./env/youtube.env
@@ -240,6 +319,7 @@ services:
       TIKTOK_GALLERY_DL_MAX_ITEMS: "30"
       TIKTOK_YTDLP_MAX_DOWNLOADS: "30"
       TIKTOK_YTDLP_AFTER_EMPTY_GALLERY: "false"
+      TIKTOK_BROWSER_FALLBACK_ENABLED: "false"
       # Subprocess download tiers enabled ONLY in this isolated container.
       TIKTOK_YTDLP_FALLBACK_ENABLED: "true"
       TIKTOK_GALLERY_DL_ENABLED: "true"
@@ -257,6 +337,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      schema_init:
+        condition: service_completed_successfully
     env_file:
       - ./env/common.env
       - ./env/tiktok.env
@@ -326,6 +408,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      schema_init:
+        condition: service_completed_successfully
     env_file:
       - ./env/common.env
       - ./env/github.env
@@ -391,6 +475,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      schema_init:
+        condition: service_completed_successfully
     env_file:
       - ./env/common.env
       - ./env/search.env
@@ -414,6 +500,9 @@ services:
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
       COLLECTOR_HANG_TIMEOUT_SECONDS: "7200"
+      # Strava is browser/CDP-only; retain the service as an intentional-idle
+      # compatibility shell so watchdog/source-health do not restart a crawler.
+      STRAVA_COLLECTOR_ENABLED: "false"
       STRAVA_PAGE_SCRAPE_BATCH: "20"
       STRAVA_SPIDER_ENABLED: "true"
       STRAVA_FOLLOW_SCRAPE_ENABLED: "true"
@@ -438,6 +527,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      schema_init:
+        condition: service_completed_successfully
     env_file:
       - ./env/common.env
       - ./env/strava.env
@@ -482,9 +573,11 @@ services:
       # to revert to instant-restart behaviour.
       WATCHDOG_DECISION_BUTTONS_ENABLED: "${WATCHDOG_DECISION_BUTTONS_ENABLED:-1}"
       WATCHDOG_DECISION_GRACE_SECONDS: "${WATCHDOG_DECISION_GRACE_SECONDS:-600}"
+      CUTOVER_PAUSE_FILE: /var/lib/unifiedcollector/cutover.pause
     volumes:
       - ../src:/app/src
       - /var/run/docker.sock:/var/run/docker.sock
+      - /var/lib/unifiedcollector:/var/lib/unifiedcollector:ro
     # Load ../.env so the Telegram notifier (NOTIFY_TELEGRAM_BOT_TOKEN /
     # TELEGRAM_CHAT_ID) can alert on stale-source restarts. Without it the
     # notifier silently no-ops (send-only, fail-safe).
@@ -494,6 +587,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      schema_init:
+        condition: service_completed_successfully
     # The safety net now has its own safety net: a wedged loop (or dead
     # interpreter) fails this heartbeat check and restart:unless-stopped revives
     # it. start_period covers the first interval before a heartbeat exists.
@@ -553,6 +648,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      schema_init:
+        condition: service_completed_successfully
     env_file:
       - ./env/common.env
       - ./env/website.env
@@ -609,6 +706,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      schema_init:
+        condition: service_completed_successfully
     env_file:
       - ./env/common.env
       - ./env/exposure.env
@@ -655,6 +754,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      schema_init:
+        condition: service_completed_successfully
     env_file:
       - ./env/common.env
       - ./env/lemon8.env
@@ -682,14 +783,6 @@ services:
       # Public discovery stays parked until measured spare capacity is available.
       NATIVE_PUBLIC_DISCOVERY_ENABLED: "${NATIVE_PUBLIC_DISCOVERY_ENABLED:-0}"
       PROFILE_ROUND_ROBIN_INTERVAL_SECONDS: "${PROFILE_ROUND_ROBIN_INTERVAL_SECONDS:-60}"
-  collector_paypal:
-    <<: *profile-probe
-    container_name: unifiedcollector_collector_paypal
-    command: python -m src.collectors.profile_only_runner --source paypal
-    environment:
-      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
-      COLLECTOR_STARTUP_DELAY_SECONDS: "45"
-      PROFILE_ROUND_ROBIN_INTERVAL_SECONDS: "${PROFILE_ROUND_ROBIN_INTERVAL_SECONDS:-60}"
   collector_airbnb:
     <<: *profile-probe
     container_name: unifiedcollector_collector_airbnb
@@ -710,6 +803,10 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
       COLLECTOR_STARTUP_DELAY_SECONDS: "75"
       BLUESKY_PROBE_ENABLED: "${BLUESKY_PROBE_ENABLED:-1}"
+      # Disabled until a controlled capability canary has a durable
+      # cursor/reconnect/readback receipt; this alone never enables live mode.
+      BLUESKY_STREAM_CANARY_ENABLED: "${BLUESKY_STREAM_CANARY_ENABLED:-0}"
+      BLUESKY_STREAM_CANARY_INTERVAL_SECONDS: "${BLUESKY_STREAM_CANARY_INTERVAL_SECONDS:-21600}"
       PROFILE_ROUND_ROBIN_INTERVAL_SECONDS: "${PROFILE_ROUND_ROBIN_INTERVAL_SECONDS:-60}"
   collector_pinterest:
     <<: *profile-probe
@@ -769,7 +866,7 @@ services:
       TELEGRAM_BACKFILL_DRAIN_INTERVAL: "60"
       TELEGRAM_SPIDER_MAX_PER_CYCLE: "150"
       # Get ALL historical chats: raise the enqueue cap so every dialog across all
-      # 4 accounts is queued (user: "ensure we get ALL historical chats").
+      # configured accounts is queued (user: "ensure we get ALL historical chats").
       TELEGRAM_SPIDER_QUEUE_MAX: "20000"
     extra_hosts:
       - "host.docker.internal:172.20.0.1"
@@ -787,6 +884,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      schema_init:
+        condition: service_completed_successfully
     env_file:
       - ./env/common.env
       - ./env/telegram.env
@@ -815,7 +914,8 @@ services:
       COLLECTOR_VAULT_ROOT: /vault
       BEEPER_DESKTOP_API_URL: http://127.0.0.1:23373
       # Larger pages = fewer Beeper Desktop Local API round-trips per sync.
-      BEEPER_PAGE_SIZE: "150"
+      # Raw archives are written per chat; keep this below the bounded chat-phase budget.
+      BEEPER_PAGE_SIZE: "50"
       # Stability (2026-06-21, Bryan reported recurring "beeper disconnected"):
       # the Beeper Desktop Local API (host:23373) is intermittently unresponsive,
       # so a single blip used to end the cycle -> error -> retry -> alert. Ride
@@ -828,6 +928,9 @@ services:
       # Wider room coverage + bounded history per cycle. Keep cycles completing
       # frequently so live message freshness wins over historical drain.
       BEEPER_MAX_CHATS_PER_CYCLE: "100"
+      # One chat-list page keeps durable chat/participant archiving under the
+      # optional-phase timeout on the external vault.
+      BEEPER_CHAT_PAGES_PER_CYCLE: "1"
       BEEPER_BACKFILL_PAGES_PER_CYCLE: "4"
       BEEPER_BACKFILL_CANDIDATE_MESSAGES: "1000"
       BEEPER_BACKFILL_QUERY_TIMEOUT: "30"
@@ -842,6 +945,8 @@ services:
       # cannot make Beeper look stale.
       BEEPER_NETWORK_REPAIR_LIMIT: "2000"
       BEEPER_NETWORK_REPAIR_TIMEOUT: "20"
+      # Instagram DMs are intentionally excluded from the Beeper shadow mirror.
+      BEEPER_EXCLUDED_NETWORKS: "${BEEPER_EXCLUDED_NETWORKS:-instagram}"
       # One-shot, bounded probe of old failed Beeper assets after cache/session
       # changes. Bump the marker to retry another tiny sample; same marker is
       # remembered in service_cursors and will not run every cycle.
@@ -860,6 +965,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      schema_init:
+        condition: service_completed_successfully
     env_file:
       - ./env/common.env
       - ./env/beeper.env
@@ -881,6 +988,7 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
+      WHATSAPP_INVITE_ACCEPT_WID: ${WHATSAPP_INVITE_ACCEPT_WID:-}
       WHATSAPP_SPIDER_SESSIONS: "session_2"
       # Backfill ALL history, not just 90 days (user: "whatsapp backfill all").
       WHATSAPP_MAX_BACKFILL_AGE_DAYS: "36500"
@@ -922,6 +1030,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      schema_init:
+        condition: service_completed_successfully
       rabbitmq:
         condition: service_started
     env_file:
@@ -948,26 +1058,7 @@ services:
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
       COLLECTOR_HANG_TIMEOUT_SECONDS: "7200"
-      # ANTI-BAN (user: "make sure headless cookies don't get my account banned").
-      # Headless Playwright is more detectable than a real browser, so run it as a
-      # GENTLE periodic backup: lower daily profile-view quota, fully-serial spider,
-      # and a long idle between cycles. The extension is the primary live path.
-      INSTA_DAILY_QUOTA_PROFILE_VIEWS: "60"
-      INSTA_SKIP_HEADLESS_WHEN_EXTENSION_FRESH: "true"
-      INSTA_EXTENSION_FRESH_SKIP_SECONDS: "7200"
-      INSTA_HTTPX_PROFILE_FALLBACK: "false"
-      INSTA_SPIDER_CONCURRENCY: "1"
-      INSTA_SPIDER_HOPS: "1"
-      INSTA_PLAYWRIGHT_POSTS_ZERO_THRESHOLD: "3"
-      INSTA_PLAYWRIGHT_POSTS_ZERO_COOLDOWN_SECONDS: "3600"
-      # ANTI-BAN (P2 review §4): the flagged IG account shares ONE cookie jar with
-      # ig_ingest. Behavioural flags come from NOVEL profile-view/discovery patterns,
-      # not from re-fetching known content. Disable follower-graph BFS discovery in
-      # the HEADLESS path so it only refreshes already-known entities; the browser
-      # extension remains the sole IG discovery path (it uses its own IG_SPIDER_MAX_HOP,
-      # unaffected by this flag — read only at instagram/__init__.py:1071).
-      INSTA_SPIDER_FOLLOWERS: "false"
-      COLLECTOR_CYCLE_SLEEP_INSTAGRAM: "1200"
+      INSTAGRAM_COLLECTOR_ENABLED: "false"
     extra_hosts:
       - "host.docker.internal:172.20.0.1"
     cap_add:
@@ -975,16 +1066,15 @@ services:
     volumes:
       - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}/media:/media"
       - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}:/vault"
-      - ../credentials:/app/credentials
-      - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
       - ../src:/app/src
     depends_on:
       postgres:
         condition: service_healthy
+      schema_init:
+        condition: service_completed_successfully
     env_file:
       - ./env/common.env
-      - ./env/instagram.env
     healthcheck:
       test: ["CMD", "python", "-m", "src.core.health"]
       interval: 60s
@@ -1035,6 +1125,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      schema_init:
+        condition: service_completed_successfully
     env_file:
       - ./env/common.env
       - ./env/instagram.env
@@ -1051,8 +1143,11 @@ services:
     # via `docker update`; these make them durable across recreate.
     mem_limit: ${COLLECTOR_SCHED_MEM:-512m}
     cpus: "${COLLECTOR_SCHED_CPUS:-1.0}"
+    group_add:
+      - "${RECON_ADMISSION_SHARED_GID:-1000}"
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
+      CONTROL_EXECUTOR_SECRET: "${CONTROL_EXECUTOR_SECRET:?CONTROL_EXECUTOR_SECRET required}"
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
       # Conn-budget hygiene (P2 review §5): scheduler triggers + reconciliation are
@@ -1067,15 +1162,8 @@ services:
       # the maigret HTTP-only engine automatically.
       RECON_USERNAME_MODULES: "${RECON_USERNAME_MODULES:-maigret}"
       RECON_USERNAME_ENGINE: "${RECON_USERNAME_ENGINE:-maigret}"
-      # "Base of operations" Telegram overhaul --------------------------------
-      # See src/notifications/collector_bot.py. The scheduler hosts the getUpdates
-      # long-poll task (single asyncio.Task; safe because the analyzer's merge_bot
-      # uses a DIFFERENT bot token). Uses NOTIFY_TELEGRAM_BOT_TOKEN from ../.env.
-      COLLECTOR_TELEGRAM_BOT_ENABLED: "${COLLECTOR_TELEGRAM_BOT_ENABLED:-1}"
-      # Authorized-user allowlist (comma-separated Telegram user ids) for button
-      # presses. Sourced from env_file ../.env and deliberately NOT overridden
-      # here: a compose "${..}" override reads docker/.env for substitution and
-      # would shadow env_file with an empty default (that bug bit us once).
+      RECON_ADMISSION_POLICY_PATH: "/app/config/task-37-admission-policy.json"
+      RECON_ADMISSION_STATE_PATH: "/var/lib/unifiedcollector/recon-admission/task-37-admission-state.json"
       # Reduced-spam defaults (was 6h digest + 15min delta). See scheduler/__init__.py.
       STATUS_HEARTBEAT_INTERVAL_HOURS: "${STATUS_HEARTBEAT_INTERVAL_HOURS:-24}"
       STATUS_DELTA_INTERVAL_MINUTES: "${STATUS_DELTA_INTERVAL_MINUTES:-0}"
@@ -1090,6 +1178,8 @@ services:
       - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
+      - /var/lib/unifiedcollector/recon-admission:/var/lib/unifiedcollector/recon-admission
+      - ./../config/task-37-admission-policy.json:/app/config/task-37-admission-policy.json:ro
       # live src mount so scheduler code (e.g. identity reconciliation) applies on
       # a plain recreate — no image rebuild (vhdx must not grow). Matches the
       # collector/ig_ingest pattern; scheduler previously ran only baked-in code.
@@ -1097,6 +1187,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      schema_init:
+        condition: service_completed_successfully
     env_file:
       - ./env/common.env
       - ./env/telegram_notify.env
@@ -1106,6 +1198,66 @@ services:
       timeout: 45s
       retries: 3
       start_period: 30s
+    restart: unless-stopped
+
+  control_bot:
+    image: unifiedcollector-collector:latest
+    container_name: unifiedcollector_control_bot
+    init: true
+    command: python -m src.bots.control_bot
+    mem_limit: 128m
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
+      DB_POOL_MAX_SIZE: "2"
+      CONTROL_EXECUTOR_SECRET: "${CONTROL_EXECUTOR_SECRET:?CONTROL_EXECUTOR_SECRET required}"
+      CONTROL_TELEGRAM_CHAT_ID: "${CONTROL_TELEGRAM_CHAT_ID:-}"
+      COLLECTOR_DRIVE_PATH: /media
+      COLLECTOR_VAULT_ROOT: /vault
+      REALTIME_POST_FEED_ENABLED: "${REALTIME_POST_FEED_ENABLED:-1}"
+      REALTIME_POST_FEED_EXCLUDED_SOURCES: "${REALTIME_POST_FEED_EXCLUDED_SOURCES:-}"
+    volumes:
+      - ../src:/app/src:ro
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}/media:/media:ro"
+      - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}:/vault:ro"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      schema_init:
+        condition: service_completed_successfully
+    env_file:
+      - ./env/common.env
+      - ./env/telegram_notify.env
+    healthcheck:
+      test: ["CMD", "python", "-c", "import src.notifications.collector_bot"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+
+  control_executor:
+    image: unifiedcollector-collector:latest
+    container_name: unifiedcollector_control_executor
+    init: true
+    command: python -m src.control_executor
+    mem_limit: 128m
+    group_add:
+      - "986"
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
+      DB_POOL_MAX_SIZE: "2"
+      CONTROL_EXECUTOR_SECRET: "${CONTROL_EXECUTOR_SECRET:?CONTROL_EXECUTOR_SECRET required}"
+    volumes:
+      - ../src:/app/src:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      postgres:
+        condition: service_healthy
+      schema_init:
+        condition: service_completed_successfully
+    env_file:
+      - ./env/common.env
+      - ./env/telegram_notify.env
     restart: unless-stopped
 
   onboard_bot:
@@ -1122,12 +1274,14 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      schema_init:
+        condition: service_completed_successfully
     env_file:
       - ./env/common.env
       - ./env/telegram.env
       - ./env/telegram_onboard.env
     healthcheck:
-      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      test: ["CMD", "python", "-c", "import os, urllib.request; tokens=[os.getenv(k) for k in ('PRAWNPRODUCTIONS_BOT_TOKEN','SHOTSBYSEAH_BOT_TOKEN','BRYANSEAH_BOT_TOKEN')]; assert all(tokens); assert all(urllib.request.urlopen('https://api.telegram.org/bot'+token+'/getMe', timeout=8).status == 200 for token in tokens)"]
       interval: 60s
       timeout: 10s
       retries: 3
@@ -1162,6 +1316,7 @@ services:
       REALTIME_POST_FEED_INCLUDE_PROFILES: "${REALTIME_POST_FEED_INCLUDE_PROFILES:-0}"
       REALTIME_POST_FEED_DEDUPE_BY_MEDIA: "${REALTIME_POST_FEED_DEDUPE_BY_MEDIA:-1}"
       REALTIME_POST_FEED_GLOBAL_MEDIA_DEDUPE_SOURCES: "${REALTIME_POST_FEED_GLOBAL_MEDIA_DEDUPE_SOURCES:-instagram,threads,tiktok,lemon8,facebook,x,twitter,youtube,website,search,github}"
+      REALTIME_POST_FEED_EXCLUDED_SOURCES: "${REALTIME_POST_FEED_EXCLUDED_SOURCES:-}"
       REALTIME_POST_FEED_SKIP_VIDEO_THUMBNAILS: "${REALTIME_POST_FEED_SKIP_VIDEO_THUMBNAILS:-1}"
       REALTIME_POST_FEED_BURST_SUMMARY: "${REALTIME_POST_FEED_BURST_SUMMARY:-1}"
       REALTIME_POST_FEED_BURST_SUMMARY_SECONDS: "${REALTIME_POST_FEED_BURST_SUMMARY_SECONDS:-900}"
@@ -1177,6 +1332,8 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      schema_init:
+        condition: service_completed_successfully
     env_file:
       - ./env/common.env
       - ./env/telegram_notify.env
@@ -1223,6 +1380,8 @@ services:
       WA_BRIDGE_HEALTH_TIMEOUT_SECONDS: "5"
       WA_BRIDGE_1_FALLBACK_URL: "http://wa-bridge-1:3001"
       WA_BRIDGE_2_FALLBACK_URL: "http://wa-bridge-2:3001"
+      REALTIME_POST_FEED_ENABLED: "${REALTIME_POST_FEED_ENABLED:-1}"
+      REALTIME_POST_FEED_EXCLUDED_SOURCES: "${REALTIME_POST_FEED_EXCLUDED_SOURCES:-}"
       GITHUB_QUOTA_PUSHER_ENABLED: "true"
       GITHUB_QUOTA_PUSHER_TARGET_RATIO: "0.80"
       GITHUB_QUOTA_PUSHER_MAX_CONCURRENT: "12"
@@ -1236,6 +1395,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      schema_init:
+        condition: service_completed_successfully
     env_file:
       - ./env/common.env
       - ./env/dashboard.env
@@ -1307,16 +1468,18 @@ services:
       AUTH_STORAGE_PATH: /app/auth_info/account1
       WHATSAPP_RABBITMQ_URL: amqp://${RABBITMQ_USER:-wac_user}:${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD required}@rabbitmq:5672/
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-wac_user}:${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD required}@rabbitmq:5672/
-      # Keep passive/realtime sync without requesting a large phone history on
-      # every connection; it destabilizes the companion session.
-      SYNC_FULL_HISTORY: "false"
-      WHATSAPP_DEEP_BACKFILL: "false"
-      WHATSAPP_BACKFILL_REQ_PER_MIN: "24"
-      WHATSAPP_FETCH_COUNT: "100"
+      # Metadata history is source-native and paced to preserve realtime.
+      SYNC_FULL_HISTORY: "true"
+      WHATSAPP_DEEP_BACKFILL: "true"
+      WHATSAPP_BACKFILL_REQ_PER_MIN: "2"
+      WHATSAPP_FETCH_COUNT: "50"
       WHATSAPP_MAX_BACKFILL_AGE_DAYS: "36500"
       WHATSAPP_UNPAIRED_QR_RECONNECT_MS: "5000"
       WHATSAPP_QR_STABILITY_MS: "45000"
       WHATSAPP_MEDIA_BRIDGE_SECRET: ${WHATSAPP_MEDIA_BRIDGE_SECRET:?WHATSAPP_MEDIA_BRIDGE_SECRET required}
+      # The sole account eligible for reviewer-approved invite canaries.
+      WHATSAPP_INVITE_ACCEPT_WID: ${WHATSAPP_INVITE_ACCEPT_WID:-}
+      WHATSAPP_PROFILE_PHOTO_CANARY_ENABLED: "1"
       LOG_LEVEL: info
     ports:
       - "127.0.0.1:3011:3001"
@@ -1349,12 +1512,11 @@ services:
       AUTH_STORAGE_PATH: /app/auth_info/account2
       WHATSAPP_RABBITMQ_URL: amqp://${RABBITMQ_USER:-wac_user}:${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD required}@rabbitmq:5672/
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-wac_user}:${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD required}@rabbitmq:5672/
-      # Keep passive/realtime sync without requesting a large phone history on
-      # every connection; it destabilizes the companion session.
-      SYNC_FULL_HISTORY: "false"
-      WHATSAPP_DEEP_BACKFILL: "false"
-      WHATSAPP_BACKFILL_REQ_PER_MIN: "24"
-      WHATSAPP_FETCH_COUNT: "100"
+      # Metadata history is source-native and paced to preserve realtime.
+      SYNC_FULL_HISTORY: "true"
+      WHATSAPP_DEEP_BACKFILL: "true"
+      WHATSAPP_BACKFILL_REQ_PER_MIN: "2"
+      WHATSAPP_FETCH_COUNT: "50"
       WHATSAPP_MAX_BACKFILL_AGE_DAYS: "36500"
       WHATSAPP_UNPAIRED_QR_RECONNECT_MS: "5000"
       WHATSAPP_QR_STABILITY_MS: "45000"

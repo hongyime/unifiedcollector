@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -155,6 +156,52 @@ def _make_worker(coll, *, name="acct1"):
     w.client = MagicMock()
     w.state = SessionState.CONNECTED
     return w
+
+
+@pytest.mark.asyncio
+async def test_history_baseline_records_each_connected_worker(monkeypatch):
+    coll = _make_collector(monkeypatch)
+    coll._workers = [_make_worker(coll, name="one"), _make_worker(coll, name="two")]
+    coll._record_history_throughput = AsyncMock()
+
+    await coll._record_history_baseline()
+
+    assert [call.args[0] for call in coll._record_history_throughput.await_args_list] == ["one", "two"]
+
+
+def test_adaptive_history_runs_before_regular_target_dispatch():
+    source = inspect.getsource(TelegramCollector.collect)
+
+    assert source.index("Claim the initial bounded history window") < source.index(
+        "# Dispatch targets to workers"
+    )
+
+
+@pytest.mark.asyncio
+async def test_linked_discussion_lookup_bounds_both_provider_requests(monkeypatch):
+    coll = _make_collector(monkeypatch)
+    worker = _make_worker(coll)
+    linked = SimpleNamespace(id=902)
+    worker.client = AsyncMock(return_value=SimpleNamespace(
+        full_chat=SimpleNamespace(linked_chat_id=902), chats=[]
+    ))
+    worker.client.get_entity = AsyncMock(return_value=linked)
+    coll.wait_rate_limit = AsyncMock()
+    monkeypatch.setenv("TELEGRAM_RESOLVE_TIMEOUT", "7")
+    timeouts = []
+
+    async def bounded(awaitable, timeout):
+        timeouts.append(timeout)
+        return await awaitable
+
+    monkeypatch.setattr(tg_mod.asyncio, "wait_for", bounded)
+
+    linked_id, entity = await coll._resolve_linked_discussion_entity(
+        worker, SimpleNamespace(id=901), "901"
+    )
+
+    assert (linked_id, entity) == (902, linked)
+    assert timeouts == [7.0, 7.0]
 
 
 # ── module-level helpers ──────────────────────────────────────────────────
@@ -371,6 +418,12 @@ def test_constructor_picks_up_env(monkeypatch):
     assert coll._realtime_running is False
 
 
+def test_constructor_uses_bounded_join_jitter(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_JOIN_JITTER", "12")
+    coll = _make_collector(monkeypatch)
+    assert coll._join_jitter == 12
+
+
 def test_telegram_message_content_id_is_chat_scoped():
     assert _telegram_message_content_id("12345", 99) == "12345_99"
 
@@ -397,7 +450,10 @@ async def test_process_join_queue_times_out_hanging_link(monkeypatch, caplog):
     coll._join_links_max_per_cycle = 1
     coll._join_link_timeout = 0.01
     coll.pool.conn.fetch = AsyncMock(
-        return_value=[{"id": 1, "url": "https://t.me/+InviteHash"}]
+        return_value=[{
+            "id": 1, "url": "https://t.me/+InviteHash",
+            "approval_id": "approval-1", "account_name": "acct1",
+        }]
     )
 
     async def _hang(*_args, **_kwargs):
@@ -783,6 +839,87 @@ async def test_collect_chat_legacy_target_cursor_backfills_without_numeric_seed(
     coll.checkpoint.save_progress.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_collect_chat_history_window_checkpoints_and_defers_completion(monkeypatch):
+    coll = _make_collector(monkeypatch)
+    worker = _make_worker(coll)
+    streams = {"3005": [[11, 12, 13]]}
+    attach, _ = _stub_chat_pipeline(coll, streams)
+    attach(worker)
+    coll._history_window_limits = {"3005": 2}
+    coll.checkpoint.load_chat_progress = AsyncMock(return_value=0)
+    coll.checkpoint.save_chat_progress = AsyncMock()
+    coll.mark_target_collected = AsyncMock()
+
+    assert await coll._collect_chat(worker, "3005") == 2
+    coll.checkpoint.save_chat_progress.assert_awaited_with("3005", 12)
+    coll.mark_target_collected.assert_not_awaited()
+    assert "3005" in coll._history_windowed_chats
+
+
+@pytest.mark.asyncio
+async def test_collect_chat_defers_an_unresponsive_history_iterator_without_penalty(monkeypatch):
+    coll = _make_collector(monkeypatch)
+    worker = _make_worker(coll)
+    entity = SimpleNamespace(
+        id=3004, title="Slow chat", username=None, broadcast=False, megagroup=False,
+    )
+    coll._resolve_entity_any_worker = AsyncMock(return_value=(worker, entity))
+    coll._upsert_chat = AsyncMock()
+    coll._collect_profile_photo = AsyncMock()
+    coll.collect_chat_members = AsyncMock()
+    coll.checkpoint.load_chat_progress = AsyncMock(return_value=0)
+    coll.checkpoint.save_chat_progress = AsyncMock()
+    monkeypatch.setenv("TELEGRAM_HISTORY_MESSAGE_TIMEOUT", "0.01")
+
+    release = asyncio.Event()
+
+    async def _stalled_iterator():
+        while not release.is_set():
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                continue
+        yield SimpleNamespace(id=1, sender_id=None)  # pragma: no cover
+
+    worker.client.iter_messages = lambda *_args, **_kwargs: _stalled_iterator()
+
+    with pytest.raises(EntityResolveDeferred, match="history iterator timed out"):
+        await coll._collect_chat(worker, "3004")
+
+    coll.checkpoint.save_chat_progress.assert_not_awaited()
+    pending = worker._history_message_task
+    assert pending is not None and not pending.done()
+    release.set()
+    await pending
+    assert worker._history_message_task is None
+
+
+@pytest.mark.asyncio
+async def test_upsert_sender_skips_a_stalled_provider_lookup(monkeypatch):
+    coll = _make_collector(monkeypatch)
+    worker = _make_worker(coll)
+    monkeypatch.setenv("TELEGRAM_RESOLVE_TIMEOUT", "0.01")
+    release = asyncio.Event()
+
+    async def _stalled_lookup(_platform_user_id):
+        while not release.is_set():
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                continue
+        return SimpleNamespace(id=1)  # pragma: no cover
+
+    worker.client.get_entity = _stalled_lookup
+
+    assert await coll._upsert_sender(worker, 1) is None
+    pending = worker._sender_lookup_task
+    assert pending is not None and not pending.done()
+    release.set()
+    await pending
+    assert worker._sender_lookup_task is None
+
+
 class _ServerOrderFakeClient:
     """iter_messages with genuine Telegram ordering semantics.
 
@@ -959,6 +1096,25 @@ async def test_resolve_rejects_account_name_target_without_network(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_resolve_uses_marked_channel_form_for_bare_queue_id(monkeypatch):
+    coll = _make_collector(monkeypatch)
+    worker = _make_worker(coll)
+    entity = SimpleNamespace(id=123, title="Owned channel")
+    worker.client.get_entity = AsyncMock(
+        side_effect=[ValueError("not a user"), ValueError("not a username"), entity]
+    )
+    coll._workers = [worker]
+
+    owner, resolved = await coll._resolve_entity_any_worker(worker, "123")
+
+    assert owner is worker
+    assert resolved is entity
+    assert [call.args[0] for call in worker.client.get_entity.await_args_list] == [
+        123, "123", -1_000_000_000_123,
+    ]
+
+
+@pytest.mark.asyncio
 async def test_worker_deferred_target_does_not_penalize_account(monkeypatch):
     coll = _make_collector(monkeypatch)
     worker = _make_worker(coll)
@@ -1067,12 +1223,42 @@ async def test_process_spider_queue_claims_and_marks_completed(monkeypatch):
     await coll._process_spider_queue(worker)
 
     coll._collect_chat.assert_awaited_once_with(worker, "123")
+    claim_query = coll.pool.conn.fetchrow.await_args_list[0].args[0]
+    assert "telegram_user_accounts a" in claim_query
+    assert "owned_chat DESC" in claim_query
+    assert "telegram_chats c" in claim_query
+    assert "known_chat DESC" in claim_query
     # 'completed' UPDATE must fire exactly once; failed path NOT taken
     completed_calls = [
         c for c in coll.pool.conn.execute.await_args_list
         if "completed" in c.args[0]
     ]
     assert len(completed_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_process_spider_queue_requeues_a_clean_history_window(monkeypatch):
+    coll = _make_collector(monkeypatch)
+    worker = _make_worker(coll)
+    coll.pool.conn.fetchrow.side_effect = [
+        {"platform_chat_id": "123", "title": "Sample"},
+        None,
+    ]
+
+    async def collect(_worker, chat_id):
+        coll._history_windowed_chats.add(chat_id)
+        return 2
+
+    coll._collect_chat = collect
+    await coll._process_spider_queue(worker)
+
+    status_calls = [
+        call for call in coll.pool.conn.execute.await_args_list
+        if "CASE WHEN $2 THEN 'pending'" in call.args[0]
+    ]
+    assert len(status_calls) == 1
+    assert status_calls[0].args[1:] == ("123", True)
+    assert coll._history_scheduler.snapshot(worker.account.name)["claim_budget"] == 1
 
 
 @pytest.mark.asyncio
@@ -1099,7 +1285,7 @@ async def test_process_spider_queue_does_not_retry_deferred_chat_within_cycle(mo
 
     async def fetch_claim(sql, *args):
         nonlocal claim_count
-        assert "WITH ranked AS" in sql
+        assert "ranked AS" in sql
         claim_count += 1
         if args and args[0]:
             return None
@@ -1111,17 +1297,36 @@ async def test_process_spider_queue_does_not_retry_deferred_chat_within_cycle(mo
     coll._collect_chat = AsyncMock(
         side_effect=EntityResolveDeferred("account unavailable or in cooldown")
     )
+    coll._record_history_throughput = AsyncMock()
 
     await coll._process_spider_queue(worker)
 
     coll._collect_chat.assert_awaited_once_with(worker, "123")
     claim_calls = [
         call for call in coll.pool.conn.fetchrow.await_args_list
-        if "WITH ranked AS" in call.args[0]
+        if "ranked AS" in call.args[0]
     ]
-    assert len(claim_calls) == 2
+    assert len(claim_calls) == 1
     assert claim_calls[0].args[1] == []
-    assert claim_calls[1].args[1] == ["123"]
+    assert coll._record_history_throughput.await_count == 2
+    coll._record_history_throughput.assert_any_await(worker.account.name)
+
+
+@pytest.mark.asyncio
+async def test_process_spider_queue_records_unresolvable_claim_telemetry(monkeypatch):
+    coll = _make_collector(monkeypatch)
+    worker = _make_worker(coll)
+    coll.pool.conn.fetchrow.side_effect = [
+        {"platform_chat_id": "123", "title": "Gone"},
+        None,
+    ]
+    coll._collect_chat = AsyncMock(side_effect=EntityUnresolvable("not owned"))
+    coll._record_history_throughput = AsyncMock()
+
+    await coll._process_spider_queue(worker)
+
+    assert coll._record_history_throughput.await_count == 2
+    coll._record_history_throughput.assert_any_await(worker.account.name)
 
 
 @pytest.mark.asyncio
@@ -1134,6 +1339,7 @@ async def test_process_spider_queue_marks_failed_on_exception(monkeypatch):
         None,
     ]
     coll._collect_chat = AsyncMock(side_effect=RuntimeError("boom"))
+    coll._record_history_throughput = AsyncMock()
 
     await coll._process_spider_queue(worker)
 
@@ -1142,6 +1348,8 @@ async def test_process_spider_queue_marks_failed_on_exception(monkeypatch):
         if "failed" in c.args[0]
     ]
     assert len(retry_or_fail_calls) == 1
+    assert coll._record_history_throughput.await_count == 2
+    coll._record_history_throughput.assert_any_await(worker.account.name)
 
 
 @pytest.mark.asyncio
@@ -1153,6 +1361,78 @@ async def test_process_spider_queue_terminates_on_empty(monkeypatch):
 
     await coll._process_spider_queue(worker)
     coll._collect_chat.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_process_spider_queue_dispatches_earned_claims_concurrently(monkeypatch):
+    coll = _make_collector(monkeypatch)
+    worker = _make_worker(coll)
+    coll._history_scheduler.state(worker.account.name).claim_budget = 2
+    coll.pool.conn.fetchrow.side_effect = [
+        {"platform_chat_id": "one", "title": "One"},
+        {"platform_chat_id": "two", "title": "Two"},
+    ]
+    started = asyncio.Event()
+    release = asyncio.Event()
+    active = 0
+    peak = 0
+
+    async def collect(_worker, _chat_id):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        if active == 2:
+            started.set()
+        await release.wait()
+        active -= 1
+        return 1
+
+    coll._collect_chat = collect
+    snapshots = []
+
+    async def record_throughput(account):
+        snapshots.append(coll._history_scheduler.snapshot(account))
+
+    coll._record_history_throughput = record_throughput
+    task = asyncio.create_task(coll._process_spider_queue(worker))
+    await asyncio.wait_for(started.wait(), timeout=1)
+    assert snapshots == [{
+        "account_identity": worker.account.name,
+        "claim_budget": 2,
+        "active_claims": 2,
+        "claims_done": 0,
+        "write_rate": 0.0,
+        "written_messages": 0,
+        "flood_waits": 0,
+        "cooldown_seconds": 0,
+    }]
+    release.set()
+
+    assert await task == 2
+    assert peak == 2
+
+
+@pytest.mark.asyncio
+async def test_history_drain_runs_while_target_sweep_is_active(monkeypatch):
+    coll = _make_collector(monkeypatch)
+    first = _make_worker(coll, name="one")
+    second = _make_worker(coll, name="two")
+    coll._workers = [first, second]
+    coll._is_spider_allowed = lambda _worker: True
+    coll._worker_can_resolve = lambda _worker: True
+    calls = []
+
+    async def process(worker):
+        calls.append(worker.account.name)
+        if len(calls) == 2:
+            coll._stop.set()
+
+    coll._process_spider_queue = process
+    monkeypatch.setenv("TELEGRAM_BACKFILL_DRAIN_INTERVAL", "0")
+
+    await coll._drain_history_during_target_sweep()
+
+    assert calls == ["one", "two"]
 
 
 # ── backfill_chat ─────────────────────────────────────────────────────────
@@ -1519,41 +1799,42 @@ async def test_pending_leave_recovery_never_sends_leave_request(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_invite_link_visit_records_gap_without_import(monkeypatch):
-    """GAP-6: an invite link the account has not imported is inaccessible
-    content. Only the read-only CheckChatInviteRequest is sent; the visit is
-    recorded with status='membership_writes_disabled' and no scrape runs."""
+async def test_invite_link_visit_joins_authorized_account_with_budget(monkeypatch):
+    """Eligible accounts import an invite only after taking the paced join budget."""
     coll = _make_collector(monkeypatch)
     coll._record_invite_visit = AsyncMock()
     coll._consume_join_budget = AsyncMock(return_value=True)
     coll._scrape_joined_entity = AsyncMock(return_value=(None, 0, 0))
     worker = _make_worker(coll)
     worker.client = AsyncMock()
-    worker.client.return_value = SimpleNamespace(chats=[], chat=None)
+    joined = SimpleNamespace(id=77, title="Joined")
+    worker.client.side_effect = [
+        SimpleNamespace(chats=[], chat=None),
+        SimpleNamespace(chats=[joined], chat=None),
+    ]
 
     row = {"id": 7, "url": "https://t.me/+InvHash"}
     parsed = {"kind": "invite", "invite_hash": "InvHash"}
     await coll._visit_telegram_link(worker, row, parsed)
 
-    assert len(worker.client.await_args_list) == 1
+    assert len(worker.client.await_args_list) == 2
     assert type(worker.client.await_args_list[0].args[0]).__name__ == (
         "CheckChatInviteRequest"
     )
-    coll._consume_join_budget.assert_not_awaited()
-    coll._scrape_joined_entity.assert_not_awaited()
+    assert type(worker.client.await_args_list[1].args[0]).__name__ == (
+        "ImportChatInviteRequest"
+    )
+    coll._consume_join_budget.assert_awaited_once()
+    coll._scrape_joined_entity.assert_awaited_once_with(worker, joined, message_limit=None)
     coll._record_invite_visit.assert_awaited_once()
     kwargs = coll._record_invite_visit.await_args.kwargs
-    assert kwargs["status"] == "membership_writes_disabled"
-    # No joined_this_pass kwarg is passed any more; the helper's default
-    # (False) is what lands in the audit row.
-    assert kwargs.get("joined_this_pass", False) is False
+    assert kwargs["status"] == "completed"
+    assert kwargs["joined_this_pass"] is True
 
 
 @pytest.mark.asyncio
-async def test_username_link_visit_records_gap_without_join(monkeypatch):
-    """GAP-6: a public channel link the account has not joined is
-    inaccessible content — no JoinChannelRequest, no join budget consumed,
-    no scrape, residual-gap visit recorded."""
+async def test_username_link_visit_joins_authorized_account_with_budget(monkeypatch):
+    """Eligible accounts join public channels only after taking the paced budget."""
     coll = _make_collector(monkeypatch)
     coll._record_invite_visit = AsyncMock()
     coll._consume_join_budget = AsyncMock(return_value=True)
@@ -1570,12 +1851,14 @@ async def test_username_link_visit_records_gap_without_join(monkeypatch):
     parsed = {"kind": "username", "username": "chan"}
     await coll._visit_telegram_link(worker, row, parsed)
 
-    assert worker.client.await_args_list == []
-    coll._consume_join_budget.assert_not_awaited()
-    coll._scrape_joined_entity.assert_not_awaited()
-    assert coll._record_invite_visit.await_args.kwargs[
-        "status"
-    ] == "membership_writes_disabled"
+    assert len(worker.client.await_args_list) == 1
+    assert type(worker.client.await_args_list[0].args[0]).__name__ == "JoinChannelRequest"
+    coll._consume_join_budget.assert_awaited_once()
+    coll._scrape_joined_entity.assert_awaited_once_with(
+        worker, worker.client.get_entity.return_value, message_limit=None,
+    )
+    assert coll._record_invite_visit.await_args.kwargs["status"] == "completed"
+    assert coll._record_invite_visit.await_args.kwargs["joined_this_pass"] is True
 
 
 @pytest.mark.asyncio
@@ -1624,6 +1907,23 @@ async def test_readonly_client_rejects_membership_write_requests():
     # Read requests keep forwarding through the wrapper.
     await wrapped(SimpleNamespace())
     inner.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_readonly_client_allows_only_opted_in_join_requests():
+    from telethon.tl.functions.channels import JoinChannelRequest, LeaveChannelRequest
+    from telethon.tl.functions.messages import ImportChatInviteRequest
+
+    from src.core.readonly_client import ReadOnlyTelegramClient
+
+    inner = AsyncMock()
+    wrapped = ReadOnlyTelegramClient(inner, allow_membership_joins=True)
+
+    await wrapped(JoinChannelRequest("somechannel"))
+    await wrapped(ImportChatInviteRequest("a1b2c3"))
+    with pytest.raises(RuntimeError, match="Membership write blocked"):
+        await wrapped(LeaveChannelRequest("somechannel"))
+    assert inner.await_count == 2
 
 
 def test_message_membership_event_specs_normalize_join_and_leave(monkeypatch):
@@ -2095,6 +2395,33 @@ async def test_download_message_media_routes_photo(monkeypatch):
     assert out is True
     coll._handle_photo.assert_awaited_once()
     coll._handle_document.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_historical_media_defers_when_vault_reserve_is_active(monkeypatch):
+    import src.collectors.telegram.collector as collector_mod
+
+    coll = _make_collector(monkeypatch)
+    coll.send_to_dlq = AsyncMock()
+    monkeypatch.setattr(
+        collector_mod,
+        "historical_media_storage_gate",
+        lambda _root: SimpleNamespace(allowed=False, reason="reserve active"),
+    )
+
+    saved = await coll._download_any_message_media(
+        _make_worker(coll),
+        SimpleNamespace(id=99, media=object()),
+        "42",
+        "Chat",
+        None,
+        historical=True,
+    )
+
+    assert saved is False
+    coll.send_to_dlq.assert_awaited_once_with(
+        "42", _telegram_message_content_id("42", 99), "historical media storage paused: reserve active"
+    )
 
 
 @pytest.mark.asyncio

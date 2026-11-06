@@ -39,6 +39,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import aiohttp
+from asyncpg.exceptions import UniqueViolationError
 from aiohttp import web
 
 from src.db.connection import get_pool, close_pool
@@ -46,6 +47,7 @@ from src.core.media_filter import inspect as inspect_media
 from src.core.priority_hints import refresh_collector_priority_hints as refresh_collector_priority_hints
 from src.core.proximity import refresh_account_proximity_cache as refresh_account_proximity_cache
 from src.core.rate_limit_events import record_rate_limit_event
+from src.core.recovery_profiles import mark_recovery_observation
 from src.core.dynamic_cooldown import record_dynamic_cooldown
 from src.core.strava_route_queue import fetch_strava_route_capture_queue as fetch_strava_route_capture_queue
 from src.core.vault import (
@@ -57,6 +59,7 @@ from src.core.vault import (
     write_raw_payload,
 )
 from src.core.collection_surface import normalize_collection_surface
+from src.core.profile_media import approved_profile_image_url
 from src.collectors.strava import _derive_gps_route_fields
 
 # Follow-aware access recording (Phase 0). The extension IS the live IG path, so
@@ -96,7 +99,6 @@ from .constants import (
     KNOWN_PLATFORMS,
     MEDIA_ROOT,
     PORT,
-    SOCIAL_INGEST_DM_SAMPLE_CONCURRENCY,
     SOCIAL_INGEST_HEARTBEAT_CONCURRENCY,
     SOCIAL_INGEST_PREP_DB_ON_STARTUP,
     SOCIAL_INGEST_REVISIT_CONCURRENCY,
@@ -123,7 +125,6 @@ from .middleware import (  # noqa: E402,F401
     _STRUCTURED_CAPTURE_PATHS,
     _HEARTBEAT_LANE_PATHS,
     _REVISIT_LANE_PATHS,
-    _DM_SAMPLE_LANE_PATHS,
     _WRITE_LANE_PATHS,
     _FAST_LANE_PATHS,
     request_timeout_middleware,
@@ -136,8 +137,6 @@ from .middleware import (  # noqa: E402,F401
 # via ``ig_ingest._BROWSER_CONTENT_HINT_CACHE``, etc.
 _BROWSER_CONTENT_HINT_CACHE: dict[str, tuple[float, dict]] = {}
 _BROWSER_CONTENT_HINT_INFLIGHT: set[str] = set()
-_DM_PROBE_TARGET_TABLES = {"tiktok": ["dm_probe_log"]}
-
 _BROWSER_CAPTURE_TARGET_TABLES = {
     "profile": {
         "instagram": ["instagram_profiles"],
@@ -153,10 +152,6 @@ _BROWSER_CAPTURE_TARGET_TABLES = {
     "comments": {
         "instagram": ["instagram_comments"],
     },
-    "dm_probe": _DM_PROBE_TARGET_TABLES,
-    "dm_sample": _DM_PROBE_TARGET_TABLES,
-    "dm_frame": _DM_PROBE_TARGET_TABLES,
-    "dm_decoded": {"tiktok": ["tiktok_dm_thread", "tiktok_dm"]},
     "strava_streams": {
         "strava": ["strava_activities", "strava_gps_streams"],
     },
@@ -522,16 +517,6 @@ from .revisit import (  # noqa: E402,F401
 )
 
 
-# DM hook handlers moved to .dm per split step 7.
-from .dm import (  # noqa: E402,F401
-    dm_hook_heartbeat_handler,
-    dm_probe_handler,
-    dm_sample_handler,
-    dm_frame_handler,
-    dm_decoded_handler,
-)
-
-
 # Strava route capture moved to .strava per split step 8.
 from .strava import (  # noqa: E402,F401
     strava_streams_handler,
@@ -540,8 +525,7 @@ from .strava import (  # noqa: E402,F401
 )
 
 
-# Cookies + telemetry moved to .cookies / .telemetry per split step 9.
-from .cookies import cookies_handler  # noqa: E402,F401
+# Telemetry moved to .telemetry per split step 9.
 from .telemetry import browser_heartbeat_handler, sw_crash_handler  # noqa: E402,F401
 
 # Cooldown moved to .cooldown per split step 10.
@@ -557,7 +541,7 @@ from .cooldown import ig_cooldown  # noqa: E402,F401
 # ig_cooldown moved to .cooldown per split step 10.
 
 
-async def target_status_handler(request):
+async def _legacy_target_status_handler(request):
     """Let the extension retire bad spider targets.
 
     Instagram returns HTTP 400/404 for some unavailable/private/deleted profile
@@ -1608,29 +1592,33 @@ async def _download_and_save(pool, session, platform, username, item, reject_sta
             await _record_vault_pause("artifact sidecar state incomplete")
             return _reject("artifact_write_failed", "artifact sidecar state incomplete")
         async with pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO media_items
-                  (source, entity_id, entity_name, content_type, content_id,
-                   filename, file_path, file_size, sha256, source_url, metadata, kind,
-                   ingest_path, collection_surface)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12,'extension',$13)
-                ON CONFLICT (source, content_id) DO UPDATE SET
-                   file_path = EXCLUDED.file_path,
-                   file_size = EXCLUDED.file_size,
-                   sha256 = EXCLUDED.sha256,
-                   source_url = EXCLUDED.source_url,
-                   metadata = EXCLUDED.metadata,
-                   kind = EXCLUDED.kind,
-                   ingest_path = 'extension',
-                   collection_surface = CASE WHEN EXCLUDED.collection_surface = 'unknown'
-                                              THEN media_items.collection_surface
-                                              ELSE EXCLUDED.collection_surface END
-                """,
-                platform, safe_user, item.get("entity_name") or username, ctype, store_cid,
-                dest.name, str(stored_path), len(data), sha, url, meta_json, media_kind,
-                collection_surface,
-            )
+            try:
+                await conn.execute(
+                    """
+                    INSERT INTO media_items
+                      (source, entity_id, entity_name, content_type, content_id,
+                       filename, file_path, file_size, sha256, source_url, metadata, kind,
+                       ingest_path, collection_surface)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12,'extension',$13)
+                    ON CONFLICT (source, content_id) DO UPDATE SET
+                       file_path = EXCLUDED.file_path,
+                       file_size = EXCLUDED.file_size,
+                       sha256 = EXCLUDED.sha256,
+                       source_url = EXCLUDED.source_url,
+                       metadata = EXCLUDED.metadata,
+                       kind = EXCLUDED.kind,
+                       ingest_path = 'extension',
+                       collection_surface = CASE WHEN EXCLUDED.collection_surface = 'unknown'
+                                                  THEN media_items.collection_surface
+                                                  ELSE EXCLUDED.collection_surface END
+                    """,
+                    platform, safe_user, item.get("entity_name") or username, ctype, store_cid,
+                    dest.name, str(stored_path), len(data), sha, url, meta_json, media_kind,
+                    collection_surface,
+                )
+            except UniqueViolationError:
+                # A concurrent same-bytes insert won after the advisory hash check.
+                return _reject("duplicate_sha256")
             if artifact.partial or not artifact.ok:
                 await conn.execute(
                     """
@@ -2045,6 +2033,11 @@ async def _ingest(app, platform, body):
             outcome="empty",
             metadata=meta or None,
         )
+        if (
+            platform == "instagram"
+            and body.get("probe_reason") == "restricted_following_feed_dom_observation"
+        ):
+            await mark_recovery_observation(app["pool"], "instagram", account=username)
     # Outcome states: queued = drain task scheduled below; stored is always 0
     # here because _drain persists after this response is already sent.
     return {
@@ -3155,7 +3148,7 @@ async def _record_users(pool, platform, users, context, owner=None) -> int:
     return n
 
 
-async def users_handler(request):
+async def _legacy_users_handler(request):
     body = await _safe_json(request)
     platform = _norm_platform(body.get("platform"))
     n = await _record_users(request.app["pool"], platform, body.get("users") or [],
@@ -3163,186 +3156,10 @@ async def users_handler(request):
     return _cors(web.json_response({"recorded": n}))
 
 
-async def _dm_probe_log_write(pool, platform, event_type, body, frame_size=None):
-    """Best-effort write to dm_probe_log for the dashboard telemetry panel
-    (P1.2). Swallows every error — telemetry must never break capture.
-    frame_size is a separate arg because the sample handler already knows the
-    decoded length, while probes pull it from body.get('frame_size').
-    """
-    if not pool:
-        return
-    try:
-        size = frame_size
-        if size is None:
-            raw = body.get("frame_size")
-            try:
-                size = int(raw) if raw is not None else None
-            except (TypeError, ValueError):
-                size = None
-        async with pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO dm_probe_log
-                    (platform, event_type, url, transport, frame_kind,
-                     frame_size, owner_account)
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
-                """,
-                str(platform)[:64] if platform else "unknown",
-                event_type,
-                (body.get("url") or None),
-                (body.get("transport") or None),
-                (body.get("frame_kind") or None),
-                size,
-                (body.get("owner") or body.get("owner_account") or None),
-            )
-    except Exception:
-        logger.debug("dm_probe_log write failed", exc_info=True)
-
-
-# dm_hook_heartbeat_handler moved to .dm per split step 7.
-
-
-def _parse_ts_ms(v):
-    """Convert an int/str ms-epoch or None to a timezone-aware datetime.
-    Falls back to None on garbage so a bad timestamp never fails the upsert."""
-    if v is None:
-        return None
-    try:
-        ms = int(v)
-        if ms <= 0:
-            return None
-        # Sanity: TikTok values are 13-digit ms since epoch. Reject > 4102444800000
-        # (year ~2100) so a us/ns-scaled leak from the decoder can't corrupt rows.
-        if ms > 4102444800000:
-            return None
-        return datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc)
-    except (TypeError, ValueError):
-        return None
-
-
-def _conv_participants(conversation_id):
-    """`0:1:UID_A:UID_B` -> ['UID_A','UID_B']. None on anything unparseable."""
-    if not conversation_id:
-        return None
-    parts = str(conversation_id).split(":")
-    if len(parts) >= 4:
-        out = [p for p in parts[2:] if p]
-        return out or None
-    return None
-
-
-def _int_or_none(v):
-    if v is None:
-        return None
-    try:
-        return int(v)
-    except (TypeError, ValueError):
-        return None
-
-
-def _bool_or_none(v):
-    if v is None:
-        return None
-    if isinstance(v, bool):
-        return v
-    s = str(v).strip().lower()
-    if s in ("true", "1", "yes", "on"):
-        return True
-    if s in ("false", "0", "no", "off"):
-        return False
-    return None
-
-
-# dm_decoded_handler moved to .dm per split step 7.
-
-
-async def _upsert_tt_decoded(pool, owner, threads, messages):
-    thread_n = 0
-    msg_n = 0
-    try:
-        async with pool.acquire() as conn:
-            for t in threads:
-                if not isinstance(t, dict):
-                    continue
-                cid = (t.get("conversation_id") or "").strip()
-                if not cid:
-                    continue
-                await conn.execute(
-                    """
-                    INSERT INTO tiktok_dm_thread
-                        (conversation_id, conversation_type, participants,
-                         owner_account, last_activity)
-                    VALUES ($1, $2, $3, $4, $5)
-                    ON CONFLICT (conversation_id) DO UPDATE SET
-                        conversation_type = COALESCE(EXCLUDED.conversation_type,
-                                                     tiktok_dm_thread.conversation_type),
-                        participants      = COALESCE(EXCLUDED.participants,
-                                                     tiktok_dm_thread.participants),
-                        owner_account     = COALESCE(EXCLUDED.owner_account,
-                                                     tiktok_dm_thread.owner_account),
-                        last_activity     = GREATEST(EXCLUDED.last_activity,
-                                                     tiktok_dm_thread.last_activity),
-                        updated_at        = now()
-                    """,
-                    cid,
-                    _int_or_none(t.get("conversation_type")),
-                    (t.get("participants") or _conv_participants(cid) or None),
-                    (t.get("owner_account") or owner or None),
-                    _parse_ts_ms(t.get("last_activity_ms")),
-                )
-                thread_n += 1
-            for m in messages:
-                if not isinstance(m, dict):
-                    continue
-                mid = str(m.get("message_id") or "").strip()
-                cid = (m.get("conversation_id") or "").strip()
-                if not mid or not cid:
-                    continue
-                sender_uid = m.get("sender_uid")
-                sender_uid_s = str(sender_uid) if sender_uid is not None else None
-                is_from_me = bool(owner) and sender_uid_s == owner
-                raw = m.get("raw_content")
-                if raw is not None and not isinstance(raw, (dict, list)):
-                    raw = {"raw": raw}
-                await conn.execute(
-                    """
-                    INSERT INTO tiktok_dm
-                        (message_id, conversation_id, sender_uid, sender_secuid,
-                         text, awe_type, message_type, "timestamp", is_from_me,
-                         owner_account, client_message_id, is_stranger, media_url,
-                         raw_content)
-                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
-                    ON CONFLICT (message_id) DO UPDATE SET
-                        text         = COALESCE(EXCLUDED.text, tiktok_dm.text),
-                        awe_type     = COALESCE(EXCLUDED.awe_type, tiktok_dm.awe_type),
-                        message_type = COALESCE(EXCLUDED.message_type, tiktok_dm.message_type),
-                        "timestamp"  = COALESCE(EXCLUDED."timestamp", tiktok_dm."timestamp"),
-                        media_url    = COALESCE(EXCLUDED.media_url, tiktok_dm.media_url),
-                        raw_content  = COALESCE(EXCLUDED.raw_content, tiktok_dm.raw_content)
-                    """,
-                    mid, cid, sender_uid_s, m.get("sender_secuid"),
-                    m.get("text"),
-                    _int_or_none(m.get("aweType")),
-                    _int_or_none(m.get("message_type")),
-                    _parse_ts_ms(m.get("create_time_ms")),
-                    is_from_me,
-                    owner or None,
-                    m.get("client_message_id"),
-                    _bool_or_none(m.get("is_stranger")),
-                    (m.get("media_url") or None),
-                    json.dumps(raw) if raw is not None else None,
-                )
-                msg_n += 1
-    except Exception:
-        logger.exception("tt dm_decoded upsert failed")
-        raise
-    return thread_n, msg_n
-
-
 async def _save_profile(pool, platform, p) -> bool:
     """Upsert a full profile. Instagram is API-rich; X/Facebook are browser DOM
     best-effort profiles keyed on the visible handle."""
-    if platform not in ("instagram", "x", "facebook") or (
+    if platform not in ("instagram", "x", "facebook", "tiktok", "snapchat") or (
         platform in _VERIFIED_FILTER_PLATFORMS and _explicitly_verified_capture(p)
     ):
         return False
@@ -3350,6 +3167,58 @@ async def _save_profile(pool, platform, p) -> bool:
     if not uname:
         return False
     pic = p.get("profile_pic_url")
+    if platform == "snapchat":
+        metadata = p.get("metadata") if isinstance(p.get("metadata"), dict) else {}
+        bitmoji_url = str(p.get("bitmoji_url") or "").strip()
+        page_url = str(metadata.get("page_url") or "")
+        page = urlparse(page_url)
+        expected_path = f"/add/{uname}"
+        if (
+            metadata.get("source") != "snapchat_public_profile_dom_canary"
+            or page.scheme != "https"
+            or (page.hostname or "").lower() not in {"snapchat.com", "www.snapchat.com"}
+            or page.path.rstrip("/") != expected_path
+            or not approved_profile_image_url(bitmoji_url, ("sc-cdn.net", "snapchat.com", "snapchatcdn.com"))
+        ):
+            return False
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO snapchat_profiles (username, bitmoji_url, raw_payload, probed_at)
+                VALUES ($1,$2,$3::jsonb,now())
+                ON CONFLICT (username) DO UPDATE SET
+                   bitmoji_url=EXCLUDED.bitmoji_url,
+                   raw_payload=EXCLUDED.raw_payload,
+                   probed_at=now()
+                """,
+                uname, bitmoji_url, json.dumps({"metadata": metadata}),
+            )
+        await _record_profile_capability_receipts(pool, platform)
+        return True
+    if platform == "tiktok":
+        async with pool.acquire() as conn:
+            pid = str(p.get("platform_user_id") or p.get("user_id") or uname).strip().lstrip("@")
+            await conn.execute(
+                """
+                INSERT INTO tiktok_profiles
+                  (id, platform_user_id, username, nickname, avatar_url, bio, followers_count, updated_at)
+                VALUES (gen_random_uuid(),$1,$2,$3,$4,$5,$6,now())
+                ON CONFLICT (platform_user_id) DO UPDATE SET
+                   username=COALESCE(NULLIF(EXCLUDED.username, ''), tiktok_profiles.username),
+                   nickname=COALESCE(EXCLUDED.nickname, tiktok_profiles.nickname),
+                   avatar_url=COALESCE(EXCLUDED.avatar_url, tiktok_profiles.avatar_url),
+                   bio=COALESCE(EXCLUDED.bio, tiktok_profiles.bio),
+                   followers_count=COALESCE(EXCLUDED.followers_count, tiktok_profiles.followers_count),
+                   updated_at=now()
+                """,
+                pid, uname, p.get("display_name") or p.get("full_name"), pic, p.get("bio"),
+                _int(p.get("followers_count")),
+            )
+        await _record_users(pool, platform, [{"user_id": pid, "username": uname,
+                                              "display_name": p.get("display_name") or p.get("full_name"),
+                                              "profile_pic_url": pic}], "profile")
+        await _record_profile_capability_receipts(pool, platform)
+        return True
     if platform == "x":
         async with pool.acquire() as conn:
             # Preserve the exact handle casing already present in x_posts when
@@ -3400,6 +3269,7 @@ async def _save_profile(pool, platform, p) -> bool:
         await _record_users(pool, platform, [{"user_id": pid, "username": username,
                                               "display_name": p.get("display_name") or p.get("full_name"),
                                               "profile_pic_url": pic}], "profile")
+        await _record_profile_capability_receipts(pool, platform)
         return True
     if platform == "facebook":
         async with pool.acquire() as conn:
@@ -3432,6 +3302,7 @@ async def _save_profile(pool, platform, p) -> bool:
         await _record_users(pool, platform, [{"user_id": pid, "username": uname,
                                               "display_name": p.get("display_name") or p.get("full_name"),
                                               "profile_pic_url": pic}], "profile")
+        await _record_profile_capability_receipts(pool, platform)
         return True
     # Tier 4 change-history: snapshot the row BEFORE the upsert so we can diff
     # old -> new and log bio/username/follower/etc. changes. Best-effort.
@@ -3473,6 +3344,18 @@ async def _save_profile(pool, platform, p) -> bool:
     await _record_users(pool, platform, [{"user_id": p.get("user_id"), "username": uname,
                                           "display_name": p.get("full_name"), "profile_pic_url": pic}], "profile")
     return True
+
+
+async def _record_profile_capability_receipts(pool, platform: str) -> None:
+    """Make browser profile fields usable only after their own row readback."""
+    if platform not in {"x", "facebook", "tiktok", "snapchat"}:
+        return
+    try:
+        from src.core.capability_receipts import record_profile_field_receipts
+        async with pool.acquire() as conn:
+            await record_profile_field_receipts(conn, platform)
+    except Exception:
+        logger.debug("profile capability receipt failed for %s", platform, exc_info=True)
 
 
 async def _track_ig_profile_change(pool, p, uname, prev_row) -> None:
@@ -3572,38 +3455,6 @@ def _browser_capture_subject(endpoint: str, body: dict) -> str:
         return str(first.get("platform_post_id") or first.get("content_id") or f"{len(posts)}_posts")
     if endpoint == "comments":
         return str(body.get("post_id") or "comments")
-    if endpoint == "dms":
-        owner = body.get("owner") if isinstance(body.get("owner"), dict) else {}
-        threads = body.get("threads") if isinstance(body.get("threads"), list) else []
-        first = threads[0] if threads and isinstance(threads[0], dict) else {}
-        return str(
-            owner.get("username")
-            or owner.get("id")
-            or first.get("thread_id")
-            or first.get("thread_v2_id")
-            or f"{len(threads)}_threads"
-        )
-    if endpoint in ("dm_probe", "dm_sample", "dm_frame"):
-        parts = [
-            body.get("owner") or body.get("owner_account"),
-            body.get("transport"),
-            body.get("frame_kind"),
-            body.get("frame_size"),
-        ]
-        subject = "_".join(str(p) for p in parts if p not in (None, ""))
-        return subject or endpoint
-    if endpoint == "dm_decoded":
-        messages = body.get("messages") if isinstance(body.get("messages"), list) else []
-        threads = body.get("threads") if isinstance(body.get("threads"), list) else []
-        first_msg = messages[0] if messages and isinstance(messages[0], dict) else {}
-        first_thread = threads[0] if threads and isinstance(threads[0], dict) else {}
-        return str(
-            first_msg.get("message_id")
-            or first_msg.get("client_message_id")
-            or first_thread.get("conversation_id")
-            or first_thread.get("thread_id")
-            or f"{len(messages)}_messages"
-        )
     if endpoint == "strava_streams":
         return str(body.get("activity_id") or body.get("platform_activity_id") or "strava_streams")
     return endpoint
@@ -3737,6 +3588,8 @@ async def _upsert_strava_browser_stream(pool, body: dict) -> dict:
     latlng = _stream_values(streams, "latlng")
     point_count = len(latlng) if isinstance(latlng, list) else 0
     if point_count < 2:
+        if _browser_http_status(body) == 200:
+            return await _record_empty_strava_browser_stream(pool, activity_id, body, point_count)
         return {"stored": 0, "point_count": point_count, "reason": "no_route_points"}
 
     async with pool.acquire() as conn:
@@ -3818,7 +3671,10 @@ async def _upsert_strava_browser_stream(pool, body: dict) -> dict:
                 truncation_point_start = COALESCE(truncation_point_start, $5),
                 truncation_point_end = COALESCE(truncation_point_end, $6),
                 summary_polyline = COALESCE(NULLIF(summary_polyline, ''), $7),
-                metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+                metadata = (COALESCE(metadata, '{}'::jsonb)
+                    - 'browser_stream_empty_count'
+                    - 'browser_stream_empty_at'
+                    - 'browser_stream_empty_defer_until') || jsonb_build_object(
                     'browser_stream_last_seen_at', now(),
                     'browser_stream_extension_version', $8::text,
                     'browser_stream_request_url', $9::text,
@@ -3840,6 +3696,54 @@ async def _upsert_strava_browser_stream(pool, body: dict) -> dict:
             act_row["id"],
         )
     return {"stored": 1, "point_count": point_count, "activity_id": activity_id}
+
+
+async def _record_empty_strava_browser_stream(pool, activity_id: int, body: dict, point_count: int) -> dict:
+    """Defer one empty browser stream, then stop retrying documented empties."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO strava_activities (platform_activity_id, metadata, collected_at)
+            VALUES ($1, jsonb_build_object('browser_stream_stub', TRUE), now())
+            ON CONFLICT (platform_activity_id) DO NOTHING
+            """,
+            activity_id,
+        )
+        row = await conn.fetchrow(
+            """
+            UPDATE strava_activities
+            SET stream_status = CASE
+                    WHEN COALESCE(NULLIF(metadata->>'browser_stream_empty_count', '')::int, 0) + 1 >= 2
+                    THEN 'truncated_empty'
+                    ELSE stream_status
+                END,
+                metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+                    'browser_stream_empty_count', COALESCE(NULLIF(metadata->>'browser_stream_empty_count', '')::int, 0) + 1,
+                    'browser_stream_empty_at', now(),
+                    'browser_stream_empty_defer_until', CASE
+                        WHEN COALESCE(NULLIF(metadata->>'browser_stream_empty_count', '')::int, 0) + 1 >= 2 THEN NULL
+                        ELSE now() + interval '24 hours'
+                    END,
+                    'browser_stream_request_url', $2::text,
+                    'browser_stream_http_status', 200
+                ),
+                collected_at = COALESCE(collected_at, now())
+            WHERE platform_activity_id = $1
+            RETURNING COALESCE(NULLIF(metadata->>'browser_stream_empty_count', '')::int, 0) AS empty_count,
+                      stream_status
+            """,
+            activity_id,
+            body.get("request_url") or body.get("url"),
+        )
+    empty_count = int(row["empty_count"] or 0) if row else 0
+    terminal = bool(row and row["stream_status"] == "truncated_empty")
+    return {
+        "stored": 0,
+        "point_count": point_count,
+        "activity_id": activity_id,
+        "reason": "truncated_empty" if terminal else "empty_stream_deferred",
+        "empty_count": empty_count,
+    }
 
 
 def _browser_http_status(body: dict) -> int | None:
@@ -4117,7 +4021,7 @@ def _extension_reload_hint(extension_version) -> dict:
 # browser_heartbeat_handler moved to .cookies / .telemetry per split step 9.
 
 
-async def seed_handler(request):
+async def _legacy_seed_handler(request):
     """Seed the spider from the user's own followers/following as hop-0 targets."""
     body = await _safe_json(request)
     platform = _norm_platform(body.get("platform"))
@@ -4144,7 +4048,7 @@ async def seed_handler(request):
     return _cors(web.json_response({"added": added}))
 
 
-async def profile_handler(request):
+async def _legacy_profile_handler(request):
     body = await _safe_json(request)
     platform = _norm_platform(body.get("platform"))
     p = body.get("profile") or {}
@@ -4153,14 +4057,14 @@ async def profile_handler(request):
     ):
         return _cors(web.json_response({"ok": True, "excluded_verified": True}))
     await _archive_browser_capture(request.app["pool"], platform, "profile", body)
-    await _save_profile(request.app["pool"], platform, p)
+    saved = await _save_profile(request.app["pool"], platform, p)
     await _record_browser_ingest_event(
         request.app["pool"],
         platform,
         "profile",
         (p.get("username") or body.get("username") or "").strip().lstrip("@") or None,
         observed_count=1 if p else 0,
-        stored_count=1 if p else 0,
+        stored_count=1 if saved else 0,
     )
     # Follow-aware access recording (Phase 0): the extension just successfully
     # fetched this profile with its logged-in account (body["owner"]) — so that
@@ -4173,14 +4077,16 @@ async def profile_handler(request):
     # download the profile photo as a kind=profile media item
     pic = p.get("profile_pic_url")
     uname = (p.get("username") or "").strip().lstrip("@")
-    if pic and uname:
+    # Browser profile canaries only persist fields and receipts. Their images
+    # stay disabled until a provider-authorized qualified-media path exists.
+    if platform == "instagram" and saved and pic and uname:
         await _ingest(request.app, platform, {"username": uname, "items": [
             {"url": pic, "content_id": str(p.get("user_id") or uname), "content_type": "photo",
              "kind": "profile", "entity_name": uname}]})
     return _cors(web.json_response({"ok": True}))
 
 
-async def posts_handler(request):
+async def _legacy_posts_handler(request):
     body = await _safe_json(request)
     platform = _norm_platform(body.get("platform"))
     raw_posts = body.get("posts") or []
@@ -4256,7 +4162,7 @@ async def _posts_ingest_background(app, platform: str, body: dict) -> None:
         await _record_users(app["pool"], platform, authors, "author")
 
 
-async def comments_handler(request):
+async def _legacy_comments_handler(request):
     body = await _safe_json(request)
     platform = _norm_platform(body.get("platform"))
     raw_comments = body.get("comments") or []
@@ -4340,7 +4246,6 @@ async def health(request):
             "heartbeat": {"concurrency": SOCIAL_INGEST_HEARTBEAT_CONCURRENCY},
             "write": {"concurrency": SOCIAL_INGEST_WRITE_CONCURRENCY},
             "revisit": {"concurrency": SOCIAL_INGEST_REVISIT_CONCURRENCY},
-            "dm_sample": {"concurrency": SOCIAL_INGEST_DM_SAMPLE_CONCURRENCY},
         },
     }, status=status))
 
@@ -4429,7 +4334,6 @@ async def _on_startup(app):
     app["heartbeat_lane_sem"] = asyncio.Semaphore(SOCIAL_INGEST_HEARTBEAT_CONCURRENCY)
     app["write_lane_sem"] = asyncio.Semaphore(SOCIAL_INGEST_WRITE_CONCURRENCY)
     app["revisit_lane_sem"] = asyncio.Semaphore(SOCIAL_INGEST_REVISIT_CONCURRENCY)
-    app["dm_sample_lane_sem"] = asyncio.Semaphore(SOCIAL_INGEST_DM_SAMPLE_CONCURRENCY)
     app["session"] = aiohttp.ClientSession(
         headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"}
@@ -4459,6 +4363,18 @@ def make_app():
     keep touches to ``__init__.py`` small."""
     from .app import build_app
     return build_app()
+
+
+# Compatibility exports for callers that historically imported generic route
+# handlers from this package while the implementation now lives in routes/.
+from .routes.generic import (  # noqa: E402,F401
+    comments_handler,
+    posts_handler,
+    profile_handler,
+    seed_handler,
+    target_status_handler,
+    users_handler,
+)
 
 
 # Module-level app instance so downstream code and tests can do

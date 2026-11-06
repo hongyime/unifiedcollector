@@ -24,6 +24,7 @@ class CheckpointManager:
         self.status: str = "idle"
         self._cursor_loaded = False
         self._chat_cursors: dict[str, tuple[bool, str | None]] = {}
+        self._chat_account_identities: dict[str, str] = {}
 
     def set_pool(self, pool):
         self._pool = pool
@@ -38,6 +39,9 @@ class CheckpointManager:
     def chat_cursor_key(self, chat_id: str) -> str:
         """service_cursors primary key for one chat's numeric cursor."""
         return f"{self._service}:chat:{chat_id}"
+
+    def set_chat_account_identity(self, chat_id: str, account_identity: str) -> None:
+        self._chat_account_identities[str(chat_id)] = str(account_identity)
 
     async def load_chat_progress(self, chat_id: str) -> int | None:
         """Return the chat's numeric message cursor, or None when absent.
@@ -90,6 +94,13 @@ class CheckpointManager:
             if row is None:
                 raise CheckpointConflict(f"chat cursor changed while worker was running: {chat_id}")
             self._chat_cursors[chat_id] = (True, str(row["last_processed_id"]))
+            account_identity = self._chat_account_identities.get(str(chat_id))
+            if self._service == "telegram" and account_identity:
+                from src.core.backfill_lanes import mirror_backfill_lane
+                await mirror_backfill_lane(
+                    conn, source="telegram", account_identity=account_identity, target_identity=str(chat_id),
+                    cursor={"message_id": int(message_id)}, complete=False,
+                )
 
     async def touch(self, status: str | None = None):
         """Heartbeat the service row without advancing its cursor.

@@ -46,6 +46,10 @@ from src.core.sliding_window_limiter import SlidingWindowRateLimiter, WindowConf
 from src.core.profile_photo_tracker import ProfilePhotoTracker
 from src.core.raw_archive import report_raw_archive_result
 from src.core.rate_limit_events import record_rate_limit_event
+from src.core.recovery_profiles import (
+    enter_recovery,
+    get_active_recovery,
+)
 from src.core.scrape_pacing import headless_dwell, sleep_before_pre_cooldown_retry
 from src.core.vault import (
     VAULT_ROOT,
@@ -185,6 +189,9 @@ class InstagramCollector(BaseCollector):
 
     def __init__(self):
         super().__init__()
+        from src.core.env import env_bool
+
+        self._collector_enabled = env_bool("INSTAGRAM_COLLECTOR_ENABLED", default=True)
         self._max_followers = int(os.getenv("FILTER_MAX_FOLLOWERS", "0"))
         self._sem = asyncio.Semaphore(2)
 
@@ -284,6 +291,13 @@ class InstagramCollector(BaseCollector):
         # Profile analyzer instance — cheap, stateless. Falls back to
         # None when the import failed (don't break the collector).
         self._profile_analyzer = ProfileAnalyzer() if ProfileAnalyzer else None
+
+    async def run(self, targets: list[str]):
+        if not self._collector_enabled:
+            self._intentional_idle_reason = "disabled by INSTAGRAM_COLLECTOR_ENABLED=false"
+            logger.info("instagram: %s", self._intentional_idle_reason)
+            return
+        await super().run(targets)
 
     def _archive_raw_payload(
         self,
@@ -1014,6 +1028,18 @@ class InstagramCollector(BaseCollector):
         import time as _time
 
         self._intentional_idle_reason = None
+        recovery = await get_active_recovery(self.pool, self.SOURCE_NAME)
+        if recovery:
+            # A restriction permits only a future passive following-feed DOM
+            # observation. This collector has no bounded observer for that,
+            # so fail closed rather than claim an observation it did not make.
+            self._intentional_idle_reason = (
+                "Instagram recovery restricted until "
+                f"{recovery.get('restricted_until')}; profile/API, graph, story, comment, "
+                "tagged, highlight, and media-revisit work disabled"
+            )
+            logger.warning("instagram: %s", self._intentional_idle_reason)
+            return
         fresh_extension = await self._fresh_extension_activity()
         if fresh_extension:
             self._intentional_idle_reason = (
@@ -1494,6 +1520,13 @@ class InstagramCollector(BaseCollector):
             reason=reason,
             metadata=metadata,
         )
+        if status_code in {401, 403, 429}:
+            await enter_recovery(
+                self.pool,
+                self.SOURCE_NAME,
+                account=acct_name,
+                reason=reason or f"HTTP {status_code}",
+            )
 
     async def _handle_rate_limit(
         self,

@@ -40,6 +40,10 @@ class _FakeConn:
     def __init__(self, rows):
         self._rows = rows
 
+    async def fetchval(self, sql, *args):
+        assert "to_regclass('source_controls')" in sql
+        return "source_controls"
+
     async def fetch(self, sql, *args):
         return self._rows
 

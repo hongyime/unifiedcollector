@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from src.core.dlq_consumer import DLQConsumer
+from src.core.dlq_consumer import DLQConsumer, DeferredError
 
 
 class _FakeConnection:
@@ -162,6 +162,23 @@ async def test_handler_timeout_reschedules_row():
     assert args[0] == 42
     assert args[1] == 1
     assert "TimeoutError" in args[2]
+
+
+@pytest.mark.asyncio
+async def test_deferred_handler_preserves_retry_count():
+    row = {"id": 42, "source": "telegram", "entity_id": "chat", "content_id": "media", "retry_count": 4}
+    pool = _FakePool([])
+    consumer = DLQConsumer(pool)
+
+    async def deferred(_row):
+        raise DeferredError("storage reserve", delay_seconds=300)
+
+    consumer.register("telegram", deferred)
+    await consumer._process_row(row)
+
+    query, args, _kwargs = pool.execute_calls[0]
+    assert "next_retry_at" in query
+    assert args == (42, "storage reserve", 300)
 
 
 def test_handler_timeout_must_be_positive():

@@ -50,7 +50,7 @@ def test_runtime_receipt_covers_the_recon_services_in_the_approved_set() -> None
 
 
 def test_runtime_receipt_uses_baseline_artifacts_for_unchanged_services() -> None:
-    spec = ServiceSpec("collector_paypal", "paypal", "collector", "/src", "/artifact")
+    spec = ServiceSpec("collector_whatsapp", "whatsapp", "collector", "/src", "/artifact")
     receipt = collect(
         {"schema_version": 1, "task": 44, "artifacts": [_artifact("collector", "sha256:refreshed")]},
         {"schema_version": 1, "task": 49},

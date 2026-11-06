@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import time
 from collections import deque
 from datetime import datetime, timezone
@@ -34,10 +35,16 @@ from src.core.file_naming import sanitize_name
 from src.core.proximity import refresh_account_proximity_cache
 from src.core.raw_archive import report_raw_archive_result
 from src.core.rate_limit_events import record_rate_limit_event
+from src.core.telegram_throughput import AdaptiveTelegramHistoryScheduler
 from src.core.user_change_tracker import (
     UserChangeTracker,
 )
-from src.core.vault import VAULT_ROOT, write_atomic_artifact, write_raw_payload
+from src.core.vault import (
+    VAULT_ROOT,
+    historical_media_storage_gate,
+    write_atomic_artifact,
+    write_raw_payload,
+)
 
 
 def _vault_root():
@@ -92,6 +99,8 @@ from src.collectors.telegram.helpers import (  # noqa: F401 — re-export
 )
 
 logger = logging.getLogger("src.collectors.telegram")
+
+_LINK_JOIN_EXCLUDED_ACCOUNTS = frozenset({"bryanseah234", "shotsbyseah234"})
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -149,7 +158,16 @@ class TelegramCollector(
         self._batch_size = int(os.getenv("TELEGRAM_BATCH_SIZE", "100"))
         self._max_media_size = int(os.getenv("TELEGRAM_MAX_MEDIA_SIZE_MB", "50")) * 1024 * 1024
         self._backfill_enabled = os.getenv("TELEGRAM_BACKFILL_ENABLED", "true").lower() == "true"
-        self._backfill_msg_per_sec = float(os.getenv("TELEGRAM_BACKFILL_MSG_PER_SEC", "20.0"))
+        self._history_scheduler = AdaptiveTelegramHistoryScheduler(
+            max_claims=max(1, int(os.getenv("TELEGRAM_HISTORY_MAX_CLAIMS_PER_ACCOUNT", "4"))),
+            clean_windows_to_raise=max(1, int(os.getenv("TELEGRAM_HISTORY_CLEAN_WINDOWS", "3"))),
+        )
+        self._history_window_messages = max(
+            1, int(os.getenv("TELEGRAM_HISTORY_WINDOW_MESSAGES", "10"))
+        )
+        self._history_window_limits: dict[str, int] = {}
+        self._history_claim_accounts: dict[str, str] = {}
+        self._history_windowed_chats: set[str] = set()
         self._story_enabled = os.getenv("TELEGRAM_STORY_SCAN_ENABLED", "true").lower() == "true"
         self._story_interval = int(os.getenv("TELEGRAM_STORY_SCAN_INTERVAL", "300"))
 
@@ -165,6 +183,7 @@ class TelegramCollector(
         self._discussion_link_cache: dict[tuple[int, str], tuple[float, int | None, object | None]] = {}
         self._max_joins_per_hour = int(os.getenv("TELEGRAM_MAX_JOINS_PER_HOUR", "5"))
         self._join_min_delay = int(os.getenv("TELEGRAM_JOIN_MIN_DELAY", "30"))
+        self._join_jitter = max(0, int(os.getenv("TELEGRAM_JOIN_JITTER", "15")))
         self._admin_log_enabled = (
             os.getenv(
                 "TELEGRAM_ADMIN_LOG_ENABLED",
@@ -399,6 +418,42 @@ class TelegramCollector(
             await repo.flush_pool(self.account_pool)
         except Exception as exc:
             logger.debug("Telegram account state flush failed: %s", exc)
+
+    async def _record_history_throughput(self, account: str) -> None:
+        """Persist only measured historical-drain telemetry; realtime is reserved.
+
+        ``cooldown_until`` is a display snapshot. Restart recovery deliberately
+        reads the authoritative ``rate_limit_events`` ledger instead.
+        """
+        if self.pool is None:
+            return
+        row = self._history_scheduler.snapshot(account)
+        cooldown_seconds = max(0, int(row["cooldown_seconds"] or 0))
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO telegram_account_throughput
+                        (account_identity,claim_budget,active_claims,claims_done,written_messages,
+                         write_rate,flood_waits,cooldown_until,updated_at)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,
+                            CASE WHEN $8::int > 0 THEN now()+($8::text || ' seconds')::interval ELSE NULL END,now())
+                    ON CONFLICT (account_identity) DO UPDATE SET
+                        claim_budget=EXCLUDED.claim_budget, active_claims=EXCLUDED.active_claims,
+                        claims_done=EXCLUDED.claims_done, written_messages=EXCLUDED.written_messages,
+                        write_rate=EXCLUDED.write_rate, flood_waits=EXCLUDED.flood_waits,
+                        cooldown_until=EXCLUDED.cooldown_until, updated_at=now()
+                    """,
+                    account, row["claim_budget"], row["active_claims"], row["claims_done"],
+                    row["written_messages"], row["write_rate"], row["flood_waits"], cooldown_seconds,
+                )
+        except Exception:
+            logger.debug("telegram throughput telemetry write failed", exc_info=True)
+
+    async def _record_history_baseline(self) -> None:
+        """Make connected, idle accounts visible before their first history claim."""
+        for worker in self._workers:
+            await self._record_history_throughput(worker.account.name)
 
     async def _restore_flood_waits_from_events(self) -> int:
         """Hydrate active Telegram FloodWait cooldowns recorded before restart."""
@@ -862,6 +917,7 @@ class TelegramCollector(
                 await self._register_realtime_handlers()
             except Exception as e:
                 logger.error("early realtime handler registration failed: %s", e)
+        await self._record_history_baseline()
 
         # Auto-backfill new accounts (item 2.4).
         # For each connected worker, check if their account name has been seen
@@ -926,39 +982,8 @@ class TelegramCollector(
                         spider_workers, per_worker_limit=startup_channel_limit
                     )
 
-        # Dispatch targets to workers (hash-based, shared-chat aware).
-        buckets = self._dispatch(targets, len(self._workers))
-        for w, bucket in zip(self._workers, buckets):
-            w._claimed_chats = set(bucket)
-
-        # Run all workers concurrently — true parallelism.
-        results = await asyncio.gather(
-            *(w.run_targets(bucket) for w, bucket in zip(self._workers, buckets)),
-            return_exceptions=True,
-        )
-        for w, r in zip(self._workers, results):
-            if isinstance(r, Exception):
-                logger.error(
-                    "[worker=%d account=%s] worker crashed: %s",
-                    w.worker_id, w.account.name, r,
-                )
-
-        # Launch the resolve-only sweep as an INDEPENDENT task now that workers are
-        # connected — BEFORE the blocking spider drain below (and collect_realtime),
-        # which can sit for hours deep-backfilling large channels. As its own task it
-        # runs on the event loop concurrently with those blocked gathers, so dead
-        # chats get reclassified promptly instead of waiting for a worker to free up.
-        if self._workers and not getattr(self, "_sweep_task", None):
-            self._sweep_task = asyncio.create_task(self._resolve_sweep_loop())
-
-        if self._group_join_enabled:
-            try:
-                await self._process_join_queue()
-            except Exception as e:
-                logger.error("Join queue failed: %s", e)
-
-        # Spider queue: fan out across allowed workers for parallelism.
-        # TELEGRAM_SPIDER_ACCOUNTS restricts which accounts can spider.
+        # Claim the initial bounded history window while realtime handlers are
+        # active, before a long ordinary target sweep can delay it indefinitely.
         if os.getenv("TELEGRAM_SPIDER_ENABLED", "true").lower() == "true":
             try:
                 configured_spider_workers = [
@@ -982,16 +1007,54 @@ class TelegramCollector(
                     logger.info("Spider restricted to accounts: %s (%d/%d workers)",
                                 ", ".join(sorted(self._spider_accounts)), len(spider_workers), len(self._workers))
                 if spider_workers:
-                    spider_tasks = [
-                        self._process_spider_queue(w)
-                        for w in spider_workers
-                    ]
-                    results = await asyncio.gather(*spider_tasks, return_exceptions=True)
-                    for w, r in zip(spider_workers, results):
-                        if isinstance(r, Exception):
-                            logger.error("Spider queue worker=%d crashed: %s", w.worker_id, r)
+                    results = await asyncio.gather(
+                        *(self._process_spider_queue(w) for w in spider_workers),
+                        return_exceptions=True,
+                    )
+                    for w, result in zip(spider_workers, results):
+                        if isinstance(result, Exception):
+                            logger.error("Spider queue worker=%d crashed: %s", w.worker_id, result)
             except Exception as e:
                 logger.error("Spider queue processing failed: %s", e)
+
+        # Dispatch targets to workers (hash-based, shared-chat aware).
+        buckets = self._dispatch(targets, len(self._workers))
+        for w, bucket in zip(self._workers, buckets):
+            w._claimed_chats = set(bucket)
+
+        drain_task = None
+        if os.getenv("TELEGRAM_SPIDER_ENABLED", "true").lower() == "true":
+            drain_task = asyncio.create_task(self._drain_history_during_target_sweep())
+        try:
+            # Run all workers concurrently — true parallelism.
+            results = await asyncio.gather(
+                *(w.run_targets(bucket) for w, bucket in zip(self._workers, buckets)),
+                return_exceptions=True,
+            )
+        finally:
+            if drain_task is not None:
+                drain_task.cancel()
+                await asyncio.gather(drain_task, return_exceptions=True)
+        for w, r in zip(self._workers, results):
+            if isinstance(r, Exception):
+                logger.error(
+                    "[worker=%d account=%s] worker crashed: %s",
+                    w.worker_id, w.account.name, r,
+                )
+
+        # Launch the resolve-only sweep as an INDEPENDENT task now that workers are
+        # connected — BEFORE the blocking spider drain below (and collect_realtime),
+        # which can sit for hours deep-backfilling large channels. As its own task it
+        # runs on the event loop concurrently with those blocked gathers, so dead
+        # chats get reclassified promptly instead of waiting for a worker to free up.
+        if self._workers and not getattr(self, "_sweep_task", None):
+            self._sweep_task = asyncio.create_task(self._resolve_sweep_loop())
+
+        if self._group_join_enabled:
+            try:
+                await self._process_join_queue()
+            except Exception as e:
+                logger.error("Join queue failed: %s", e)
 
         if self._story_enabled:
             try:
@@ -1437,7 +1500,10 @@ class TelegramCollector(
     async def _process_spider_queue(self, worker: "TelegramWorker"):
         """Process telegram_spider_queue jobs using the given worker's client."""
         from telethon.errors import FloodWaitError
-        max_per_cycle = int(os.getenv("TELEGRAM_SPIDER_MAX_PER_CYCLE", "50"))
+        configured_max = int(os.getenv("TELEGRAM_SPIDER_MAX_PER_CYCLE", "50"))
+        # Start at one claim per account. A clean completion earns a modest
+        # extra claim in later drain windows; realtime is never budgeted here.
+        claim_budget = self._history_scheduler.claim_budget(worker.account.name)
         if not self._worker_can_resolve(worker):
             logger.info(
                 "[spider w=%d account=%s] skipped: account unavailable or cooling down",
@@ -1449,13 +1515,31 @@ class TelegramCollector(
         processed = 0
         attempted_chat_ids: set[str] = set()
         attempted = 0
-        while not self._stop.is_set() and attempted < max_per_cycle:
+        claims: list[tuple[str, str]] = []
+        # Claim ownership before dispatch. SKIP LOCKED plus the durable
+        # processing status prevents a second worker from owning the same chat.
+        while not self._stop.is_set() and attempted < configured_max and len(claims) < claim_budget:
             async with self.pool.acquire() as conn:
                 row = await conn.fetchrow("""
-                    WITH ranked AS (
+                    WITH owned_chats AS (
+                        SELECT DISTINCT c.platform_chat_id
+                        FROM telegram_user_accounts a
+                        JOIN telegram_users u
+                          ON regexp_replace(COALESCE(u.phone, ''), '[^0-9]', '', 'g')
+                           = regexp_replace(COALESCE(a.phone, ''), '[^0-9]', '', 'g')
+                        JOIN telegram_chat_members m ON m.user_id = u.id
+                        JOIN telegram_chats c ON c.id = m.chat_id
+                        WHERE a.status = 'active'
+                    ), ranked AS (
                         SELECT q.id,
                                q.priority,
                                q.collected_at,
+                               CASE WHEN q.platform_chat_id IN (SELECT platform_chat_id FROM owned_chats)
+                                    THEN 1 ELSE 0 END AS owned_chat,
+                               CASE WHEN EXISTS (
+                                   SELECT 1 FROM telegram_chats c
+                                   WHERE c.platform_chat_id = q.platform_chat_id
+                               ) THEN 1 ELSE 0 END AS known_chat,
                                prox.proximity_tier
                         FROM telegram_spider_queue q
                         LEFT JOIN LATERAL (
@@ -1471,6 +1555,8 @@ class TelegramCollector(
                         WHERE q.status = 'pending'
                           AND q.platform_chat_id <> ALL($1::text[])
                         ORDER BY
+                            owned_chat DESC,
+                            known_chat DESC,
                             CASE
                                 WHEN prox.proximity_tier IN (1, 2) THEN 2
                                 WHEN prox.proximity_tier = 3 THEN 1
@@ -1486,6 +1572,8 @@ class TelegramCollector(
                         JOIN ranked r ON r.id = q.id
                         WHERE q.status = 'pending'
                         ORDER BY
+                            r.owned_chat DESC,
+                            r.known_chat DESC,
                             CASE
                                 WHEN r.proximity_tier IN (1, 2) THEN 2
                                 WHEN r.proximity_tier = 3 THEN 1
@@ -1509,19 +1597,35 @@ class TelegramCollector(
             chat_id = row['platform_chat_id']
             attempted_chat_ids.add(str(chat_id))
             attempted += 1
-            title = row['title'] or chat_id
+            self._history_scheduler.claimed(worker.account.name)
+            claims.append((str(chat_id), str(row['title'] or chat_id)))
+
+        async def process_claim(chat_id: str, title: str, claim_number: int) -> int:
+            claimed_at = time.monotonic()
+            self._history_claim_accounts[chat_id] = worker.account.name
+            self._history_window_limits[chat_id] = self._history_window_messages
             try:
                 logger.info(
                     "[spider w=%d] processing chat %s (%s) [attempt %d/%d]",
-                    worker.worker_id, chat_id, title, attempted, max_per_cycle,
+                    worker.worker_id, chat_id, title, claim_number, claim_budget,
                 )
-                await self._collect_chat(worker, chat_id)
+                written = await self._collect_chat(worker, chat_id)
+                partial = chat_id in self._history_windowed_chats
                 async with self.pool.acquire() as conn:
                     await conn.execute(
-                        "UPDATE telegram_spider_queue SET status = 'completed' WHERE platform_chat_id = $1",
+                        """UPDATE telegram_spider_queue
+                              SET status = CASE WHEN $2 THEN 'pending' ELSE 'completed' END,
+                                  collected_at = CASE WHEN $2 THEN NOW() ELSE collected_at END,
+                                  last_error = CASE WHEN $2 THEN NULL ELSE last_error END
+                            WHERE platform_chat_id = $1""",
                         chat_id,
+                        partial,
                     )
-                processed += 1
+                self._history_scheduler.completed(
+                    worker.account.name, written=0, elapsed_seconds=time.monotonic() - claimed_at,
+                )
+                await self._record_history_throughput(worker.account.name)
+                return 1
             except FloodWaitError as e:
                 logger.warning(
                     "[spider w=%d] FloodWait %ds on chat %s — releasing back to pending",
@@ -1533,13 +1637,18 @@ class TelegramCollector(
                         chat_id,
                     )
                 await self._handle_flood_wait(worker, e)
+                return 0
             except EntityResolveDeferred as exc:
+                self._history_scheduler.state(worker.account.name).active_claims = max(0, self._history_scheduler.state(worker.account.name).active_claims - 1)
                 logger.info(
                     "[spider w=%d] chat %s resolve deferred without attempt penalty: %s",
                     worker.worker_id, chat_id, exc,
                 )
                 await self._mark_spider_status(chat_id, "pending", f"resolve deferred: {exc}")
+                await self._record_history_throughput(worker.account.name)
+                return 0
             except EntityUnresolvable as exc:
+                self._history_scheduler.state(worker.account.name).active_claims = max(0, self._history_scheduler.state(worker.account.name).active_claims - 1)
                 # Every account was asked and none owns this chat (left / deleted /
                 # private). Terminal — mark 'unresolvable' so it stops churning the
                 # queue, distinct from a retryable 'failed'.
@@ -1548,16 +1657,59 @@ class TelegramCollector(
                     worker.worker_id, chat_id, len(self._workers), exc,
                 )
                 await self._mark_spider_status(chat_id, "unresolvable", str(exc))
+                await self._record_history_throughput(worker.account.name)
+                return 0
             except Exception as exc:
+                self._history_scheduler.state(worker.account.name).active_claims = max(0, self._history_scheduler.state(worker.account.name).active_claims - 1)
                 # Transient (disconnect/timeout) or unknown — retry up to a cap so a
                 # blip doesn't permanently kill a recoverable chat; then give up.
                 await self._retry_or_fail_spider(chat_id, exc, worker.worker_id)
+                await self._record_history_throughput(worker.account.name)
+                return 0
+            finally:
+                self._history_claim_accounts.pop(chat_id, None)
+                self._history_window_limits.pop(chat_id, None)
+                self._history_windowed_chats.discard(chat_id)
+
+        if claims:
+            # A claim can run for a full history window. Persist it before
+            # awaiting network work so /lanes shows actual in-flight load.
+            await self._record_history_throughput(worker.account.name)
+            results = await asyncio.gather(
+                *(process_claim(chat_id, title, index) for index, (chat_id, title) in enumerate(claims, start=1)),
+            )
+            processed = sum(results)
         logger.info(
             "[spider w=%d] finished: processed %d chats in %d attempts",
             worker.worker_id,
             processed,
             attempted,
         )
+        return processed
+
+    async def _drain_history_during_target_sweep(self) -> None:
+        """Keep bounded history windows moving before the parked realtime loop starts."""
+        interval = max(1.0, float(os.getenv("TELEGRAM_BACKFILL_DRAIN_INTERVAL", "60")))
+        while not self._stop.is_set():
+            await asyncio.sleep(interval)
+            if self._stop.is_set():
+                break
+            workers = [
+                worker for worker in self._workers
+                if self._is_spider_allowed(worker) and self._worker_can_resolve(worker)
+            ]
+            if not workers:
+                continue
+            results = await asyncio.gather(
+                *(self._process_spider_queue(worker) for worker in workers),
+                return_exceptions=True,
+            )
+            for worker, result in zip(workers, results):
+                if isinstance(result, Exception):
+                    logger.warning(
+                        "target-sweep history drain worker=%d failed: %s",
+                        worker.worker_id, type(result).__name__,
+                    )
 
     async def _recover_interrupted_spider_queue(self) -> int:
         """Return abandoned processing jobs to pending once before workers start.
@@ -1740,6 +1892,8 @@ class TelegramCollector(
         # Use the actual flood-wait seconds so the pool doesn't release the
         # account until Telegram lets us back in.
         self.account_pool.record_flood_wait(worker.account.name, float(wait_seconds))
+        self._history_scheduler.flood_wait(worker.account.name, int(wait_seconds))
+        await self._record_history_throughput(worker.account.name)
         await self._flush_account_pool_state()
         await record_rate_limit_event(
             self.pool,
@@ -1825,9 +1979,14 @@ class TelegramCollector(
             if not self._worker_can_resolve(w):
                 transient = True
                 continue
-            # Try the id numerically then as a raw string; get_entity raises
-            # ValueError('Cannot find any entity...') when this account isn't in it.
-            for form in (_as_int(target), target):
+            # Queue rows persist bare IDs, while Telethon needs a marked channel
+            # ID for chats that are not otherwise cached as users.
+            bare_id = _as_int(target)
+            forms = [bare_id, target]
+            if bare_id is not None and bare_id > 0:
+                forms.append(-1_000_000_000_000 - bare_id)
+            # get_entity raises ValueError when this account is not in it.
+            for form in forms:
                 if form is None:
                     continue
                 try:
@@ -1860,10 +2019,23 @@ class TelegramCollector(
         chat_id: str,
         chat_name: str,
         chat_username: str | None,
+        *,
+        historical: bool = False,
     ) -> bool:
         """Download any file-backed Telegram message media we can safely fetch."""
         if not getattr(message, "media", None):
             return False
+        if historical:
+            storage = historical_media_storage_gate(_vault_root())
+            if not storage.allowed:
+                content_id = _telegram_message_content_id(chat_id, message.id)
+                await self.send_to_dlq(
+                    chat_id,
+                    content_id,
+                    f"historical media storage paused: {storage.reason}",
+                )
+                logger.warning("Telegram historical media paused: %s", storage.reason)
+                return False
 
         from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
 
@@ -1979,6 +2151,7 @@ class TelegramCollector(
         chat_id = str(entity.id)
         chat_name = getattr(entity, "title", None) or getattr(entity, "username", None) or chat_id
         chat_username = getattr(entity, "username", None)  # for source_url deep-links
+        self.checkpoint.set_chat_account_identity(chat_id, worker.account.name)
 
         await self._upsert_chat(entity)
         await self._collect_profile_photo(worker, entity, chat_id, chat_name)
@@ -2018,9 +2191,39 @@ class TelegramCollector(
         # unset because the cursor is the bound; a cursor-less chat performs
         # one full ascending backfill by design and never rescans on later
         # cycles.
-        async for message in client.iter_messages(
+        message_timeout = float(os.getenv("TELEGRAM_HISTORY_MESSAGE_TIMEOUT", "60"))
+        history_limit = self._history_window_limits.get(chat_id)
+        pending_message = getattr(worker, "_history_message_task", None)
+        if pending_message is not None and not pending_message.done():
+            raise EntityResolveDeferred("previous history iterator is still pending")
+        message_iterator = client.iter_messages(
             entity, min_id=min_id, reverse=True, limit=None
-        ):
+        ).__aiter__()
+        while not self._stop.is_set():
+            message_task = asyncio.create_task(anext(message_iterator))
+            worker._history_message_task = message_task
+            try:
+                done, _ = await asyncio.wait({message_task}, timeout=message_timeout)
+                if not done:
+                    # Telethon can absorb cancellation while an RPC is stuck. Keep
+                    # one task per worker so a retry cannot pile up requests.
+                    message_task.cancel()
+                    message_task.add_done_callback(
+                        lambda task: setattr(worker, "_history_message_task", None)
+                        if getattr(worker, "_history_message_task", None) is task else None
+                    )
+                    raise asyncio.TimeoutError
+                worker._history_message_task = None
+                message = message_task.result()
+            except StopAsyncIteration:
+                worker._history_message_task = None
+                break
+            except asyncio.TimeoutError as exc:
+                if last_seen_message_id is not None:
+                    await self.checkpoint.save_chat_progress(chat_id, last_seen_message_id)
+                raise EntityResolveDeferred(
+                    f"history iterator timed out after {message_timeout:.0f}s"
+                ) from exc
             if self._stop.is_set():
                 break
 
@@ -2031,8 +2234,12 @@ class TelegramCollector(
             sender_uuid = None
             if message.sender_id:
                 sender_uuid = await self._upsert_sender(worker, message.sender_id)
-
             await self._upsert_message(message, chat_id, sender_uuid, worker=worker)
+            history_account = self._history_claim_accounts.get(chat_id)
+            if history_account:
+                self._history_scheduler.wrote(history_account)
+                if seen_count == 1 or seen_count % self._batch_size == 0:
+                    await self._record_history_throughput(history_account)
 
             # Forward extraction → spider queue (item 1.10).
             # When a message is forwarded from another chat or user, that source
@@ -2052,12 +2259,15 @@ class TelegramCollector(
                     logger.debug("_enumerate_reactors_and_enqueue failed: %s", exc)
 
             if await self._download_any_message_media(
-                worker, message, chat_id, chat_name, chat_username
+                worker, message, chat_id, chat_name, chat_username, historical=True
             ):
                 count += 1
 
             if seen_count % self._batch_size == 0 and seen_count > 0:
                 await self.checkpoint.save_chat_progress(chat_id, last_seen_message_id)
+            if history_limit and seen_count >= history_limit:
+                self._history_windowed_chats.add(chat_id)
+                break
 
         # P3-6: flush the final partial batch. The per-batch save above only
         # fires on exact _batch_size multiples, so the trailing remainder
@@ -2076,6 +2286,9 @@ class TelegramCollector(
                 "[worker=%d account=%s] telegram/%s: finished processing %d media items",
                 worker.worker_id, worker.account.name, chat_name, count,
             )
+
+        if chat_id in self._history_windowed_chats:
+            return seen_count
 
         # Per-chat membership snapshot (item 1.9) — only meaningful for groups
         # where we have visibility. Channels with broadcast=True don't expose
@@ -2101,6 +2314,7 @@ class TelegramCollector(
         # Mark this target as collected in collection_targets
         logger.info("[_collect_chat] completed target=%s, calling mark_target_collected", target)
         await self.mark_target_collected(target)
+        return seen_count
 
     async def _resolve_linked_discussion_entity(
         self,
@@ -2114,6 +2328,7 @@ class TelegramCollector(
         from telethon.tl.functions.channels import GetFullChannelRequest
 
         client = worker.client
+        timeout = float(os.getenv("TELEGRAM_RESOLVE_TIMEOUT", "25"))
         cache_key = (int(getattr(worker, "worker_id", -1)), str(channel_platform_id))
         cached = self._discussion_link_cache.get(cache_key)
         if cached and time.monotonic() - cached[0] < 24 * 60 * 60:
@@ -2127,7 +2342,9 @@ class TelegramCollector(
         if not linked_chat_id:
             try:
                 await self.wait_rate_limit("telegram.org")
-                full = await client(GetFullChannelRequest(channel=channel_entity))
+                full = await asyncio.wait_for(
+                    client(GetFullChannelRequest(channel=channel_entity)), timeout
+                )
                 full_channel = getattr(full, "full_chat", None)
                 linked_chat_id = getattr(full_channel, "linked_chat_id", None)
                 related_chats = getattr(full, "chats", None) or []
@@ -2156,7 +2373,9 @@ class TelegramCollector(
         if discussion_entity is None:
             try:
                 await self.wait_rate_limit("telegram.org")
-                discussion_entity = await client.get_entity(int(linked_chat_id))
+                discussion_entity = await asyncio.wait_for(
+                    client.get_entity(int(linked_chat_id)), timeout
+                )
             except Exception as exc:
                 if _is_flood_wait(exc):
                     await self._handle_flood_wait(worker, exc, sleep=not startup_limits)
@@ -2337,6 +2556,7 @@ class TelegramCollector(
                                 discussion_platform_id,
                                 discussion_title,
                                 getattr(discussion_entity, "username", None),
+                                historical=True,
                             )
                         except Exception as exc:
                             logger.debug("discussion media download failed: %s", exc)
@@ -2533,8 +2753,24 @@ class TelegramCollector(
                 logger.debug("telegram forward discovery shadow write skipped", exc_info=True)
 
     async def _upsert_sender(self, worker: "TelegramWorker", platform_user_id) -> str | None:
+        pending_lookup = getattr(worker, "_sender_lookup_task", None)
+        if pending_lookup is not None and not pending_lookup.done():
+            return None
         try:
-            user = await worker.client.get_entity(platform_user_id)
+            lookup = asyncio.create_task(worker.client.get_entity(platform_user_id))
+            worker._sender_lookup_task = lookup
+            timeout = float(os.getenv("TELEGRAM_RESOLVE_TIMEOUT", "25"))
+            done, _ = await asyncio.wait({lookup}, timeout=timeout)
+            if not done:
+                # Sender enrichment is optional; do not let one RPC stall history.
+                lookup.cancel()
+                lookup.add_done_callback(
+                    lambda task: setattr(worker, "_sender_lookup_task", None)
+                    if getattr(worker, "_sender_lookup_task", None) is task else None
+                )
+                return None
+            worker._sender_lookup_task = None
+            user = lookup.result()
             async with self.pool.acquire() as conn:
                 row = await conn.fetchrow("""
                     INSERT INTO telegram_users (platform_user_id, username, first_name, last_name, phone, is_bot, is_deleted, updated_at)
@@ -4018,11 +4254,15 @@ class TelegramCollector(
             )
             return False
         if self._join_timestamps:
-            wait_for = self._join_min_delay - (now_ts - self._join_timestamps[-1])
+            wait_for = self._join_min_delay + random.uniform(0, self._join_jitter) - (now_ts - self._join_timestamps[-1])
             if wait_for > 0:
                 await asyncio.sleep(wait_for)
         self._join_timestamps.append(datetime.now(timezone.utc).timestamp())
         return True
+
+    @staticmethod
+    def _is_auto_join_account(account) -> bool:
+        return str(getattr(account, "name", "")).strip().lower() not in _LINK_JOIN_EXCLUDED_ACCOUNTS
 
     async def _record_invite_visit(
         self,
@@ -4131,7 +4371,7 @@ class TelegramCollector(
                 pass
             try:
                 await self._download_any_message_media(
-                    worker, message, chat_platform_id, chat_name, chat_username
+                    worker, message, chat_platform_id, chat_name, chat_username, historical=True
                 )
             except Exception as exc:
                 logger.debug("joined entity media download failed: %s", exc)
@@ -4150,6 +4390,7 @@ class TelegramCollector(
         messages_collected = 0
         status = "failed"
         error = None
+        joined_this_pass = False
 
         try:
             if parsed.get("kind") == "invite":
@@ -4162,17 +4403,13 @@ class TelegramCollector(
                 except Exception:
                     entity = None
                 if entity is None:
-                    # GAP-6 fail-closed membership guard: importing an invite
-                    # is a membership write and is disabled. The linked chat
-                    # is inaccessible content; record the residual gap.
-                    status = "membership_writes_disabled"
-                    logger.warning(
-                        "[worker=%d] inaccessible content: membership writes disabled; "
-                        "invite %s not imported — recorded as residual gap, "
-                        "no ImportChatInviteRequest sent",
-                        worker.worker_id, url,
-                    )
-                    return
+                    if not await self._consume_join_budget():
+                        status, error = "cooldown_deferred", "telegram join budget exhausted"
+                        return
+                    from telethon.tl.functions.messages import ImportChatInviteRequest
+                    joined = await worker.client(ImportChatInviteRequest(invite_hash))
+                    entity = self._joined_chat_from_result(joined)
+                    joined_this_pass = entity is not None
             else:
                 username = parsed.get("username")
                 entity = await worker.client.get_entity(username)
@@ -4182,16 +4419,12 @@ class TelegramCollector(
                     return
                 already_member = await self._is_member_of_chat(worker, entity)
                 if not already_member:
-                    # GAP-6 fail-closed membership guard: joining is a
-                    # membership write and is disabled; record the residual gap.
-                    status = "membership_writes_disabled"
-                    logger.warning(
-                        "[worker=%d] inaccessible content: membership writes disabled; "
-                        "channel %s not joined — recorded as residual gap, "
-                        "no JoinChannelRequest sent",
-                        worker.worker_id, url,
-                    )
-                    return
+                    if not await self._consume_join_budget():
+                        status, error = "cooldown_deferred", "telegram join budget exhausted"
+                        return
+                    from telethon.tl.functions.channels import JoinChannelRequest
+                    await worker.client(JoinChannelRequest(entity))
+                    joined_this_pass = True
 
             if entity is None:
                 status = "unresolved"
@@ -4223,6 +4456,7 @@ class TelegramCollector(
                 parsed=parsed,
                 account_name=account_name,
                 resolved_chat_uuid=resolved_chat_uuid,
+                joined_this_pass=joined_this_pass,
                 members_collected=members_collected,
                 messages_collected=messages_collected,
                 status=status,
@@ -4235,7 +4469,7 @@ class TelegramCollector(
             return 0
         configured_workers = [
             w for w in self._workers
-            if self._is_spider_allowed(w)
+            if self._is_spider_allowed(w) and self._is_auto_join_account(w.account)
         ]
         workers = [
             w for w in configured_workers
@@ -4249,12 +4483,45 @@ class TelegramCollector(
             return 0
 
         async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                WITH candidates AS (
+                    SELECT id, url
+                    FROM discovered_links
+                    WHERE source = 'telegram'
+                      AND domain IN ('t.me', 'telegram.me', 'telegram.dog')
+                    ORDER BY discovered_at DESC
+                    LIMIT $1
+                )
+                INSERT INTO link_approvals(source, source_link_id, target_url, account_name, state, approved_at, metadata)
+                SELECT 'telegram', candidates.id, candidates.url, account_name, 'approved', now(),
+                       '{"join_policy":"automatic"}'::jsonb
+                FROM candidates CROSS JOIN unnest($2::text[]) AS account_name
+                ON CONFLICT (source, source_link_id, account_name) DO NOTHING
+                """,
+                self._join_links_max_per_cycle * 4,
+                [str(getattr(w.account, "name", "")) for w in workers],
+            )
+            await conn.execute(
+                """UPDATE link_approvals SET state='approved', approved_at=now(), updated_at=now(),
+                       metadata=metadata || '{"join_policy":"automatic"}'::jsonb
+                   WHERE source='telegram' AND state='pending' AND expires_at > now()
+                     AND account_name = ANY($1::text[])""",
+                [str(getattr(w.account, "name", "")) for w in workers],
+            )
+            await conn.execute(
+                """UPDATE link_approvals SET state='expired', completed_at=now(), updated_at=now()
+                   WHERE source='telegram' AND state IN ('pending', 'approved') AND expires_at <= now()"""
+            )
             rows = await conn.fetch(
                 """
-                SELECT dl.id, dl.url
-                FROM discovered_links dl
-                WHERE dl.source = 'telegram'
-                  AND dl.domain IN ('t.me', 'telegram.me', 'telegram.dog')
+                SELECT dl.id, dl.url, approval.id AS approval_id, approval.account_name
+                FROM link_approvals approval
+                JOIN discovered_links dl ON dl.id = approval.source_link_id
+                WHERE approval.source = 'telegram'
+                  AND approval.state = 'approved'
+                  AND approval.expires_at > now()
+                  AND approval.account_name = ANY($2::text[])
                   AND NOT EXISTS (
                       SELECT 1
                       FROM telegram_invite_visits v
@@ -4265,6 +4532,7 @@ class TelegramCollector(
                 LIMIT $1
                 """,
                 self._join_links_max_per_cycle * 4,
+                [str(getattr(w.account, "name", "")) for w in workers],
             )
         processed = 0
         for row in rows:
@@ -4312,8 +4580,21 @@ class TelegramCollector(
                         )
             except Exception:
                 logger.debug("telegram link discovery shadow write skipped", exc_info=True)
-            worker = workers[processed % len(workers)]
+            worker = next(
+                (w for w in workers if str(getattr(w.account, "name", "")) == row["account_name"]),
+                None,
+            )
+            if worker is None:
+                continue
             try:
+                async with self.pool.acquire() as conn:
+                    claimed = await conn.fetchval(
+                        """UPDATE link_approvals SET state='joining', started_at=now(), updated_at=now()
+                           WHERE id=$1 AND state='approved' RETURNING id""",
+                        row["approval_id"],
+                    )
+                if claimed is None:
+                    continue
                 await asyncio.wait_for(
                     self._visit_telegram_link(worker, row, parsed),
                     timeout=self._join_link_timeout,
@@ -4327,6 +4608,24 @@ class TelegramCollector(
             except Exception as exc:
                 logger.debug("telegram link visit task failed for %s: %s", row["url"], exc)
             finally:
+                async with self.pool.acquire() as conn:
+                    visit = await conn.fetchrow(
+                        """SELECT status, error FROM telegram_invite_visits
+                           WHERE source_link_id=$1 AND account_name=$2
+                           ORDER BY collected_at DESC LIMIT 1""",
+                        row["id"], str(getattr(worker.account, "name", "")),
+                    )
+                    status = str((visit or {}).get("status") or "failed")
+                    state = {
+                        "completed": "collection_active",
+                        "flood_wait": "cooldown_deferred",
+                        "cooldown_deferred": "cooldown_deferred",
+                    }.get(status, "failed")
+                    await conn.execute(
+                        """UPDATE link_approvals SET state=$2, completed_at=now(), updated_at=now(), last_error=$3
+                           WHERE id=$1""",
+                        row["approval_id"], state, (visit or {}).get("error"),
+                    )
                 processed += 1
         if processed:
             logger.info("telegram join queue processed %d link(s)", processed)

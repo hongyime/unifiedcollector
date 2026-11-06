@@ -252,6 +252,7 @@ export function registerHistoryHandler(sock: WASocket, canFetchHistory?: () => b
                         await producer.publish('messages.history', {
                             sync_type: syncType,
                             session_name: process.env.SESSION_NAME || 'default',
+                            account_wid: (sock as any).user?.id || null,
                             messages: canonical,
                         });
                     }
@@ -361,4 +362,16 @@ export function getHistoryProgress() {
         newest_sync_at: newestSyncTime ? new Date(newestSyncTime).toISOString() : null,
         driver_ready: readyForHistoryFetch(currentSock),
     };
+}
+
+/** Internal collector view of already-persisted per-chat history cursors. */
+export function getHistoryWatermarks() {
+    return Object.entries(watermarks).map(([chat_jid, wm]) => ({
+        chat_jid,
+        oldest_timestamp: Number.isFinite(wm.oldestTimestamp) ? wm.oldestTimestamp : null,
+        message_count: wm.messageCount || 0,
+        complete: Boolean(wm.isComplete),
+        pending: Boolean(wm.pendingSince),
+        last_sync_at: wm.lastSyncTime ? new Date(wm.lastSyncTime).toISOString() : null,
+    }));
 }

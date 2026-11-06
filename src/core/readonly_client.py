@@ -28,8 +28,9 @@ class ReadOnlyTelegramClient:
         "LeaveChannelRequest",
     })
 
-    def __init__(self, client):
+    def __init__(self, client, *, allow_membership_joins: bool = False):
         object.__setattr__(self, "_client", client)
+        object.__setattr__(self, "_allow_membership_joins", allow_membership_joins)
 
     def __getattr__(self, name):
         if name in ReadOnlyTelegramClient.FORBIDDEN:
@@ -44,9 +45,13 @@ class ReadOnlyTelegramClient:
 
     def __call__(self, *args, **kwargs):
         request = args[0] if args else None
-        if request is not None and (
-            type(request).__name__ in ReadOnlyTelegramClient.FORBIDDEN_REQUESTS
+        request_name = type(request).__name__ if request is not None else ""
+        if (
+            request_name in {"JoinChannelRequest", "ImportChatInviteRequest"}
+            and object.__getattribute__(self, "_allow_membership_joins")
         ):
+            return object.__getattribute__(self, "_client")(*args, **kwargs)
+        if request_name in ReadOnlyTelegramClient.FORBIDDEN_REQUESTS:
             raise RuntimeError(
                 f"Membership write blocked: {type(request).__name__}() "
                 f"is forbidden in read-only collector mode"

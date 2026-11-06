@@ -303,15 +303,6 @@ from src.dashboard.api.social import (  # noqa: E402,F401
     _SOCIAL_HTML,
 )
 
-# TikTok DM routes and telemetry extracted to
-# api/dm.py during PERF-002 sub-plan 4A step 16 (cluster 5).
-from src.dashboard.api.dm import (  # noqa: E402,F401
-    router as _dm_router,
-    list_tt_dm_threads,
-    tt_dm_thread_messages,
-    dm_telemetry,
-)
-
 # Targets CRUD routes extracted to api/targets.py during PERF-002 4A step 17
 # (cluster 3a).
 from src.dashboard.api.targets import (  # noqa: E402,F401
@@ -448,8 +439,8 @@ _SOURCE_METHODS = {
     "telegram": ["native api", "realtime"],
     "whatsapp": ["browser bridge", "realtime"],
     "beeper": ["beeper bridge", "shadow rooms"],
-    "instagram": ["chrome extension", "headless cookies"],
-    "tiktok": ["chrome extension", "headless cookies"],
+    "instagram": ["chrome extension"],
+    "tiktok": ["chrome extension", "gallery-dl / yt-dlp"],
     "lemon8": ["chrome extension", "headless cookies"],
     "threads": ["chrome extension"],
     "facebook": ["chrome extension"],
@@ -1252,7 +1243,7 @@ async def _source_matrix_section(
 
 
 def _source_matrix_fallback_liveness_rows(detail: str) -> list[dict]:
-    from src.core.source_freshness import FRESHNESS, FRESHNESS_BASIS, SOURCE_MODES
+    from src.core.source_freshness import FRESHNESS, FRESHNESS_BASIS, SOURCE_MODES, SOURCE_MODE_CAPABILITIES
 
     return [
         {
@@ -1261,6 +1252,8 @@ def _source_matrix_fallback_liveness_rows(detail: str) -> list[dict]:
             "age_seconds": None,
             "stale_after_seconds": threshold,
             "collection_mode": SOURCE_MODES.get(source, "unknown"),
+            "collection_modes": list(SOURCE_MODE_CAPABILITIES.get(source, (SOURCE_MODES.get(source, "unknown"),))),
+            "freshness_target_seconds": threshold,
             "freshness_basis": FRESHNESS_BASIS.get(source),
             "source_health_status": None,
             "source_health_error": detail,
@@ -2663,6 +2656,8 @@ def _source_operator_status(source_row: dict, blocker: dict) -> dict:
     status = source_row.get("status") or "unknown"
     if blocker.get("kind") == "quiet_beeper_subsource":
         return {"status_label": "quiet", "status_severity": "ok"}
+    if blocker.get("kind") == "cooldown":
+        return {"status_label": "cooldown", "status_severity": "warning"}
     if blocker.get("kind") == "stats_unavailable":
         return {"status_label": "unknown", "status_severity": "ok"}
     blocker_severity = blocker.get("severity")
@@ -2677,6 +2672,43 @@ def _source_operator_status(source_row: dict, blocker: dict) -> dict:
     else:
         severity = "warning"
     return {"status_label": status, "status_severity": severity}
+
+
+async def _telegram_history_matrix_status(conn) -> dict:
+    """Bounded account-level history telemetry for the source matrix."""
+    try:
+        if not await conn.fetchval("SELECT to_regclass('telegram_account_throughput')"):
+            return {}
+        accounts = [dict(row) for row in await conn.fetch(
+            """SELECT account_identity, claim_budget, active_claims, claims_done,
+                      written_messages, write_rate, flood_waits, cooldown_until, updated_at
+               FROM telegram_account_throughput ORDER BY account_identity LIMIT 10"""
+        )]
+        status = {
+            "active_history_workers": sum(int(row.get("active_claims") or 0) for row in accounts),
+            "accounts": accounts,
+        }
+        if await conn.fetchval("SELECT to_regclass('backfill_lanes')"):
+            lane = await conn.fetchrow(
+                """SELECT COUNT(*) FILTER (WHERE status IN ('pending','leased','cooldown_deferred'))::int AS queue_depth,
+                          MIN(created_at) FILTER (WHERE status IN ('pending','leased','cooldown_deferred')) AS historical_lag_since,
+                          FLOOR(EXTRACT(EPOCH FROM now() - MIN(created_at) FILTER
+                              (WHERE status IN ('pending','leased','cooldown_deferred'))))::bigint AS historical_lag_seconds
+                   FROM backfill_lanes WHERE source='telegram' AND lane='backfill'"""
+            )
+            if lane:
+                status.update({
+                    "queue_depth": int(lane.get("queue_depth") or 0),
+                    "historical_lag_since": lane.get("historical_lag_since"),
+                    "historical_lag_seconds": (
+                        int(lane["historical_lag_seconds"])
+                        if lane.get("historical_lag_seconds") is not None else None
+                    ),
+                })
+        return status
+    except Exception:
+        logger.debug("telegram history matrix telemetry unavailable", exc_info=True)
+        return {}
 
 
 def _source_matrix_row(source_row: dict, current_content: dict | None, current_rate: dict | None,
@@ -2795,11 +2827,13 @@ def _source_matrix_row(source_row: dict, current_content: dict | None, current_r
         "status": source_row.get("status"),
         **(_p("_source_operator_status") or _source_operator_status)(effective_source_row, blocker),
         "collection_mode": source_row.get("collection_mode"),
+        "collection_modes": source_row.get("collection_modes") or [source_row.get("collection_mode") or "unknown"],
         "collection_methods": (_p("_source_collection_methods") or _source_collection_methods)(source),
         "freshness_basis": source_row.get("freshness_basis"),
         "age_seconds": source_row.get("age_seconds"),
         "activity_last_seen_at": (_p("_activity_last_seen_at") or _activity_last_seen_at)(source_row.get("age_seconds"), now),
         "stale_after_seconds": source_row.get("stale_after_seconds"),
+        "freshness_target_seconds": source_row.get("freshness_target_seconds") or source_row.get("stale_after_seconds"),
         "detail": source_row.get("detail"),
         "source_health_status": source_row.get("source_health_status"),
         "source_health_error": source_row.get("source_health_error"),
@@ -3195,6 +3229,7 @@ async def _collectors_source_matrix_payload():
             media_totals = {"__stats_unavailable__": True}
             youtube_media_backlog = {}
             active_cursors = {}
+            telegram_history = {}
             browser_extension = _browser_extension_fallback_payload("source_liveness_unavailable")
         else:
             beeper_subsources = await _source_matrix_section(
@@ -3327,6 +3362,16 @@ async def _collectors_source_matrix_payload():
                 cache_key="active_cursors",
                 cache_ttl=30,
             )
+            telegram_history = await _source_matrix_section(
+                section="telegram_history_throughput",
+                label="telegram history throughput",
+                errors=errors,
+                fallback={},
+                awaitable=_telegram_history_matrix_status(conn),
+                cache_key="telegram_history_throughput",
+                cache_ttl=15,
+                timeout=3,
+            )
             browser_extension = await _source_matrix_section(
                 section="browser_extension",
                 label="browser extension summary",
@@ -3403,6 +3448,8 @@ async def _collectors_source_matrix_payload():
             row["current_hour"],
             row["last_complete_hour"],
         )
+        if row["source"] == "telegram" and telegram_history:
+            row["history_throughput"] = telegram_history
     severity_rank = {"error": 0, "warning": 1, "ok": 2}
     rows.sort(key=lambda r: (
         severity_rank.get((r.get("blocker") or {}).get("severity"), 3),
@@ -3837,7 +3884,6 @@ def _thumbnail_placeholder(label: str, detail: str = "") -> Response:
 
 # ── WhatsApp: Chats & messages (Baileys bridge → RabbitMQ → collector) ──
 #
-# Same two-pane pattern as /tiktok/dms/threads + /tiktok/dms/thread/{id}
 # but backed by whatsapp_chats + whatsapp_messages + whatsapp_users. The path
 # param on the message endpoint is the platform_chat_id (JID e.g.
 # 6591234567@s.whatsapp.net or 120363xxx@g.us) — chat_id in the DB is a uuid

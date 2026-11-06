@@ -396,6 +396,24 @@ async def send_document_detailed(url_or_path: str, caption: str = "",
             return False, 0, fallback_exc.__class__.__name__, str(fallback_exc)
 
 
+async def send_document_to_detailed(chat_id: int, url_or_path: str, caption: str = "",
+                                    parse_mode: str = "HTML") -> tuple[bool, int, str, str]:
+    """Send a document to an explicit private recipient, never the configured group."""
+    token, _configured_chat_id, _thread = _config()
+    if not token:
+        logger.debug("telegram private document skipped: token not set")
+        return False, 0, "config_missing", "token not set"
+    fields = {"chat_id": str(chat_id), "caption": _truncate_caption(caption), "parse_mode": parse_mode}
+    try:
+        result = await asyncio.to_thread(
+            _post_media_detailed, token, "sendDocument", "document", url_or_path, fields,
+        )
+        return _coerce_media_result(result)
+    except Exception as exc:  # noqa: BLE001 - notifications must never raise
+        logger.warning("telegram private document error: %s", exc)
+        return False, 0, exc.__class__.__name__, str(exc)
+
+
 async def send_photo_detailed(url_or_path: str, caption: str = "",
                               parse_mode: str = "HTML",
                               disable_notification: bool = False) -> tuple[bool, int, str, str]:
@@ -635,6 +653,16 @@ def _bot_post(method: str, payload: dict, *, timeout: int = 15) -> dict:
         return {"ok": False, "error": str(exc)}
 
 
+def send_message_to(chat_id: int, text: str, *, parse_mode: str = "HTML") -> dict:
+    """Send a short control-room response to one explicit chat or private DM."""
+    return _bot_post("sendMessage", {
+        "chat_id": chat_id,
+        "text": text[:_MAX_TEXT_CHARS],
+        "parse_mode": parse_mode,
+        "disable_web_page_preview": True,
+    })
+
+
 def _bot_get(method: str, params: dict | None = None, *, timeout: int = 35) -> dict:
     """GET a Telegram Bot API method (getUpdates uses long-poll, needs > timeout)."""
     import urllib.parse
@@ -701,4 +729,9 @@ def get_webhook_info() -> dict:
 def delete_webhook() -> dict:
     """Remove any set webhook so getUpdates long-polling works."""
     return _bot_post("deleteWebhook", {"drop_pending_updates": False})
+
+
+def get_chat_member(chat_id: int, user_id: int) -> dict:
+    """Return a member record for control-room authorization. Never raises."""
+    return _bot_post("getChatMember", {"chat_id": chat_id, "user_id": user_id})
 

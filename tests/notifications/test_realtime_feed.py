@@ -198,6 +198,20 @@ def test_filter_accepts_new_collector_source():
     assert _passes_filter(payload) is True
 
 
+def test_filter_excludes_configured_whatsapp_media(monkeypatch):
+    from src.notifications.realtime_feed import _skip_reason, build_payload
+
+    monkeypatch.setenv("REALTIME_POST_FEED_EXCLUDED_SOURCES", "whatsapp,beeper_whatsapp")
+    payload = build_payload(
+        source="whatsapp", entity_name="chat", content_id="wa_1",
+        file_path="/vault/media/blobs/x.jpg", source_url="https://wa/x",
+        sha256="a" * 64, metadata={"caption": "private"}, kind="image",
+        content_type="post_image",
+    )
+
+    assert _skip_reason(payload) == "source_excluded"
+
+
 def test_filter_drops_profile_updates_by_default(monkeypatch):
     from src.notifications.realtime_feed import _passes_filter, build_payload
 

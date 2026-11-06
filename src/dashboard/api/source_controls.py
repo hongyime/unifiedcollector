@@ -11,6 +11,8 @@ import logging
 from fastapi import APIRouter, Depends
 
 from src.db.connection import get_pool
+from src.core.source_controls import list_source_controls as _list_source_controls
+from src.core.recovery_profiles import list_recovery_profiles
 from src.dashboard.api.auth import require_role
 
 logger = logging.getLogger(__name__)
@@ -24,27 +26,10 @@ async def list_source_controls():
     Returns source health including blocked_until for RATE_LIMITED sources,
     so the dashboard can show "blocked until X" instead of silent "stale".
     """
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT source_name, state, enabled, last_success, last_attempt,
-                   blocked_until, stop_reason, consecutive_failures, updated_at
-            FROM source_controls
-            ORDER BY source_name
-            """
-        )
-        return [
-            {
-                "source_name": r["source_name"],
-                "state": r["state"],
-                "enabled": r["enabled"],
-                "last_success": r["last_success"].isoformat() if r["last_success"] else None,
-                "last_attempt": r["last_attempt"].isoformat() if r["last_attempt"] else None,
-                "blocked_until": r["blocked_until"].isoformat() if r["blocked_until"] else None,
-                "stop_reason": r["stop_reason"],
-                "consecutive_failures": r["consecutive_failures"],
-                "updated_at": r["updated_at"].isoformat() if r["updated_at"] else None,
-            }
-            for r in rows
-        ]
+    return await _list_source_controls(await get_pool())
+
+
+@router.get("/api/source-recovery", dependencies=[Depends(require_role("viewer"))])
+async def source_recovery():
+    """Show durable restriction profiles separately from manual source pauses."""
+    return await list_recovery_profiles(await get_pool())

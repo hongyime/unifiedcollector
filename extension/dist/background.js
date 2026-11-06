@@ -14,8 +14,8 @@
     { id: "facebook", label: "Facebook", url: "https://www.facebook.com/", host: "www.facebook.com", cookieUrl: "https://www.facebook.com", cookie: "c_user", scraper: true },
     { id: "strava", label: "Strava", url: "https://www.strava.com/dashboard", host: "www.strava.com", cookieUrl: "https://www.strava.com", cookie: "_strava4_session", scraper: true },
     { id: "pinterest", label: "Pinterest", url: "https://www.pinterest.com/", host: "pinterest.com", cookieUrl: "https://www.pinterest.com", cookie: "_pinterest_sess", scraper: true },
-    { id: "snapchat", label: "Snapchat", url: "https://www.snapchat.com/", host: "snapchat.com", cookieUrl: "https://www.snapchat.com", cookie: "", scraper: true, noLogin: true },
-    { id: "airbnb", label: "Airbnb", url: "https://www.airbnb.com/", host: "airbnb.com", aliasHosts: ["airbnb.com.sg", "airbnb.co.uk", "airbnb.co.kr"], cookieUrl: "https://www.airbnb.com", cookie: "", scraper: true, noLogin: true }
+    { id: "snapchat", label: "Snapchat", url: "https://www.snapchat.com/", host: "snapchat.com", cookieUrl: "https://accounts.snapchat.com", cookie: "__Host-sc-a-auth-session", scraper: true },
+    { id: "airbnb", label: "Airbnb", url: "https://www.airbnb.com/", host: "airbnb.com", aliasHosts: ["airbnb.com.sg", "airbnb.co.uk", "airbnb.co.kr"], cookieUrl: "https://www.airbnb.com", cookieUrls: ["https://www.airbnb.com.sg", "https://www.airbnb.co.uk", "https://www.airbnb.co.kr"], cookie: "_aat", scraper: true }
   ];
 
   // src/shared/log.ts
@@ -339,6 +339,7 @@
     await chrome.alarms.create(alarmName, { when: next.deadline_at });
   }
   var _scrapeConfigDisabled = /* @__PURE__ */ new Set();
+  var _scrapeConfig = {};
   var _scrapeConfigFetchedAt = 0;
   var SCRAPE_CONFIG_TTL_MS = 6e4;
   async function refreshScrapeConfig() {
@@ -359,6 +360,7 @@
       const cfg = await r.json();
       if (cfg && Array.isArray(cfg.disabled)) {
         _scrapeConfigDisabled = new Set(cfg.disabled.map((s) => String(s).toLowerCase()));
+        _scrapeConfig = cfg;
       }
     } catch (e) {
     }
@@ -372,6 +374,29 @@
       return false;
     }
     return _scrapeConfigDisabled.has(String(id).toLowerCase());
+  }
+  async function browserPacing(platform, account) {
+    await refreshScrapeConfig();
+    const id = String(platform || "").toLowerCase();
+    const profile = _scrapeConfig && _scrapeConfig.profiles && _scrapeConfig.profiles[id] || {};
+    if (_scrapeConfigDisabled.has(id) || profile.mode === "manually_paused") {
+      return { ...profile, mode: "manually_paused", volume_profile: "manual" };
+    }
+    const recoveryProfiles = Array.isArray(profile.recovery_profiles) ? profile.recovery_profiles : [];
+    const normalizedAccount = String(account || "").trim().replace(/^@/, "").toLowerCase();
+    const recovery = recoveryProfiles.find((value) => {
+      const profileAccount = String(value && value.account || "").trim().replace(/^@/, "").toLowerCase();
+      return !profileAccount || !normalizedAccount || profileAccount === normalizedAccount;
+    });
+    if (recovery) {
+      return {
+        ...profile,
+        mode: recovery.exit_required ? "recovery_exit" : "restricted",
+        volume_profile: "restricted"
+      };
+    }
+    if (profile.mode === "cooldown") return { ...profile, mode: "cooldown", volume_profile: "cooldown" };
+    return { ...profile, mode: "near_live_polling", volume_profile: "normal" };
   }
   function extensionVersion() {
     return chrome.runtime.getManifest && chrome.runtime.getManifest().version || null;
@@ -1411,46 +1436,6 @@
       _tabsOpInProgress = false;
     }
   }
-  async function syncCookies() {
-    try {
-      const cookies = await chrome.cookies.getAll({ domain: "instagram.com" });
-      if (!cookies || !cookies.some((c) => c.name === "sessionid")) return;
-      const dsu = cookies.find((c) => c.name === "ds_user_id");
-      const account = dsu ? "live_" + dsu.value : "extension_live";
-      const base = await ingestBase();
-      const r = await fetch(base + "/social/cookies", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...await bridgeHeaders() },
-        body: JSON.stringify(withExtensionVersion({
-          platform: "instagram",
-          account,
-          cookies: cookies.map((c) => ({ name: c.name, value: c.value, domain: c.domain, path: c.path, secure: c.secure, expirationDate: c.expirationDate }))
-        }))
-      });
-      if (r.ok) await log("info", `synced live IG session \u2192 headless backup (${account})`);
-    } catch (e) {
-    }
-  }
-  async function syncStravaCookies() {
-    try {
-      const cookies = await chrome.cookies.getAll({ domain: "strava.com" });
-      if (!cookies || !cookies.some((c) => c.name === "_strava4_session")) return;
-      const athlete = cookies.find((c) => c.name === "athlete_id" && c.value);
-      const account = String(athlete ? athlete.value : "extension_live").replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 60) || "extension_live";
-      const base = await ingestBase();
-      const r = await fetch(base + "/social/cookies", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...await bridgeHeaders() },
-        body: JSON.stringify(withExtensionVersion({
-          platform: "strava",
-          account,
-          cookies: cookies.map((c) => ({ name: c.name, value: c.value, domain: c.domain, path: c.path, secure: c.secure, expirationDate: c.expirationDate }))
-        }))
-      });
-      if (r.ok) await log("info", `synced live Strava session \u2192 headless backup (${account})`);
-    } catch (e) {
-    }
-  }
   async function refreshScraperTabs(options = {}) {
     if (_tabsOpInProgress) return { ok: false, reason: "tabs_operation_in_progress", reloaded: 0, errors: 0 };
     if (!options.force && !await autoTabsEnabled()) return { ok: false, reason: "auto_tabs_disabled", reloaded: 0, errors: 0 };
@@ -1678,10 +1663,6 @@
       });
     }
     await scheduleAlarm().catch((e) => log("warn", `${reason} schedule failed: ${e && e.message ? e.message : e}`));
-    await syncCookies().catch(() => {
-    });
-    await syncStravaCookies().catch(() => {
-    });
     if (openTabs) {
       await ensureScraperTabsOpen(reason, { force }).catch((e) => log("warn", `${reason} tab audit failed: ${e && e.message ? e.message : e}`));
     }
@@ -1725,8 +1706,6 @@
       await _alarmJitter();
       await refreshScraperTabs({ reason: "scheduled" });
       await reportScraperTabHeartbeats("refresh");
-      await syncCookies();
-      await syncStravaCookies();
     } else if (a.name === ALARM_MEMORY) {
       await _alarmJitter();
       await checkMemorySensitiveTabs("scheduled");
@@ -2076,12 +2055,20 @@
   });
   async function tabForPlatform(p) {
     const tabs = await chrome.tabs.query({ url: platformUrlPatterns(p) });
-    return tabs && tabs[0] ? tabs[0] : null;
+    const selection = selectCanonicalScraperTabRows(tabs);
+    await closeDuplicateScraperTabRows(selection.duplicateRows, `tabForPlatform:${p.id}`);
+    const row = selection.rows.find((candidate) => candidate.platform.id === p.id);
+    return row ? row.tab : null;
   }
   async function isLoggedIn(p) {
+    if (!p.cookie) return null;
     try {
-      const c = await chrome.cookies.get({ url: p.cookieUrl, name: p.cookie });
-      return !!(c && c.value);
+      const urls = [p.cookieUrl, ...p.cookieUrls || []].filter(Boolean);
+      for (const url of urls) {
+        const c = await chrome.cookies.get({ url, name: p.cookie });
+        if (c && c.value) return true;
+      }
+      return false;
     } catch (e) {
       return null;
     }
@@ -2413,6 +2400,27 @@
       try {
         const base = await ingestBase();
         switch (msg.type) {
+          case "browserPacing": {
+            try {
+              sendResponse(await browserPacing(msg.platform, msg.account));
+            } catch (e) {
+              sendResponse({ mode: "near_live_polling", volume_profile: "normal", fail_open: true });
+            }
+            break;
+          }
+          case "recoveryCleanPass": {
+            try {
+              const response = await fetch(base + "/social/recovery-clean-pass", {
+                method: "POST",
+                headers: { "Content-Type": "application/json", ...await bridgeHeaders() },
+                body: JSON.stringify({ source: msg.platform, account: msg.account || null })
+              });
+              sendResponse(await response.json().catch(() => ({ ok: false })));
+            } catch (e) {
+              sendResponse({ ok: false, error: String(e && e.message || e) });
+            }
+            break;
+          }
           case "igCooldown": {
             try {
               const account = String(msg.account || msg.owner || "").trim();
@@ -2801,86 +2809,6 @@
               await log("error", `users failed: ${e.message}`);
               sendResponse({ ok: false });
             }
-            break;
-          }
-          case "tiktok_dm": {
-            try {
-              const r = await fetch(base + "/social/dm-frame", {
-                method: "POST",
-                headers: { "Content-Type": "application/json", ...await bridgeHeaders() },
-                body: JSON.stringify(withExtensionVersion({ platform: msg.platform, frame: msg.frame }))
-              });
-              sendResponse({ ok: r.ok });
-            } catch (e) {
-              sendResponse({ ok: false });
-            }
-            break;
-          }
-          case "dm_probe": {
-            try {
-              await fetch(base + "/social/dm-probe", {
-                method: "POST",
-                headers: { "Content-Type": "application/json", ...await bridgeHeaders() },
-                body: JSON.stringify(withExtensionVersion({
-                  platform: msg.platform,
-                  transport: msg.transport,
-                  url: msg.url,
-                  frame_kind: msg.frame_kind,
-                  frame_size: msg.frame_size
-                }))
-              });
-              await log("info", `\u{1F50E} ${msg.platform} DM ${msg.transport}: ${msg.frame_kind || "url"} ${msg.frame_size ? "~" + msg.frame_size + "B " : ""}${msg.url || ""}`);
-            } catch (e) {
-            }
-            sendResponse({ ok: true });
-            break;
-          }
-          case "dm_sample": {
-            try {
-              await fetch(base + "/social/dm-sample", {
-                method: "POST",
-                headers: { "Content-Type": "application/json", ...await bridgeHeaders() },
-                body: JSON.stringify(withExtensionVersion({ platform: msg.platform, url: msg.url, size: msg.size, b64: msg.b64 }))
-              });
-              await log("info", `\u{1F9EA} ${msg.platform} DM sample: ${msg.size}B`);
-            } catch (e) {
-            }
-            sendResponse({ ok: true });
-            break;
-          }
-          case "dm_heartbeat": {
-            try {
-              await fetch(base + "/social/dm-heartbeat", {
-                method: "POST",
-                headers: { "Content-Type": "application/json", ...await bridgeHeaders() },
-                body: JSON.stringify(withExtensionVersion({
-                  platform: msg.platform,
-                  probes_sent: msg.probes_sent || 0,
-                  samples_shipped: msg.samples_shipped || 0
-                }))
-              });
-            } catch (e) {
-            }
-            sendResponse({ ok: true });
-            break;
-          }
-          case "dm_decoded": {
-            try {
-              await fetch(base + "/social/dm-decoded", {
-                method: "POST",
-                headers: { "Content-Type": "application/json", ...await bridgeHeaders() },
-                body: JSON.stringify(withExtensionVersion({
-                  platform: msg.platform,
-                  owner: msg.owner || "",
-                  threads: msg.threads || [],
-                  messages: msg.messages || []
-                }))
-              });
-              const n = msg.messages && msg.messages.length || 0;
-              if (n) await log("info", `\u{1F4E8} ${msg.platform} DM decoded: ${n} msg`);
-            } catch (e) {
-            }
-            sendResponse({ ok: true });
             break;
           }
           case "getStravaRouteQueue": {

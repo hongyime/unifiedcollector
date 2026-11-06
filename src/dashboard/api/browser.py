@@ -945,62 +945,6 @@ async def _browser_extension_payload(conn) -> dict:
             ]
             _set_ingest_health(health_items)
 
-    if await _fetchval_or_none("dm_hook_table", "SELECT to_regclass('dm_hook_heartbeat')") is not None:
-        rows = await _fetch_or_empty(
-            "dm_hook_heartbeat",
-            """
-            SELECT platform,
-                   max(last_seen) AS last_seen_at,
-                   extract(epoch FROM now() - max(last_seen))::int AS age_seconds,
-                   (array_agg(extension_version ORDER BY last_seen DESC))[1] AS extension_version,
-                   count(*) FILTER (WHERE COALESCE(owner_account, '') <> '')::int AS owner_count,
-                   sum(probes_sent)::int AS probes_sent,
-                   sum(samples_shipped)::int AS samples_shipped
-            FROM dm_hook_heartbeat
-            WHERE platform = 'tiktok'
-            GROUP BY platform
-            ORDER BY last_seen_at DESC
-            """,
-        )
-        for row in rows:
-            current = row["extension_version"]
-            item = {
-                "platform": row["platform"],
-                "last_seen_at": row["last_seen_at"],
-                "age_seconds": int(row["age_seconds"] or 0),
-                "extension_version": current,
-                "version_ok": _extension_versions_match(current, expected),
-                "owner_count": int(row["owner_count"] or 0),
-                "probes_sent": int(row["probes_sent"] or 0),
-                "samples_shipped": int(row["samples_shipped"] or 0),
-            }
-            payload["hooks"].append(item)
-            if int(item["age_seconds"]) > 3600:
-                payload["issues"].append({
-                    "platform": row["platform"],
-                    "kind": "hook_stale",
-                    "detail": "Chrome extension DM hook heartbeat is older than 1 hour.",
-                    "age_seconds": item["age_seconds"],
-                    "last_seen_at": item["last_seen_at"],
-                })
-            if not item["version_ok"]:
-                recent = item["age_seconds"] <= _recent_mismatch_secs
-                payload["issues"].append({
-                    "platform": row["platform"],
-                    "kind": "extension_version_mismatch",
-                    "detail": (
-                        "Chrome extension hook is still running an older bundle."
-                        if recent
-                        else "Chrome extension hook last reported an older bundle; waiting for a fresh heartbeat."
-                    ),
-                    "extension_version": current,
-                    "expected_version": expected,
-                    "age_seconds": item["age_seconds"],
-                    "last_seen_at": item["last_seen_at"],
-                    "owner_count": item["owner_count"],
-                    "needs_new_event": not recent,
-                })
-
     if browser_ingest_events_exists:
         rows = await _fetch_or_empty(
             "browser_ingest_events",

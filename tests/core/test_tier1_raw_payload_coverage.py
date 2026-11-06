@@ -69,11 +69,6 @@ def test_browser_tier1_raw_capture_surfaces_have_rebuild_targets():
         '"profile"',
         '"posts"',
         '"comments"',
-        '"dms"',
-        '"dm_probe"',
-        '"dm_sample"',
-        '"dm_frame"',
-        '"dm_decoded"',
         '"strava_streams"',
     ):
         assert endpoint in text
@@ -81,9 +76,7 @@ def test_browser_tier1_raw_capture_surfaces_have_rebuild_targets():
         '"instagram_profiles"',
         '"instagram_posts"',
         '"instagram_comments"',
-        '"dm_probe_log"',
         '"strava_activities"',
         '"strava_gps_streams"',
     ):
         assert target in text
-    assert '"dm_frame": _DM_PROBE_TARGET_TABLES' in text

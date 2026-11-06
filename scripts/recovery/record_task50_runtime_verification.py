@@ -31,7 +31,6 @@ SPECS = (
     ServiceSpec("dashboard", "unifiedcollector_dashboard", "dashboard", "/app/src/dashboard/frontend/src/main.tsx", "/app/src/dashboard/frontend/dist/index.html"),
     ServiceSpec("browser_ingest", "unifiedcollector_browser_ingest", "collector", "/app/src/main.py", "/app/config/task-37-admission-policy.json"),
     ServiceSpec("scheduler", "unifiedcollector_scheduler", "scheduler", "/app/src/main.py", "/app/config/task-37-admission-policy.json"),
-    ServiceSpec("collector_paypal", "unifiedcollector_collector_paypal", "collector", "/app/src/main.py", "/app/config/task-37-admission-policy.json"),
     ServiceSpec("collector_whatsapp", "unifiedcollector_collector_whatsapp", "collector", "/app/src/main.py", "/app/config/task-37-admission-policy.json"),
     ServiceSpec("recon_egress_guard", "unifiedcollector_recon_egress_guard", "recon-egress-guard", "/app/src/core/recon_egress_guard.py", "/app/config/task-37-admission-policy.json"),
     ServiceSpec("collector_spiderfoot", "unifiedcollector_spiderfoot", "spiderfoot", "/app/src/recon_spiderfoot_service.py", "/app/config/task-37-admission-policy.json"),

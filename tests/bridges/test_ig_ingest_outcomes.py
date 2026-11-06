@@ -66,6 +66,32 @@ class _FakeRequest(dict):
         return self._body
 
 
+def test_snapchat_profile_canary_requires_page_and_image_provenance(monkeypatch):
+    pool = _FakePool()
+    receipts = []
+
+    async def record_receipts(_pool, platform):
+        receipts.append(platform)
+
+    monkeypatch.setattr(ig_ingest, "_record_profile_capability_receipts", record_receipts)
+    valid = {
+        "username": "alice",
+        "bitmoji_url": "https://cf-st.sc-cdn.net/avatar.png",
+        "metadata": {
+            "source": "snapchat_public_profile_dom_canary",
+            "page_url": "https://www.snapchat.com/add/alice",
+        },
+    }
+
+    assert asyncio.run(ig_ingest._save_profile(pool, "snapchat", valid)) is True
+    assert receipts == ["snapchat"]
+    assert "INSERT INTO snapchat_profiles" in pool.conn.executes[0][0]
+
+    invalid = dict(valid, metadata={"source": "snapchat_public_profile_dom_canary", "page_url": "https://www.snapchat.com/add/bob"})
+    assert asyncio.run(ig_ingest._save_profile(pool, "snapchat", invalid)) is False
+    assert len(pool.conn.executes) == 1
+
+
 def _upload_body(**overrides):
     body = {
         "platform": "instagram",

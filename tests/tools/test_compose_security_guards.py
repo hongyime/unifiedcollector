@@ -74,6 +74,7 @@ def test_required_secret_guards_are_fail_closed() -> None:
         "${REDIS_PASSWORD:?REDIS_PASSWORD required}",
         "${WHATSAPP_MEDIA_BRIDGE_SECRET:?WHATSAPP_MEDIA_BRIDGE_SECRET required}",
         "${BRIDGE_SHARED_SECRET:?BRIDGE_SHARED_SECRET required}",
+        "${CONTROL_EXECUTOR_SECRET:?CONTROL_EXECUTOR_SECRET required}",
     ):
         assert guard in text, f"compose must abort when {guard} is unset"
 

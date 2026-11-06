@@ -42,7 +42,9 @@ async def test_compute_liveness_includes_collection_mode_basis_and_reason(monkey
     by_source = {row["source"]: row for row in rows}
 
     assert by_source["telegram"]["status"] == "live"
-    assert by_source["telegram"]["collection_mode"] == "messaging"
+    assert by_source["telegram"]["collection_mode"] == "native_realtime"
+    assert by_source["telegram"]["collection_modes"] == ["native_realtime", "history_backfill"]
+    assert by_source["telegram"]["freshness_target_seconds"] == 7200
     assert by_source["telegram"]["freshness_basis"] == "telegram_messages.collected_at"
     assert "inside the freshness window" in by_source["telegram"]["detail"]
 
@@ -195,6 +197,34 @@ async def test_strava_liveness_counts_route_and_media_progress(monkeypatch):
     assert rows[0]["status"] == "live"
     assert rows[0]["age_seconds"] == 30
     assert rows[0]["freshness_basis"] == "newest Strava athlete profile, activity, GPS stream, or media row"
+
+
+@pytest.mark.asyncio
+async def test_ready_bluesky_cursor_receipt_promotes_native_realtime(monkeypatch):
+    from src.core import source_freshness
+
+    class BlueskyReceiptConn:
+        async def fetch(self, query: str, *args, timeout: int = 8):
+            if "FROM source_health" in query:
+                return []
+            raise AssertionError(query)
+
+        async def fetchval(self, query: str, timeout: int = 8):
+            if "bluesky_stream_receipts" in query:
+                return True
+            return 30
+
+    monkeypatch.setattr(
+        source_freshness,
+        "FRESHNESS",
+        [("bluesky", "SELECT 30", 21600)],
+    )
+
+    row = (await source_freshness.compute_liveness(BlueskyReceiptConn()))[0]
+
+    assert row["collection_mode"] == "native_realtime"
+    assert row["collection_modes"] == ["native_realtime", "near_live_polling"]
+    assert "durable cursor/reconnect stream receipt" in row["freshness_basis"]
 
 
 @pytest.mark.asyncio

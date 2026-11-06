@@ -417,11 +417,21 @@
     const OrigSend = XMLHttpRequest.prototype.send;
     XMLHttpRequest.prototype.open = function(method, url) {
       this.__uc_url = url;
+      this.__uc_method = String(method || "GET").toUpperCase();
       return OrigOpen.apply(this, arguments);
     };
     XMLHttpRequest.prototype.send = function() {
       try {
         const url = String(this.__uc_url || "");
+        if (platform === "x" && this.__uc_method === "GET") {
+          try {
+            const observed = new URL(url, location.href);
+            if (/^(?:www\.)?(?:x\.com|twitter\.com)$/i.test(observed.hostname) && /^\/i\/api\/2\//.test(observed.pathname) && !/graphql/i.test(observed.pathname)) {
+              window.postMessage({ __uc: true, type: "x_observed_xhr_get", url: observed.href }, "*");
+            }
+          } catch (e) {
+          }
+        }
         if (platform === "tiktok" && tkListRe.test(url)) {
           this.addEventListener("load", function() {
             try {
@@ -448,7 +458,7 @@
       }
       return OrigSend.apply(this, arguments);
     };
-    if (platform === "tiktok") {
+    if (false) {
       let _postDmHeartbeat2 = function() {
         try {
           window.postMessage({

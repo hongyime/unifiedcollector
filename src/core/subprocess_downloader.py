@@ -51,6 +51,7 @@ manager via existing instagram session-manager helpers).
 from __future__ import annotations
 
 import asyncio
+from functools import lru_cache
 import logging
 import os
 import shutil
@@ -68,31 +69,18 @@ logger = logging.getLogger(__name__)
 # Tool detection (cached)
 # ---------------------------------------------------------------------------
 
-_TOOL_CACHE: dict[str, bool] = {}
-
-
+@lru_cache(maxsize=16)
 def check_tool(name: str) -> bool:
     """Return True if ``name`` is on PATH. Cached.
 
-    Re-detects only if explicitly cleared via ``check_tool.clear_cache()``.
+    Re-detects only if explicitly cleared via ``check_tool.cache_clear()``.
     """
-    if name in _TOOL_CACHE:
-        return _TOOL_CACHE[name]
     found = shutil.which(name) is not None
-    _TOOL_CACHE[name] = found
     if found:
         logger.debug("subprocess_downloader: %s available at %s", name, shutil.which(name))
     else:
         logger.info("subprocess_downloader: %s NOT on PATH", name)
     return found
-
-
-def _clear_tool_cache():
-    _TOOL_CACHE.clear()
-
-
-check_tool.clear_cache = _clear_tool_cache  # type: ignore[attr-defined]
-
 
 # ---------------------------------------------------------------------------
 # Result type

@@ -724,6 +724,7 @@ async def test_social_scrape_config_reports_disabled(monkeypatch):
     assert set(["facebook", "threads"]).issubset(set(res["disabled"]))
     assert "x" in res["enabled"]
     assert "instagram" in res["enabled"]  # default-true when not present
+    assert res["profiles"]["facebook"]["mode"] == "manually_paused"
 
 
 @pytest.mark.asyncio
@@ -736,4 +737,54 @@ async def test_social_scrape_config_fails_open(monkeypatch):
     assert res["fail_open"] is True
     assert res["disabled"] == []
     assert "x" in res["enabled"]
+    assert res["profiles"]["instagram"]["volume_profile"] == "normal"
+
+
+@pytest.mark.asyncio
+async def test_social_scrape_config_prioritizes_manual_pause_over_recovery(monkeypatch):
+    class _Conn:
+        async def fetch(self, query, *_args, **_kwargs):
+            if "collection_schedules" in query:
+                return [{"source": "instagram", "enabled": True}]
+            if "source_controls" in query:
+                return [{"source_name": "instagram", "state": "PAUSED", "enabled": False, "blocked_until": None}]
+            if "source_recovery_profiles" in query:
+                return [{"source_name": "instagram", "account_identity": "owner", "restricted_until": datetime.now(timezone.utc)}]
+            return []
+
+    pool = _Pool(_Conn())
+
+    async def fake_get_pool():
+        return pool
+
+    monkeypatch.setattr(dashboard_api, "get_pool", fake_get_pool)
+    res = await dashboard_api.social_scrape_config()
+
+    profile = res["profiles"]["instagram"]
+    assert profile["mode"] == "manually_paused"
+    assert profile["volume_profile"] == "manual"
+    assert profile["recovery_profiles"] == []
+    assert profile["cycle_rest_min_ms"] == 180_000
+    assert profile["cycle_rest_max_ms"] == 360_000
+
+
+@pytest.mark.asyncio
+async def test_social_scrape_config_marks_expired_recovery_as_exit_required(monkeypatch):
+    class _Conn:
+        async def fetch(self, query, *_args, **_kwargs):
+            if "collection_schedules" in query or "source_controls" in query:
+                return []
+            if "source_recovery_profiles" in query:
+                return [{"source_name": "instagram", "account_identity": "owner", "restricted_until": datetime.now(timezone.utc), "exit_required": True}]
+            return []
+
+    pool = _Pool(_Conn())
+
+    async def fake_get_pool():
+        return pool
+
+    monkeypatch.setattr(dashboard_api, "get_pool", fake_get_pool)
+    res = await dashboard_api.social_scrape_config()
+
+    assert res["profiles"]["instagram"]["recovery_profiles"] == [{"account": "owner", "exit_required": True}]
 

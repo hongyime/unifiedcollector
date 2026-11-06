@@ -7,6 +7,8 @@ import tempfile
 import threading
 import time
 from abc import ABC, abstractmethod
+from collections import OrderedDict
+from collections.abc import MutableSet
 from pathlib import Path
 
 from .checkpoint import CheckpointManager
@@ -27,6 +29,40 @@ from .vault import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class _KnownIdCache(MutableSet[str]):
+    """Fixed-size recency set; database uniqueness remains the dedupe authority."""
+
+    CAPACITY = 50_000
+
+    def __init__(self) -> None:
+        self._items: OrderedDict[str, None] = OrderedDict()
+
+    def __contains__(self, value: object) -> bool:
+        if not isinstance(value, str) or value not in self._items:
+            return False
+        self._items.move_to_end(value)
+        return True
+
+    def __iter__(self):
+        return iter(self._items)
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def add(self, value: str) -> None:
+        self._items.pop(value, None)
+        self._items[value] = None
+        if len(self._items) > self.CAPACITY:
+            self._items.popitem(last=False)
+
+    def update(self, values) -> None:
+        for value in values:
+            self.add(value)
+
+    def discard(self, value: str) -> None:
+        self._items.pop(value, None)
 
 
 try:
@@ -96,7 +132,7 @@ class BaseCollector(ABC):
         self._stop = threading.Event()
         self.user_agents = UserAgentPool()
         self.account_pool = None
-        self._known_ids: set[str] = set()
+        self._known_ids: MutableSet[str] = _KnownIdCache()
         # Media reconciler: bounded, drive-gated, tombstoning re-download of
         # media_items whose backing file is gone (feature_gap_analysis #5). Gated
         # by COLLECTOR_RECOVER_MISSING; no-op/fast-path when disabled or a source
@@ -243,6 +279,13 @@ class BaseCollector(ABC):
     async def run(self, targets: list[str]):
         """Entry point with all safety checks."""
         self._intentional_idle_reason = None
+        if self.pool is not None:
+            from .source_controls import is_manually_paused
+            pause_reason = await is_manually_paused(self.pool, self.SOURCE_NAME)
+            if pause_reason:
+                self._intentional_idle_reason = f"operator pause: {pause_reason}"
+                logger.info("%s: waiting for explicit operator resume (%s)", self.SOURCE_NAME, pause_reason)
+                return
         self.drive_ok = check_drive()
         if not self.drive_ok:
             message = f"Drive not mounted. Pausing {self.SOURCE_NAME}."

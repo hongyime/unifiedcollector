@@ -62,6 +62,27 @@ SKIP: frozenset[str] = frozenset({
 # Dated and older descriptive filenames coexist. Preserve names/checksums in
 # existing ledgers; move only declared prerequisites ahead of their dependants.
 MIGRATION_DEPENDENCIES: dict[str, tuple[str, ...]] = {
+    "20261104_disable_dm_capture_and_repair_revisits.sql": (
+        "add_tiktok_dm.sql",
+        "add_dm_probe_log.sql",
+        "add_dm_hook_heartbeat.sql",
+        "add_tiktok_browser_media_diagnostics.sql",
+    ),
+    "20261104_seed_instagram_recovery_from_recent_restrictions.sql": (
+        "20261104_add_source_recovery_profiles.sql",
+        "add_rate_limit_events.sql",
+    ),
+    "20261105_retire_paypal.sql": (
+        "20260821_add_collection_action_queue.sql",
+        "20260930_add_profile_only_tables.sql",
+        "20260930_add_profile_probe_queue.sql",
+        "20261029_add_source_controls.sql",
+        "20261102_add_backfill_lanes.sql",
+        "20261102_add_source_capability_receipts.sql",
+        "20261104_add_provider_webhook_events.sql",
+        "add_rate_limit_events.sql",
+        "add_source_health.sql",
+    ),
     "20260802_add_profile_progress_indexes.sql": ("add_x_profiles.sql", "zz_add_facebook_profiles.sql"),
     "20260802_limit_media_rollup_trigger_updates.sql": ("add_media_source_rollups.sql",),
     "20260906_backfill_telegram_is_bot_from_username.sql": ("add_telegram_is_bot.sql",),

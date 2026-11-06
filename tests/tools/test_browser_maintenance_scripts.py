@@ -184,7 +184,7 @@ def test_browser_tab_audit_accepts_dynamic_extension_worlds():
     assert 'os.getenv("UC_EXTENSION_ID"' in script
     assert 'origin.startswith("chrome-extension://")' in script
     assert "UC_CHROME_CDP_PORT" in script
-    assert "'9336'" in script
+    assert "'9223'" in script
     assert "iso_ctx_ids: list[int]" in script
     assert "if p.get(\"cs\") is True:" in script
     assert "out[\"iso_context_id\"]" in script
@@ -243,7 +243,7 @@ def test_browser_tab_reload_treats_disappeared_targets_as_skips():
 
     assert "import os" in script
     assert "UC_CHROME_CDP_PORT" in script
-    assert "'9336'" in script
+    assert "'9223'" in script
     assert "def _target_disappeared" in script
     assert '"no such target" in text' in script
     assert '"404: not found" in text' in script
@@ -319,7 +319,7 @@ def test_cleanup_ext_tabs_handles_cdp_list_timeout():
 
     assert "UC_CHROME_CDP_URL" in script
     assert "UC_CHROME_CDP_PORT" in script
-    assert "'9336'" in script
+    assert "'9223'" in script
     assert "except (TimeoutError, socket.timeout)" in script
     assert "CDP target list timed out" in script
     assert "if targets is None:" in script
@@ -339,6 +339,7 @@ def test_manual_extension_helpers_reuse_control_tab_instead_of_spawning_duplicat
     assert "def open_or_activate_control_tab" in helper
     assert "def close_duplicate_control_tabs" in helper
     assert "def primary_control_tab_targets" in helper
+    assert 'url.endswith("/dist/background.js")' in helper
     assert "preferred_control_tab" in helper
     assert "preferred_control_tab(primary_only=True)" in helper
     assert "/json/new?" in helper

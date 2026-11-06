@@ -293,6 +293,7 @@ async function runBrowserRevisitWatchdog(alarmName) {
 // Fail-open: any fetch/parse error leaves the platform enabled (never silently
 // stop collection on a transient control-plane blip).
 let _scrapeConfigDisabled = new Set();
+let _scrapeConfig = {};
 let _scrapeConfigFetchedAt = 0;
 const SCRAPE_CONFIG_TTL_MS = 60000;
 async function refreshScrapeConfig() {
@@ -313,6 +314,7 @@ async function refreshScrapeConfig() {
     const cfg = await r.json();
     if (cfg && Array.isArray(cfg.disabled)) {
       _scrapeConfigDisabled = new Set(cfg.disabled.map((s) => String(s).toLowerCase()));
+      _scrapeConfig = cfg;
     }
   } catch (e) {
     /* fail-open: keep previous set; never block scraping on a config blip */
@@ -325,6 +327,29 @@ async function platformScrapeDisabled(platform) {
     await refreshScrapeConfig();
   } catch (e) { return false; }
   return _scrapeConfigDisabled.has(String(id).toLowerCase());
+}
+async function browserPacing(platform, account) {
+  await refreshScrapeConfig();
+  const id = String(platform || "").toLowerCase();
+  const profile = (_scrapeConfig && _scrapeConfig.profiles && _scrapeConfig.profiles[id]) || {};
+  if (_scrapeConfigDisabled.has(id) || profile.mode === "manually_paused") {
+    return { ...profile, mode: "manually_paused", volume_profile: "manual" };
+  }
+  const recoveryProfiles = Array.isArray(profile.recovery_profiles) ? profile.recovery_profiles : [];
+  const normalizedAccount = String(account || "").trim().replace(/^@/, "").toLowerCase();
+  const recovery = recoveryProfiles.find((value) => {
+    const profileAccount = String(value && value.account || "").trim().replace(/^@/, "").toLowerCase();
+    return !profileAccount || !normalizedAccount || profileAccount === normalizedAccount;
+  });
+  if (recovery) {
+    return {
+      ...profile,
+      mode: recovery.exit_required ? "recovery_exit" : "restricted",
+      volume_profile: "restricted",
+    };
+  }
+  if (profile.mode === "cooldown") return { ...profile, mode: "cooldown", volume_profile: "cooldown" };
+  return { ...profile, mode: "near_live_polling", volume_profile: "normal" };
 }
 function extensionVersion() {
   return (chrome.runtime.getManifest && chrome.runtime.getManifest().version) || null;
@@ -1424,49 +1449,6 @@ async function ensureScraperTabsOpen(reason, options = {}) {
   } finally { _tabsOpInProgress = false; }
 }
 
-// Reload scraper tabs ONE at a time with a gap (staggered) so the loop respawns
-// fresh without reloading 7 tabs simultaneously (CPU spike / overload).
-// Push the live, logged-in Instagram cookies to the collector so the HEADLESS
-// backup always runs on a fresh session (no dead-cookie 401 retry storms, which
-// look bot-like and risk bans). Runs on the refresh cycle + startup.
-async function syncCookies() {
-  try {
-    const cookies = await chrome.cookies.getAll({ domain: "instagram.com" });
-    if (!cookies || !cookies.some((c) => c.name === "sessionid")) return; // not logged in
-    const dsu = cookies.find((c) => c.name === "ds_user_id");
-    const account = dsu ? "live_" + dsu.value : "extension_live";
-    const base = await ingestBase();
-    const r = await fetch(base + "/social/cookies", {
-      method: "POST", headers: { "Content-Type": "application/json", ...(await bridgeHeaders()) },
-      body: JSON.stringify(withExtensionVersion({
-        platform: "instagram", account,
-        cookies: cookies.map((c) => ({ name: c.name, value: c.value, domain: c.domain, path: c.path, secure: c.secure, expirationDate: c.expirationDate })),
-      })),
-    });
-    if (r.ok) await log("info", `synced live IG session → headless backup (${account})`);
-  } catch (e) { /* cookies perm / ingest down */ }
-}
-
-async function syncStravaCookies() {
-  try {
-    const cookies = await chrome.cookies.getAll({ domain: "strava.com" });
-    if (!cookies || !cookies.some((c) => c.name === "_strava4_session")) return; // not logged in
-    const athlete = cookies.find((c) => c.name === "athlete_id" && c.value);
-    const account = String(athlete ? athlete.value : "extension_live")
-      .replace(/[^A-Za-z0-9_.-]/g, "_")
-      .slice(0, 60) || "extension_live";
-    const base = await ingestBase();
-    const r = await fetch(base + "/social/cookies", {
-      method: "POST", headers: { "Content-Type": "application/json", ...(await bridgeHeaders()) },
-      body: JSON.stringify(withExtensionVersion({
-        platform: "strava", account,
-        cookies: cookies.map((c) => ({ name: c.name, value: c.value, domain: c.domain, path: c.path, secure: c.secure, expirationDate: c.expirationDate })),
-      })),
-    });
-    if (r.ok) await log("info", `synced live Strava session → headless backup (${account})`);
-  } catch (e) { /* cookies perm / ingest down */ }
-}
-
 async function refreshScraperTabs(options = {}) {
   if (_tabsOpInProgress) return { ok: false, reason: "tabs_operation_in_progress", reloaded: 0, errors: 0 };
   if (!options.force && !(await autoTabsEnabled())) return { ok: false, reason: "auto_tabs_disabled", reloaded: 0, errors: 0 };
@@ -1755,8 +1737,6 @@ async function performStartupRecovery(reason, options = {}) {
     await clearPageRecoveryState(reason).catch(() => {});
   }
   await scheduleAlarm().catch((e) => log("warn", `${reason} schedule failed: ${e && e.message ? e.message : e}`));
-  await syncCookies().catch(() => {});
-  await syncStravaCookies().catch(() => {});
   if (openTabs) {
     await ensureScraperTabsOpen(reason, { force })
       .catch((e) => log("warn", `${reason} tab audit failed: ${e && e.message ? e.message : e}`));
@@ -1813,8 +1793,6 @@ chrome.alarms.onAlarm.addListener(async (a) => {
     await _alarmJitter();
     await refreshScraperTabs({ reason: "scheduled" });
     await reportScraperTabHeartbeats("refresh");
-    await syncCookies();
-    await syncStravaCookies();
   }
   else if (a.name === ALARM_MEMORY) {
     await _alarmJitter();
@@ -2176,10 +2154,23 @@ chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
 // ---- social tab launcher -------------------------------------------------
 async function tabForPlatform(p) {
   const tabs = await chrome.tabs.query({ url: platformUrlPatterns(p) });
-  return tabs && tabs[0] ? tabs[0] : null;
+  const selection = selectCanonicalScraperTabRows(tabs);
+  // Status/recovery actions must use the same owner as the tab-maintenance
+  // path; otherwise an arbitrary duplicate can receive the reload.
+  await closeDuplicateScraperTabRows(selection.duplicateRows, `tabForPlatform:${p.id}`);
+  const row = selection.rows.find((candidate) => candidate.platform.id === p.id);
+  return row ? row.tab : null;
 }
 async function isLoggedIn(p) {
-  try { const c = await chrome.cookies.get({ url: p.cookieUrl, name: p.cookie }); return !!(c && c.value); }
+  if (!p.cookie) return null;
+  try {
+    const urls = [p.cookieUrl, ...(p.cookieUrls || [])].filter(Boolean);
+    for (const url of urls) {
+      const c = await chrome.cookies.get({ url, name: p.cookie });
+      if (c && c.value) return true;
+    }
+    return false;
+  }
   catch (e) { return null; }
 }
 async function platformStatuses() {
@@ -2538,6 +2529,27 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     try {
       const base = await ingestBase();
       switch (msg.type) {
+      case "browserPacing": {
+        try {
+          sendResponse(await browserPacing(msg.platform, msg.account));
+        } catch (e) {
+          sendResponse({ mode: "near_live_polling", volume_profile: "normal", fail_open: true });
+        }
+        break;
+      }
+      case "recoveryCleanPass": {
+        try {
+          const response = await fetch(base + "/social/recovery-clean-pass", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", ...(await bridgeHeaders()) },
+            body: JSON.stringify({ source: msg.platform, account: msg.account || null }),
+          });
+          sendResponse(await response.json().catch(() => ({ ok: false })));
+        } catch (e) {
+          sendResponse({ ok: false, error: String(e && e.message || e) });
+        }
+        break;
+      }
       case "igCooldown": {
         // Ask the bridge whether the HEADLESS collector is in a 429 cooldown so the
         // extension can rest in sync (shared IG account → cooperative anti-ban).
@@ -2905,68 +2917,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           await log("info", `👤 ${msg.platform || "instagram"} · +${j.recorded ?? "?"} users (via ${msg.context || "seen"})`);
           sendResponse({ ok: r.ok });
         } catch (e) { await log("error", `users failed: ${e.message}`); sendResponse({ ok: false }); }
-        break;
-      }
-      case "tiktok_dm": {    // DM JSON frame from a WS (rare) — capture (#35)
-        try {
-          const r = await fetch(base + "/social/dm-frame", {
-            method: "POST", headers: { "Content-Type": "application/json", ...(await bridgeHeaders()) },
-            body: JSON.stringify(withExtensionVersion({ platform: msg.platform, frame: msg.frame })),
-          });
-          sendResponse({ ok: r.ok });
-        } catch (e) { sendResponse({ ok: false }); }
-        break;
-      }
-      case "dm_probe": {  // one-time DM transport/format probe for investigation (#38)
-        try {
-          await fetch(base + "/social/dm-probe", {
-            method: "POST", headers: { "Content-Type": "application/json", ...(await bridgeHeaders()) },
-            body: JSON.stringify(withExtensionVersion({ platform: msg.platform, transport: msg.transport,
-              url: msg.url, frame_kind: msg.frame_kind, frame_size: msg.frame_size })),
-          });
-          await log("info", `🔎 ${msg.platform} DM ${msg.transport}: ${msg.frame_kind || "url"} ${msg.frame_size ? "~" + msg.frame_size + "B " : ""}${msg.url || ""}`);
-        } catch (e) {}
-        sendResponse({ ok: true });
-        break;
-      }
-      case "dm_sample": {  // raw DM-socket frame bytes for decoder work (#35)
-        try {
-          await fetch(base + "/social/dm-sample", {
-            method: "POST", headers: { "Content-Type": "application/json", ...(await bridgeHeaders()) },
-            body: JSON.stringify(withExtensionVersion({ platform: msg.platform, url: msg.url, size: msg.size, b64: msg.b64 })),
-          });
-          await log("info", `🧪 ${msg.platform} DM sample: ${msg.size}B`);
-        } catch (e) {}
-        sendResponse({ ok: true });
-        break;
-      }
-      case "dm_heartbeat": {  // WS-hook liveness pulse for the freshness watchdog (P1.3)
-        try {
-          await fetch(base + "/social/dm-heartbeat", {
-            method: "POST", headers: { "Content-Type": "application/json", ...(await bridgeHeaders()) },
-            body: JSON.stringify(withExtensionVersion({
-              platform: msg.platform,
-              probes_sent: msg.probes_sent || 0,
-              samples_shipped: msg.samples_shipped || 0,
-            })),
-          });
-        } catch (e) {}
-        sendResponse({ ok: true });
-        break;
-      }
-      case "dm_decoded": {  // Option B: client-decoded DM payload → structured upsert
-        try {
-          await fetch(base + "/social/dm-decoded", {
-            method: "POST", headers: { "Content-Type": "application/json", ...(await bridgeHeaders()) },
-            body: JSON.stringify(withExtensionVersion({
-              platform: msg.platform, owner: msg.owner || "",
-              threads: msg.threads || [], messages: msg.messages || [],
-            })),
-          });
-          const n = (msg.messages && msg.messages.length) || 0;
-          if (n) await log("info", `📨 ${msg.platform} DM decoded: ${n} msg`);
-        } catch (e) {}
-        sendResponse({ ok: true });
         break;
       }
       case "getStravaRouteQueue": {

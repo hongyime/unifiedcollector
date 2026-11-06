@@ -12,6 +12,18 @@ from src.collectors import profile_only_runner as runner
 
 
 class _FakePool:
+    def acquire(self):
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return None
+
+    async def execute(self, *args):
+        return None
+
     async def close(self) -> None:
         pass
 

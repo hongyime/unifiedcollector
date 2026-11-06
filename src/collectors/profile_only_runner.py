@@ -24,16 +24,16 @@ import asyncpg
 
 from src.collectors.airbnb import AirbnbCollector
 from src.collectors.bluesky import BlueskyCollector
-from src.collectors.paypal import PayPalCollector
 from src.collectors.pinterest import PinterestCollector
 from src.collectors.snapchat import SnapchatCollector
 from src.core.profile_only_collector import ProfileOnlyCollector
+from src.core.source_controls import automatic_cooldown_seconds, is_manually_paused
+from src.core.source_states import clear_automatic_source_state, record_provider_block
 
 logger = logging.getLogger(__name__)
 
 _COLLECTORS: dict[str, type[ProfileOnlyCollector]] = {
     "snapchat": SnapchatCollector,
-    "paypal": PayPalCollector,
     "airbnb": AirbnbCollector,
     "bluesky": BlueskyCollector,
     "pinterest": PinterestCollector,
@@ -85,7 +85,7 @@ def _selected_source() -> str:
 def _build_collectors() -> Iterable[ProfileOnlyCollector]:
     chosen = _selected_source()
     if not chosen:
-        for name in ("snapchat", "paypal", "airbnb", "bluesky", "pinterest"):
+        for name in ("snapchat", "airbnb", "bluesky", "pinterest"):
             yield _COLLECTORS[name]()
         return
     factory = _COLLECTORS.get(chosen)
@@ -136,14 +136,22 @@ async def run() -> None:
         )
         await _wait_startup_delay(stop_event, startup_delay)
 
+    provider_failures: dict[str, int] = {}
     while not stop_event.is_set():
         for c in collectors:
             if stop_event.is_set():
                 break
             if not c.enabled:
                 continue
+            if await is_manually_paused(pool, c.SOURCE_NAME):
+                continue
+            if await automatic_cooldown_seconds(pool, c.SOURCE_NAME):
+                continue
             try:
                 summary = await c.run_cycle()
+                provider_failures.pop(c.SOURCE_NAME, None)
+                async with pool.acquire() as conn:
+                    await clear_automatic_source_state(conn, c.SOURCE_NAME)
                 if summary.get("processed", 0) or summary.get("skipped"):
                     logger.info("%s: %s", c.SOURCE_NAME, summary)
                 native_cycle = getattr(c, "run_native_cycle", None)
@@ -151,7 +159,11 @@ async def run() -> None:
                     native_summary = await native_cycle()
                     if native_summary and native_summary.get("processed", 0):
                         logger.info("%s native scrape: %s", c.SOURCE_NAME, native_summary)
-            except Exception:
+            except Exception as exc:
+                failures = provider_failures[c.SOURCE_NAME] = provider_failures.get(c.SOURCE_NAME, 0) + 1
+                if await record_provider_block(pool, c.SOURCE_NAME, exc, failures=failures):
+                    logger.warning("%s: provider block recorded", c.SOURCE_NAME)
+                    continue
                 logger.exception("%s: cycle failed", c.SOURCE_NAME)
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=_INTERVAL)

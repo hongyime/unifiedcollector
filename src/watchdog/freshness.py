@@ -19,7 +19,6 @@ from pathlib import Path
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] watchdog: %(message)s")
 log = logging.getLogger("watchdog")
 
-DB = os.environ["DATABASE_URL"]
 INTERVAL = int(os.getenv("WATCHDOG_INTERVAL", "300"))              # check every 5 min
 COOLDOWN = int(os.getenv("WATCHDOG_RESTART_COOLDOWN", "1800"))     # ≤1 restart / 30 min / container
 DOCKER_SOCK = os.getenv("DOCKER_SOCK", "/var/run/docker.sock")
@@ -103,8 +102,8 @@ CHECKS = {
     ),
     "whatsapp": (
         "SELECT extract(epoch FROM now()-max(collected_at)) FROM whatsapp_messages",
-        int(os.getenv("WATCHDOG_STALE_WHATSAPP", "14400")),  # 4h — the bridge holds the connection
-        ["unifiedcollector_wa_bridge_1", "unifiedcollector_wa_bridge_2"],
+        int(os.getenv("WATCHDOG_STALE_WHATSAPP", "14400")),
+        ["unifiedcollector_collector_whatsapp"],
     ),
     "beeper": (
         "SELECT extract(epoch FROM now()-max(ingested_at)) FROM beeper_shadow_messages",
@@ -413,11 +412,11 @@ EXPECTED_COMPOSE_SERVICES = frozenset({
     "collector_tiktok",
     "rabbitmq",
     "wa-bridge-1",
+    "wa-bridge-2",
     "browser_cookie_vault",
     "collector_beeper",
     "collector_strava",
     "collector_lemon8",
-    "collector_paypal",
     "collector_pinterest",
     "redis",
     "realtime_feed",
@@ -432,9 +431,10 @@ EXPECTED_COMPOSE_SERVICES = frozenset({
     "collector_instagram",
     "collector_website",
     "scheduler",
+    "control_bot",
+    "control_executor",
     "collector_exposure",
     "onboard_bot",
-    "wa-bridge-2",
     "watchdog",
     "recon_egress_guard",
 })
@@ -742,7 +742,7 @@ async def _tick(db: asyncpg.Connection) -> None:
                     # First stale detection in this stall — push a card, do NOT restart yet.
                     if _cb is not None:
                         try:
-                            token = _cb.make_watchdog_card_token(src, containers, age, thresh)
+                            token = await _cb.create_watchdog_card(db, src, containers, age, thresh, grace)
                             keyboard = _cb.build_watchdog_keyboard(token, containers)
                             text = (
                                 f"⚠️ <b>watchdog: {src} stale</b>\n"
@@ -754,6 +754,9 @@ async def _tick(db: asyncpg.Connection) -> None:
                                 telegram_module().send_with_keyboard_sync, text, keyboard,
                             )
                             if resp.get("ok"):
+                                await _cb.record_card_message(
+                                    db, token, (resp.get("result") or {}).get("message_id"),
+                                )
                                 _pending_decision_cards[key] = {
                                     "token": token,
                                     "decided_after": now + grace,
@@ -778,7 +781,7 @@ async def _tick(db: asyncpg.Connection) -> None:
                             log.exception("decision card post failed; falling through to auto-restart")
                 else:
                     # A card exists for this stall. Was it Ignored, and is the grace window still open?
-                    if _cb is not None and token_from_pending and _cb.is_token_ignored(token_from_pending, within_seconds=grace * 2):
+                    if _cb is not None and token_from_pending and await _cb.is_card_ignored(db, token_from_pending):
                         log.info("%s STALE but operator pressed Ignore — skipping auto-restart", src)
                         await _mark_degraded(db, src, age, False, "operator pressed Ignore; auto-restart suppressed")
                         continue
@@ -981,65 +984,6 @@ async def _mark_degraded_dlq(db: asyncpg.Connection, source: str, n: int, oldest
         log.error("source_health DLQ upsert failed for %s: %s", source, e)
 
 
-# ── DM WS-hook liveness (P1.3) ───────────────────────────────────────────────
-# The browser extension's DM WebSocket wrapper (see extension/inject.js
-# "DM investigation" block) posts a heartbeat every 5 min. If IG or TikTok
-# update their bundle and the wrapper silently breaks, samples just stop
-# arriving — indistinguishable from "user isn't DMing". This alerts when the
-# newest heartbeat per platform goes stale.
-#
-# Alert-only, NO restart: the hook lives in the browser, not a container. If
-# we've never seen a heartbeat for a platform we do NOT alert (can't tell
-# "never installed" from "just broken"); the freshness check only fires when
-# a previously-alive heartbeat has since gone quiet.
-DM_HOOK_ENABLED = os.getenv("WATCHDOG_DM_HOOK_ENABLED", "1") == "1"
-DM_HOOK_STALE_SECONDS = int(os.getenv("WATCHDOG_STALE_DM_HOOK", "3600"))       # 1h
-DM_HOOK_ALERT_COOLDOWN = int(os.getenv("WATCHDOG_DM_HOOK_ALERT_COOLDOWN", "3600"))  # ≤1 alert/h/platform
-_last_dm_hook_alert: dict[str, float] = {}
-
-
-async def _dm_hook_tick(db: asyncpg.Connection) -> None:
-    now = time.time()
-    try:
-        # to_regclass check keeps the loop happy on a boot before the P1.3
-        # migration is applied.
-        exists = await db.fetchval("SELECT to_regclass('dm_hook_heartbeat')")
-        if exists is None:
-            return
-        rows = await db.fetch(
-            """
-            SELECT platform,
-                   extract(epoch FROM now() - max(last_seen)) AS age
-            FROM dm_hook_heartbeat
-            WHERE platform = 'tiktok'
-            GROUP BY platform
-            """
-        )
-    except Exception as e:
-        log.error("dm_hook_heartbeat query failed: %s", e)
-        return
-    for r in rows:
-        platform, age = r["platform"], r["age"] or 0
-        if age > DM_HOOK_STALE_SECONDS:
-            if now - _last_dm_hook_alert.get(platform, 0) >= DM_HOOK_ALERT_COOLDOWN:
-                _last_dm_hook_alert[platform] = now
-                log.warning(
-                    "DM WS hook STALE for %s (last beat %.0fs ago > %ds)",
-                    platform, age, DM_HOOK_STALE_SECONDS,
-                )
-                await _notify(
-                    f"⚠️ <b>DM WS hook stale: {platform}</b>\n"
-                    f"last heartbeat {age / 60:.0f}m ago (&gt; {DM_HOOK_STALE_SECONDS // 60}m).\n"
-                    "Extension bundle change on the platform may have broken the "
-                    "passive WebSocket wrapper — check extension/inject.js against "
-                    "current window.WebSocket behaviour on the platform tab."
-                )
-            else:
-                log.info("DM hook %s stale (%.0fs) — alert in cooldown", platform, age)
-        else:
-            log.info("DM hook %s ok (last beat %.0fs ago)", platform, age)
-
-
 async def main() -> None:
     log.info("freshness watchdog started (interval=%ds, cooldown=%ds)", INTERVAL, COOLDOWN)
     _touch_heartbeat()  # write immediately so healthcheck has a file before first tick
@@ -1050,15 +994,15 @@ async def main() -> None:
                 _touch_heartbeat()
                 await asyncio.sleep(INTERVAL)
                 continue
-            db = await asyncpg.connect(DB)
+            # Resolve here so importing watchdog helpers remains safe for tests
+            # and operational tools without a database configuration.
+            db = await asyncpg.connect(os.environ["DATABASE_URL"])
             try:
                 await _tick(db)
                 if BROWSER_SOURCE_WATCH_ENABLED:
                     await _browser_source_tick(db)
                 if DLQ_ENABLED:
                     await _dlq_tick(db)
-                if DM_HOOK_ENABLED:
-                    await _dm_hook_tick(db)
             finally:
                 await db.close()
             # Container liveness runs AFTER the DB connection closes so a slow

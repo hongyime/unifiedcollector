@@ -1,0 +1,19 @@
+{
+  "database_recovery_point": {"database": "unifiedcollector"},
+  "media_reconciliation": {
+    "database_rows": 1064772,
+    "database_file_path_classes": {
+      "/media/<source>/...": 572622,
+      "/vault/media/...": 492150
+    },
+    "sample": {
+      "rows": 100,
+      "post_copy_destination_recheck": {
+        "root": "/media/sg-ultra/unifiedcollector",
+        "files_present": 0,
+        "missing": 100
+      }
+    }
+  },
+  "authority": {"promotion_allowed": false}
+}

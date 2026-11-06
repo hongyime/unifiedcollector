@@ -15,15 +15,14 @@ def test_required_production_secrets_have_no_development_fallbacks() -> None:
         "RABBITMQ_PASSWORD",
         "REDIS_PASSWORD",
         "WHATSAPP_MEDIA_BRIDGE_SECRET",
-        "DASHBOARD_ADMIN_PASSWORD",
-        "DASHBOARD_JWT_SECRET",
+        "CONTROL_EXECUTOR_SECRET",
     ):
-        assert f"${{{name}:?{name} is required}}" in text
+        assert f"${{{name}:?{name} required}}" in text
 
 
-def test_dashboard_is_authenticated_and_loopback_only() -> None:
+def test_dashboard_is_local_auth_disabled_and_loopback_only() -> None:
     text = COMPOSE.read_text(encoding="utf-8")
-    assert 'DASHBOARD_AUTH_DISABLED: "false"' in text
+    assert 'DASHBOARD_AUTH_DISABLED: "${DASHBOARD_AUTH_DISABLED:-true}"' in text
     assert '"127.0.0.1:8001:8700"' in text
     assert '"127.0.0.1:8700:8700"' in text
     assert '"8001:8700"' not in text

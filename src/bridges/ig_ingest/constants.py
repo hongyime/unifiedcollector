@@ -17,14 +17,6 @@ import re
 MEDIA_ROOT = os.getenv("COLLECTOR_DRIVE_PATH", "/media")
 PORT = int(os.getenv("IG_INGEST_PORT", "8765"))
 
-# DM raw-sample capture (#35). Files land in DM_SAMPLE_DIR as
-# <platform>_<n>.bin. n is a monotonically increasing index derived from the
-# max existing index (NOT a count), so pruning can't cause an old-index reuse
-# that would overwrite a not-yet-pruned file. Rotation keeps only the newest
-# DM_SAMPLE_CAP_PER_PLATFORM files per platform by mtime, so the directory
-# can't grow unbounded on active sockets (P1.1). Cap overridable via env.
-DM_SAMPLE_DIR = "/tmp/dm_samples"
-DM_SAMPLE_CAP_PER_PLATFORM = int(os.getenv("DM_SAMPLE_CAP", "200"))
 MIN_BYTES = int(os.getenv("IG_INGEST_MIN_BYTES", "1024"))
 DL_CONCURRENCY = int(os.getenv("SOCIAL_INGEST_CONCURRENCY", "4"))
 try:
@@ -75,13 +67,6 @@ try:
     )
 except (TypeError, ValueError):
     BROWSER_TELEMETRY_WRITE_TIMEOUT_SECONDS = 8.0
-try:
-    DM_HOOK_HEARTBEAT_WRITE_TIMEOUT_SECONDS = max(
-        0.25,
-        float(os.getenv("DM_HOOK_HEARTBEAT_WRITE_TIMEOUT_SECONDS", "6.0")),
-    )
-except (TypeError, ValueError):
-    DM_HOOK_HEARTBEAT_WRITE_TIMEOUT_SECONDS = 6.0
 try:
     IG_COOLDOWN_READ_TIMEOUT_SECONDS = max(
         0.25,
@@ -145,13 +130,6 @@ try:
     )
 except (TypeError, ValueError):
     SOCIAL_INGEST_REVISIT_CONCURRENCY = 2
-try:
-    SOCIAL_INGEST_DM_SAMPLE_CONCURRENCY = max(
-        1,
-        int(os.getenv("SOCIAL_INGEST_DM_SAMPLE_CONCURRENCY", "1")),
-    )
-except (TypeError, ValueError):
-    SOCIAL_INGEST_DM_SAMPLE_CONCURRENCY = 1
 try:
     SOCIAL_INGEST_LANE_WAIT_SECONDS = max(
         0.0,

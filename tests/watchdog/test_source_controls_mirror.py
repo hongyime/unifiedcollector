@@ -7,10 +7,7 @@ source_health upsert, and set_source_state never raises.
 """
 from __future__ import annotations
 
-import os
 import time
-
-os.environ.setdefault("DATABASE_URL", "postgresql://collector:x@127.0.0.1:5999/unifiedcollector")
 
 import pytest  # noqa: E402
 

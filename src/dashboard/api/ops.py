@@ -23,6 +23,7 @@ import asyncio
 from fastapi import APIRouter, Depends
 
 from src.db.connection import get_pool
+from src.core.dlq_status import list_dead_letter_queue
 from src.dashboard.api.auth import require_role
 from src.dashboard.api.helpers import (
     _acquire_dashboard_conn,
@@ -74,20 +75,8 @@ router = APIRouter()
 @router.get("/dlq")
 async def list_dlq(source: str | None = None, limit: int = 50,
                    _user: dict = Depends(require_role("viewer"))):
-    limit = max(1, min(limit, 500))
     pool = await _get_pool()
-    async with pool.acquire() as conn:
-        if source:
-            rows = await conn.fetch(
-                "SELECT * FROM dead_letter_queue WHERE source = $1 ORDER BY created_at DESC LIMIT $2",
-                source, limit,
-            )
-        else:
-            rows = await conn.fetch(
-                "SELECT * FROM dead_letter_queue ORDER BY created_at DESC LIMIT $1",
-                limit,
-            )
-    return [dict(r) for r in rows]
+    return await list_dead_letter_queue(pool, source=source, limit=limit)
 
 
 @router.get("/domain-pacing/status")

@@ -711,11 +711,21 @@ class Lemon8Collector(BaseCollector):
                 )
             await conn.execute("""
                 INSERT INTO lemon8_profiles (
-                    platform_user_id, username, nickname, avatar_url, bio, updated_at
-                ) VALUES ($1, $2, $3, $4, $5, $6)
+                    platform_user_id, username, nickname, avatar_url, bio,
+                    followers_count, following_count, like_count, updated_at
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                 ON CONFLICT (platform_user_id) DO UPDATE SET
-                    username = EXCLUDED.username, nickname = EXCLUDED.nickname, updated_at = EXCLUDED.updated_at
+                    username = COALESCE(NULLIF(EXCLUDED.username, ''), lemon8_profiles.username),
+                    nickname = COALESCE(EXCLUDED.nickname, lemon8_profiles.nickname),
+                    avatar_url = COALESCE(EXCLUDED.avatar_url, lemon8_profiles.avatar_url),
+                    bio = COALESCE(EXCLUDED.bio, lemon8_profiles.bio),
+                    followers_count = COALESCE(EXCLUDED.followers_count, lemon8_profiles.followers_count),
+                    following_count = COALESCE(EXCLUDED.following_count, lemon8_profiles.following_count),
+                    like_count = COALESCE(EXCLUDED.like_count, lemon8_profiles.like_count),
+                    updated_at = EXCLUDED.updated_at
             """, user_id, username, data.get("nickname"), data.get("avatar_url"), data.get("signature"),
+                 data.get("follower_count") or data.get("followers_count"), data.get("following_count"),
+                 data.get("like_count"),
                  datetime.now(timezone.utc))
 
         try:

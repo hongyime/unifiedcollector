@@ -5,7 +5,6 @@ from scripts.verify_env_split import parse_compose
 
 _PROBES = (
     "collector_snapchat",
-    "collector_paypal",
     "collector_airbnb",
     "collector_bluesky",
     "collector_pinterest",
@@ -22,8 +21,4 @@ def test_profile_anchor_is_applied_to_each_service() -> None:
         assert any(entry.endswith("common.env") for entry in env_files[name])
         source = name.removeprefix("collector_")
         probe = source.upper() + "_PROBE_ENABLED"
-        if source == "paypal":
-            # PayPal is intentionally always-enabled, so it has no opt-out gate.
-            assert probe not in inline_env[name]
-        else:
-            assert probe in inline_env[name]
+        assert probe in inline_env[name]

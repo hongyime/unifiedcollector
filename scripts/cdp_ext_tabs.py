@@ -15,7 +15,7 @@ KNOWN_EXTENSION_IDS = (PRIMARY_EXTENSION_ID, "nkeimhogjdpnpccoofpliimaahmaaome")
 
 
 def cdp_base() -> str:
-    port = os.getenv("UC_CHROME_CDP_PORT", "9336").strip() or "9336"
+    port = os.getenv("UC_CHROME_CDP_PORT", "9223").strip() or "9223"
     return f"http://127.0.0.1:{port}"
 
 
@@ -45,6 +45,19 @@ def list_targets() -> list[dict[str, Any]]:
     return targets if isinstance(targets, list) else []
 
 
+def active_extension_id() -> str | None:
+    for target in list_targets():
+        url = str(target.get("url") or "")
+        if target.get("type") == "service_worker" and url.endswith("/dist/background.js"):
+            return urllib.parse.urlparse(url).netloc or None
+    return None
+
+
+def _collector_extension_ids() -> tuple[str, ...]:
+    active = active_extension_id()
+    return tuple(dict.fromkeys((active, *KNOWN_EXTENSION_IDS))) if active else KNOWN_EXTENSION_IDS
+
+
 def is_control_tab_url(url: str | None) -> bool:
     try:
         parsed = urllib.parse.urlparse(str(url or ""))
@@ -62,7 +75,7 @@ def control_tab_targets() -> list[dict[str, Any]]:
 
 
 def primary_control_tab_targets() -> list[dict[str, Any]]:
-    bases = tuple(f"chrome-extension://{ext_id}/tabs.html" for ext_id in KNOWN_EXTENSION_IDS)
+    bases = tuple(f"chrome-extension://{ext_id}/tabs.html" for ext_id in _collector_extension_ids())
     return [
         target
         for target in control_tab_targets()
@@ -72,7 +85,7 @@ def primary_control_tab_targets() -> list[dict[str, Any]]:
 
 def _control_rank(target: dict[str, Any]) -> tuple[int, int, str]:
     url = str(target.get("url") or "")
-    primary_bases = tuple(f"chrome-extension://{ext_id}/tabs.html" for ext_id in KNOWN_EXTENSION_IDS)
+    primary_bases = tuple(f"chrome-extension://{ext_id}/tabs.html" for ext_id in _collector_extension_ids())
     if url == primary_bases[0]:
         primary = 0
     elif url.startswith(primary_bases):
@@ -129,7 +142,8 @@ def open_or_activate_control_tab(settle_seconds: float = 0.0) -> dict[str, Any] 
         close_duplicate_control_tabs(str(target["id"]))
         return target
 
-    url = f"chrome-extension://{PRIMARY_EXTENSION_ID}/tabs.html"
+    extension_id = active_extension_id() or PRIMARY_EXTENSION_ID
+    url = f"chrome-extension://{extension_id}/tabs.html"
     cdp_put("/json/new?" + urllib.parse.quote(url, safe=":/"))
     if settle_seconds > 0:
         time.sleep(settle_seconds)

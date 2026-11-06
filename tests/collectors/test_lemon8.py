@@ -555,6 +555,8 @@ async def test_upsert_profile_calls_db(collector):
     # positional params include user_id and username
     assert "uid-1" in insert
     assert "alice" in insert
+    assert "bio = COALESCE(EXCLUDED.bio" in insert[0]
+    assert "avatar_url = COALESCE(EXCLUDED.avatar_url" in insert[0]
 
 
 @pytest.mark.asyncio

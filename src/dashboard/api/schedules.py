@@ -18,13 +18,13 @@ from __future__ import annotations
 
 import logging
 import sys
-from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from src.db.connection import get_pool
 from src.dashboard.api.auth import require_role
+from src.core.schedule_status import list_collection_schedules, set_collection_schedule
 
 logger = logging.getLogger(__name__)
 
@@ -53,17 +53,9 @@ router = APIRouter()
 @router.put("/schedules/{source}")
 async def update_schedule(source: str, req: ScheduleRequest, _user: dict = Depends(require_role("operator"))):
     pool = await _get_pool()
-    now = datetime.now(timezone.utc)
-    next_run = now + timedelta(hours=req.interval_hours)
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO collection_schedules (source, interval_hours, enabled, next_run) "
-            "VALUES ($1, $2, $3, $4) "
-            "ON CONFLICT (source) DO UPDATE "
-            "SET interval_hours = $2, enabled = $3, next_run = $4",
-            source, req.interval_hours, req.enabled, next_run,
-        )
-    return {"status": "ok", "source": source}
+    return {"status": "ok", **await set_collection_schedule(
+        pool, source, interval_hours=req.interval_hours, enabled=req.enabled,
+    )}
 
 
 @router.get("/runs/{run_id}")
@@ -84,27 +76,15 @@ async def get_run(run_id: int, _user: dict = Depends(require_role("viewer"))):
 @router.get("/schedules")
 async def list_schedules(_user: dict = Depends(require_role("viewer"))):
     pool = await _get_pool()
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT * FROM collection_schedules ORDER BY source"
-        )
-    return [dict(r) for r in rows]
+    return await list_collection_schedules(pool)
 
 
 @router.post("/schedules")
 async def create_schedule(req: ScheduleRequest, _user: dict = Depends(require_role("operator"))):
     pool = await _get_pool()
-    now = datetime.now(timezone.utc)
-    next_run = now + timedelta(hours=req.interval_hours)
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO collection_schedules (source, interval_hours, enabled, next_run) "
-            "VALUES ($1, $2, true, $3) "
-            "ON CONFLICT (source) DO UPDATE "
-            "SET interval_hours = $2, enabled = true, next_run = $3",
-            req.source, req.interval_hours, next_run,
-        )
-    return {"status": "ok", "source": req.source, "interval_hours": req.interval_hours}
+    return {"status": "ok", **await set_collection_schedule(
+        pool, req.source, interval_hours=req.interval_hours, enabled=True,
+    )}
 
 
 @router.delete("/schedules/{source}")

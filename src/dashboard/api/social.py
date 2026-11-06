@@ -16,13 +16,28 @@ import logging
 import sys
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Body, Depends, HTTPException
 from fastapi.responses import HTMLResponse
 
 from src.db.connection import get_pool
 from src.dashboard.api.auth import require_role
+from src.core.recovery_profiles import record_clean_recovery_pass
 
 logger = logging.getLogger(__name__)
+
+
+_BROWSER_NORMAL_CYCLE_REST_MS = {
+    "instagram": (180_000, 360_000),
+    "facebook": (120_000, 240_000),
+    "threads": (120_000, 240_000),
+    "x": (120_000, 240_000),
+    "tiktok": (180_000, 300_000),
+    "lemon8": (60_000, 150_000),
+    "strava": (90_000, 180_000),
+    "pinterest": (240_000, 420_000),
+    "snapchat": (300_000, 480_000),
+    "airbnb": (300_000, 480_000),
+}
 
 
 def _lookup(name: str):
@@ -134,15 +149,29 @@ async def social_users_list(platform: str | None = None, q: str | None = None,
 
 @router.get("/social/scrape-config")
 async def social_scrape_config(_user: dict = Depends(require_role("viewer"))):
-    """Per-platform scrape enable state for the browser extension (rotator control).
+    """Per-platform browser pacing state for the extension.
 
     The activity rotator writes collection_schedules.enabled for the browser
     group; the extension polls this to skip scraping paused platforms so the
     shared CDP Chrome never drives more than the rotation width at once. Reads
     fail OPEN (all enabled) so a config error never silently halts collection.
     """
-    browser_platforms = ["x", "instagram", "facebook", "threads", "tiktok", "lemon8", "strava"]
+    browser_platforms = [
+        "x", "instagram", "facebook", "threads", "tiktok", "lemon8",
+        "strava", "pinterest", "snapchat", "airbnb",
+    ]
     enabled_map = {p: True for p in browser_platforms}
+    profiles = {
+        p: {
+            "mode": "near_live_polling",
+            "volume_profile": "normal",
+            "recovery_profiles": [],
+            "cycle_rest_min_ms": _BROWSER_NORMAL_CYCLE_REST_MS[p][0],
+            "cycle_rest_max_ms": _BROWSER_NORMAL_CYCLE_REST_MS[p][1],
+            "cooldown_rest_ms": min(_BROWSER_NORMAL_CYCLE_REST_MS[p][1], 300_000),
+        }
+        for p in browser_platforms
+    }
     try:
         pool = await _get_pool()
         async with pool.acquire() as conn:
@@ -152,17 +181,84 @@ async def social_scrape_config(_user: dict = Depends(require_role("viewer"))):
             )
         for r in rows:
             enabled_map[str(r["source"])] = bool(r["enabled"])
+        # Schedule disablement is the browser's explicit manual/rotation stop.
+        # It must win over every automatic profile below.
+        for source, enabled in enabled_map.items():
+            if not enabled:
+                profiles[source].update(mode="manually_paused", volume_profile="manual")
+
+        # The newer tables are optional during a rolling migration. Their
+        # absence must retain the historical fail-open scrape-config behavior.
+        try:
+            controls = await conn.fetch(
+                """SELECT source_name, state, enabled, blocked_until
+                   FROM source_controls WHERE source_name = ANY($1::text[])""",
+                browser_platforms,
+            )
+            now = datetime.now(timezone.utc)
+            for control in controls:
+                source = str(control.get("source_name") or "").lower()
+                if source not in profiles or profiles[source]["mode"] == "manually_paused":
+                    continue
+                if control.get("state") == "PAUSED" or not control.get("enabled", True):
+                    profiles[source].update(mode="manually_paused", volume_profile="manual")
+                    enabled_map[source] = False
+                elif control.get("state") in {"RATE_LIMITED", "AUTH_FAILED"} and control.get("blocked_until") and control["blocked_until"] > now:
+                    profiles[source].update(mode="cooldown", volume_profile="cooldown")
+        except Exception:
+            pass
+        try:
+            recoveries = await conn.fetch(
+                """SELECT source_name, account_identity, restricted_until,
+                          restricted_until <= now() AS exit_required
+                   FROM source_recovery_profiles
+                   WHERE state='restricted'
+                     AND source_name = ANY($1::text[])""",
+                browser_platforms,
+            )
+            for recovery in recoveries:
+                source = str(recovery.get("source_name") or "").lower()
+                if source not in profiles or profiles[source]["mode"] == "manually_paused":
+                    continue
+                account = str(recovery.get("account_identity") or "").strip()
+                profiles[source]["recovery_profiles"].append({
+                    "account": account,
+                    "exit_required": bool(recovery.get("exit_required")),
+                })
+        except Exception:
+            pass
     except Exception as exc:  # noqa: BLE001 - fail open: never block scraping on config read error
         return {
             "enabled": browser_platforms,
             "disabled": [],
+            "profiles": profiles,
             "fail_open": True,
             "error": exc.__class__.__name__,
         }
     return {
         "enabled": sorted([p for p, on in enabled_map.items() if on]),
         "disabled": sorted([p for p, on in enabled_map.items() if not on]),
+        "profiles": profiles,
         "checked_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@router.post("/social/recovery-clean-pass")
+async def social_recovery_clean_pass(
+    source: str = Body(...),
+    account: str | None = Body(None),
+    _user: dict = Depends(require_role("viewer")),
+):
+    """Accept only a browser's already-bounded Instagram exit observation."""
+    if source.strip().lower() != "instagram":
+        raise HTTPException(status_code=400, detail="recovery clean pass is only supported for instagram")
+    profile = await record_clean_recovery_pass(await _get_pool(), "instagram", account=account)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="no matching recovery profile")
+    return {
+        "state": profile.get("state"),
+        "clean_passes": profile.get("clean"),
+        "normal": profile.get("state") == "normal",
     }
 
 

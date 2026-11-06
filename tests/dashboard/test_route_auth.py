@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import asyncio
 import os
+from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 
 os.environ.setdefault("DASHBOARD_JWT_SECRET", "test-secret-only-for-pytest-do-not-use")
 os.environ.setdefault("DASHBOARD_ADMIN_PASSWORD", "x")
@@ -47,3 +49,13 @@ def test_auth_disabled_still_treats_requests_as_admin(monkeypatch):
     assert user == {"username": "localhost", "role": "admin"}
     check = dashboard_auth.require_role("viewer")
     assert asyncio.run(check(user)) == user
+
+
+def test_auth_enabled_refuses_token_validation_without_a_jwt_secret(monkeypatch):
+    monkeypatch.setattr(dashboard_auth, "_AUTH_DISABLED", False)
+    monkeypatch.setattr(dashboard_auth, "JWT_SECRET", "")
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(dashboard_auth.get_current_user(SimpleNamespace(credentials="not-a-token")))
+
+    assert getattr(exc.value, "status_code", None) == 503

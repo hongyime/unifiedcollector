@@ -546,6 +546,39 @@ async def ensure_collection_action_queue(conn) -> None:
     await conn.execute(ACTION_QUEUE_DDL)
 
 
+async def list_collection_actions(pool, *, status: str = "open", limit: int = 50) -> dict[str, Any]:
+    """Return a bounded durable action queue view without deriving or mutating actions."""
+    normalized_status = str(status or "open").strip().lower()
+    if normalized_status not in {"open", "resolved", "all"}:
+        normalized_status = "open"
+    bounded_limit = min(max(int(limit or 50), 1), 200)
+    async with pool.acquire() as conn:
+        if await conn.fetchval("SELECT to_regclass('collection_action_queue')") is None:
+            return {"status": "unavailable", "filter": normalized_status, "limit": bounded_limit, "count": 0, "actions": []}
+        if normalized_status == "all":
+            rows = await conn.fetch(
+                """
+                SELECT source, action_type, scope_key, status, priority, reason,
+                       evidence, first_seen_at, last_seen_at, resolved_at
+                FROM collection_action_queue
+                ORDER BY status ASC, priority ASC, last_seen_at DESC LIMIT $1
+                """,
+                bounded_limit,
+            )
+        else:
+            rows = await conn.fetch(
+                """
+                SELECT source, action_type, scope_key, status, priority, reason,
+                       evidence, first_seen_at, last_seen_at, resolved_at
+                FROM collection_action_queue
+                WHERE status=$1
+                ORDER BY priority ASC, last_seen_at DESC LIMIT $2
+                """,
+                normalized_status, bounded_limit,
+            )
+    return {"status": "ok", "filter": normalized_status, "limit": bounded_limit, "count": len(rows), "actions": [dict(row) for row in rows]}
+
+
 async def sync_collection_action_queue(
     conn,
     source_matrix: dict[str, Any],

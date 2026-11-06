@@ -145,10 +145,16 @@ async def tiktok_revisit_result(request):
         return _cors(web.json_response({"ok": False, "error": "missing content_id"}, status=400))
     raw_status = str(body.get("status") or "").strip().lower()
     reason = str(body.get("reason") or raw_status or "unknown")[:300]
-    success = raw_status in {"success", "ok", "stored", "completed"}
+    try:
+        stored = int(body.get("stored") or 0)
+    except (TypeError, ValueError):
+        stored = 0
+    success = raw_status in {"success", "ok", "stored", "completed"} and stored > 0
     unavailable = raw_status in {"unavailable", "private", "deleted", "no_media", "missing_revisit_url"}
     deferred = raw_status == "deferred"
     status = "pending" if deferred else ("completed" if success else ("unavailable" if unavailable else "failed"))
+    if raw_status in {"success", "ok", "stored", "completed"} and not success:
+        reason = "zero_store_result"
     try:
         claim_attempt = int(body.get("claim_attempt")) if body.get("claim_attempt") is not None else None
     except (TypeError, ValueError):

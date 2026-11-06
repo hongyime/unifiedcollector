@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Keep the collector Chrome cgroup fail-closed: it can use loopback only.
+set -Eeuo pipefail
+
+chain=UC_BROWSER_EGRESS
+cgroup_path=/user.slice/user-1000.slice/user@1000.service/unifiedcollector.slice/unifiedcollector-browser.slice
+ready=/run/unifiedcollector-browser-egress-guard.ready
+
+apply_family() {
+  local tool=$1 reject=$2
+  "$tool" -w -N "$chain" 2>/dev/null || true
+  "$tool" -w -F "$chain"
+  "$tool" -w -A "$chain" -o lo -j RETURN
+  "$tool" -w -A "$chain" -j REJECT --reject-with "$reject"
+  "$tool" -w -C OUTPUT -m cgroup --path "$cgroup_path" -j "$chain" 2>/dev/null || \
+    "$tool" -w -I OUTPUT 1 -m cgroup --path "$cgroup_path" -j "$chain"
+}
+
+remove_family() {
+  local tool=$1
+  while "$tool" -w -C OUTPUT -m cgroup --path "$cgroup_path" -j "$chain" 2>/dev/null; do
+    "$tool" -w -D OUTPUT -m cgroup --path "$cgroup_path" -j "$chain"
+  done
+  "$tool" -w -F "$chain" 2>/dev/null || true
+  "$tool" -w -X "$chain" 2>/dev/null || true
+}
+
+case ${1:-} in
+  apply)
+    apply_family /usr/sbin/iptables icmp-port-unreachable
+    apply_family /usr/sbin/ip6tables icmp6-port-unreachable
+    install -D -m 0644 /dev/null "$ready"
+    ;;
+  remove)
+    rm -f "$ready"
+    remove_family /usr/sbin/ip6tables
+    remove_family /usr/sbin/iptables
+    ;;
+  *)
+    echo "usage: $0 {apply|remove}" >&2
+    exit 2
+    ;;
+esac

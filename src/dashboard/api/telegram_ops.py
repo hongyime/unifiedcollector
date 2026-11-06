@@ -262,14 +262,10 @@ async def disable_telegram_account(
     _user: dict = Depends(require_role("admin")),
 ):
     """Disable a Telegram account (stops collection but keeps session)."""
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        result = await conn.execute(
-            "UPDATE telegram_user_accounts SET status = 'disabled' WHERE name = $1",
-            name,
-        )
-        if result == "UPDATE 0":
-            raise HTTPException(404, "Account not found")
+    from src.core.telegram_account_controls import set_telegram_account_enabled
+
+    if not await set_telegram_account_enabled(await get_pool(), name, enabled=False):
+        raise HTTPException(404, "Account not found")
 
     return {"status": "disabled", "name": name}
 
@@ -280,17 +276,10 @@ async def enable_telegram_account(
     _user: dict = Depends(require_role("admin")),
 ):
     """Re-enable a disabled Telegram account."""
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        result = await conn.execute(
-            "UPDATE telegram_user_accounts SET status = 'active' WHERE name = $1 AND status = 'disabled'",
-            name,
-        )
-        if result == "UPDATE 0":
-            raise HTTPException(404, "Account not found or not disabled")
+    from src.core.telegram_account_controls import set_telegram_account_enabled
 
-        # Notify collector
-        await conn.execute("SELECT pg_notify('telegram_account_added', $1)", name)
+    if not await set_telegram_account_enabled(await get_pool(), name, enabled=True):
+        raise HTTPException(404, "Account not found or not disabled")
 
     return {"status": "enabled", "name": name}
 

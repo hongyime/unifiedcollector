@@ -16,9 +16,9 @@ compose=(docker compose --env-file "$root/.env" -f "$root/docker/docker-compose.
 dump=$evidence/task-53-production-forward-db.dump
 checksum=$dump.sha256
 temporary=$dump.in-progress
-writers=(collector_paypal collector_whatsapp wa-bridge-1 wa-bridge-2 recon_egress_guard collector_spiderfoot)
-writer_containers=(unifiedcollector_collector_paypal unifiedcollector_collector_whatsapp unifiedcollector_wa_bridge_1 unifiedcollector_wa_bridge_2 unifiedcollector_recon_egress_guard unifiedcollector_spiderfoot)
-resume_containers=(unifiedcollector_wa_bridge_1 unifiedcollector_wa_bridge_2 unifiedcollector_collector_whatsapp unifiedcollector_collector_paypal unifiedcollector_recon_egress_guard unifiedcollector_spiderfoot)
+writers=(collector_whatsapp wa-bridge-1 wa-bridge-2 recon_egress_guard collector_spiderfoot)
+writer_containers=(unifiedcollector_collector_whatsapp unifiedcollector_wa_bridge_1 unifiedcollector_wa_bridge_2 unifiedcollector_recon_egress_guard unifiedcollector_spiderfoot)
+resume_containers=(unifiedcollector_wa_bridge_1 unifiedcollector_wa_bridge_2 unifiedcollector_collector_whatsapp unifiedcollector_recon_egress_guard unifiedcollector_spiderfoot)
 writers_may_be_stopped=false
 
 resume_writers() {

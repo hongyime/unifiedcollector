@@ -18,7 +18,7 @@ def test_airbnb_feeder_requires_a_direct_numeric_user_id_link():
 
 
 def test_cross_platform_probe_budget_counts_only_supported_social_targets():
-    assert "existing.source IN ('snapchat', 'paypal', 'pinterest')" in _FEED_SQL
+    assert "existing.source IN ('snapchat', 'pinterest')" in _FEED_SQL
     assert "HAVING count(DISTINCT existing.source) < 3" in _FEED_SQL
     social_candidates = _FEED_SQL.split("social_candidates AS (")[1].split("),\nraw_candidates", 1)[0]
     assert "('bluesky')" not in social_candidates

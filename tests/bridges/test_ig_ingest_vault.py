@@ -139,7 +139,7 @@ def test_social_ingest_lanes_classify_fast_and_write_paths():
     assert ig_ingest._social_ingest_lane_for_path("/social/browser-heartbeat") == "heartbeat"
     assert ig_ingest._social_ingest_lane_for_path("/social/ingest") == "write"
     assert ig_ingest._social_ingest_lane_for_path("/social/browser-revisit-target") == "revisit"
-    assert ig_ingest._social_ingest_lane_for_path("/social/dm-sample") == "dm_sample"
+    assert ig_ingest._social_ingest_lane_for_path("/social/retired-endpoint") is None
 
 
 @pytest.mark.asyncio
@@ -1350,6 +1350,35 @@ def test_ingest_records_explicit_empty_media_probe(monkeypatch):
     ]
 
 
+def test_restricted_instagram_empty_probe_persists_recovery_observation(monkeypatch):
+    pool = _FakePool()
+    observations = []
+
+    async def fake_event(*_args, **_kwargs):
+        return None
+
+    async def fake_observation(_pool, source, *, account):
+        observations.append((source, account))
+
+    monkeypatch.setattr(ig_ingest, "_record_browser_ingest_event", fake_event)
+    monkeypatch.setattr(ig_ingest, "mark_recovery_observation", fake_observation)
+
+    asyncio.run(
+        ig_ingest._ingest(
+            {"pool": pool},
+            "instagram",
+            {
+                "username": "owner",
+                "items": [],
+                "record_empty": True,
+                "probe_reason": "restricted_following_feed_dom_observation",
+            },
+        )
+    )
+
+    assert observations == [("instagram", "owner")]
+
+
 def test_empty_media_probe_marks_browser_content_progress():
     assert ig_ingest._browser_event_marks_source_success(
         "facebook",
@@ -1604,40 +1633,40 @@ def test_browser_heartbeat_handler_returns_when_telemetry_db_is_stuck(monkeypatc
     assert resp.status == 200
 
 
-def test_dm_hook_heartbeat_fails_open_when_db_is_stuck(monkeypatch):
-    monkeypatch.setattr(ig_ingest, "DM_HOOK_HEARTBEAT_WRITE_TIMEOUT_SECONDS", 0.01)
-    req = _FakeRequest(
-        {"pool": _StuckPool()},
-        {
-            "platform": "tiktok",
-            "owner": "hongyime",
-            "probes_sent": 1,
-            "samples_shipped": 0,
-            "extension_version": "1.21.92",
-        },
-    )
-
-    resp = asyncio.run(ig_ingest.dm_hook_heartbeat_handler(req))
-
-    assert resp.status == 200
-    payload = json.loads(resp.text)
-    assert payload["ok"] is True
-    assert payload["recorded"] is False
-    assert payload["telemetry_degraded"] is True
-    assert payload["reason"] == "db_write_timeout"
-
-
-def test_instagram_dm_collection_endpoint_is_gone_and_legacy_samples_are_rejected():
+def test_direct_message_collection_routes_are_gone():
     from src.bridges.ig_ingest.app import build_app
 
     app = build_app()
     paths = {route.resource.canonical for route in app.router.routes()}
-    assert "/social/dms" not in paths
+    assert not {
+        "/social/dms",
+        "/social/dm-frame",
+        "/social/dm-sample",
+        "/social/dm-probe",
+        "/social/dm-heartbeat",
+        "/social/dm-decoded",
+    } & paths
+    assert "/social/recovery-clean-pass" in paths
 
-    req = _FakeRequest({}, {"platform": "instagram", "b64": "AAAA"})
-    resp = asyncio.run(ig_ingest.dm_sample_handler(req))
-    assert resp.status == 400
-    assert json.loads(resp.text)["error"] == "unsupported_platform"
+
+def test_recovery_clean_pass_uses_bridge_auth_path_and_source_wide_profile(monkeypatch):
+    from src.bridges.ig_ingest.recovery import recovery_clean_pass_handler
+    from src.core import recovery_profiles
+
+    calls = []
+
+    async def fake_clean_pass(pool, source, *, account):
+        calls.append((pool, source, account))
+        return {"state": "normal", "clean": 3}
+
+    monkeypatch.setattr(recovery_profiles, "record_clean_recovery_pass", fake_clean_pass)
+    pool = object()
+    response = asyncio.run(
+        recovery_clean_pass_handler(_FakeRequest({"pool": pool}, {"source": "instagram", "account": "owner"}))
+    )
+
+    assert json.loads(response.text) == {"ok": True, "state": "normal", "clean_passes": 3, "normal": True}
+    assert calls == [(pool, "instagram", "owner")]
 
 
 def test_ig_cooldown_fails_open_when_db_is_stuck(monkeypatch):
@@ -1718,6 +1747,36 @@ def test_profile_handler_skips_only_explicitly_verified_targets(platform):
 
     assert json.loads(resp.text) == {"ok": True, "excluded_verified": True}
     assert req.app["pool"].conn.executes == []
+
+
+def test_browser_profile_canary_never_queues_an_unqualified_image_download(monkeypatch):
+    events = []
+
+    async def archive(*_args):
+        return None
+
+    async def save(*_args):
+        return True
+
+    async def record_event(*_args, **kwargs):
+        events.append(kwargs)
+
+    async def ingest(*_args):
+        raise AssertionError("browser profile canaries must not use generic media ingestion")
+
+    monkeypatch.setattr(ig_ingest, "_archive_browser_capture", archive)
+    monkeypatch.setattr(ig_ingest, "_save_profile", save)
+    monkeypatch.setattr(ig_ingest, "_record_browser_ingest_event", record_event)
+    monkeypatch.setattr(ig_ingest, "_ingest", ingest)
+    req = _FakeRequest(
+        {"pool": _FakePool(), "tasks": set()},
+        {"platform": "tiktok", "profile": {"username": "alice", "profile_pic_url": "https://evil.example/a.jpg"}},
+    )
+
+    response = asyncio.run(ig_ingest.profile_handler(req))
+
+    assert json.loads(response.text) == {"ok": True}
+    assert events == [{"observed_count": 1, "stored_count": 1}]
 
 
 @pytest.mark.parametrize(
@@ -2366,7 +2425,7 @@ def test_strava_route_queue_handler_returns_timeout_payload(monkeypatch):
     assert payload["account"] == "72101656"
 
 
-def test_archive_browser_capture_writes_dm_sample_raw_payload(monkeypatch):
+def test_archive_browser_capture_keeps_unknown_endpoint_subject_generic(monkeypatch):
     pool = _FakePool()
     calls = []
 
@@ -2380,7 +2439,7 @@ def test_archive_browser_capture_writes_dm_sample_raw_payload(monkeypatch):
         ig_ingest._archive_browser_capture(
             pool,
             "tiktok",
-            "dm_sample",
+            "custom_sample",
             {
                 "platform": "tiktok",
                 "owner": "bryan",
@@ -2396,10 +2455,10 @@ def test_archive_browser_capture_writes_dm_sample_raw_payload(monkeypatch):
     assert len(calls) == 1
     call = calls[0]
     assert call["source"] == "tiktok"
-    assert call["artifact_id"].startswith("extension/dm_sample/bryan_websocket_binary_2048/")
-    assert call["target_tables"] == ["dm_probe_log"]
+    assert call["artifact_id"].startswith("extension/custom_sample/custom_sample/")
+    assert call["target_tables"] == []
     assert call["payload"]["b64"] == "AAAA"
-    assert call["metadata"]["endpoint"] == "dm_sample"
+    assert call["metadata"]["endpoint"] == "custom_sample"
     assert call["metadata"]["body_keys"] == [
         "b64",
         "decoded_bytes",
@@ -2413,10 +2472,10 @@ def test_archive_browser_capture_writes_dm_sample_raw_payload(monkeypatch):
     query, args = pool.conn.executes[0]
     assert "DELETE FROM dead_letter_queue" in query
     assert "browser raw archive failed:%" in query
-    assert args == ("tiktok", "bryan_websocket_binary_2048")
+    assert args == ("tiktok", "custom_sample")
 
 
-def test_archive_browser_capture_writes_decoded_dm_target_hints(monkeypatch):
+def test_archive_browser_capture_keeps_unknown_decoded_payload_generic(monkeypatch):
     pool = _FakePool()
     calls = []
 
@@ -2430,7 +2489,7 @@ def test_archive_browser_capture_writes_decoded_dm_target_hints(monkeypatch):
         ig_ingest._archive_browser_capture(
             pool,
             "tiktok",
-            "dm_decoded",
+            "custom_decoded",
             {
                 "platform": "tiktok",
                 "owner": "72101656",
@@ -2442,8 +2501,8 @@ def test_archive_browser_capture_writes_decoded_dm_target_hints(monkeypatch):
 
     assert len(calls) == 1
     call = calls[0]
-    assert call["artifact_id"].startswith("extension/dm_decoded/9988/")
-    assert call["target_tables"] == ["tiktok_dm_thread", "tiktok_dm"]
+    assert call["artifact_id"].startswith("extension/custom_decoded/custom_decoded/")
+    assert call["target_tables"] == []
     assert call["payload"]["messages"][0]["message_id"] == "9988"
     assert call["metadata"]["collection_account"] == "72101656"
 
@@ -2530,6 +2589,43 @@ def test_strava_stream_response_status_treats_empty_stream_as_processed():
     assert ig_ingest._strava_stream_response_status(
         {"stored": 0, "reason": "other"}
     ) == 422
+
+
+def test_strava_empty_200_defers_then_becomes_terminal():
+    pool = _FakePool()
+    pool.conn.fetchrow_result = {"empty_count": 1, "stream_status": None}
+    first = asyncio.run(
+        ig_ingest._upsert_strava_browser_stream(
+            pool,
+            {"activity_id": "42", "http_status": 200, "streams": {"latlng": []}},
+        )
+    )
+    assert first["reason"] == "empty_stream_deferred"
+    assert "interval '24 hours'" in pool.conn.fetchrows[0][0]
+
+    pool.conn.fetchrow_result = {"empty_count": 2, "stream_status": "truncated_empty"}
+    second = asyncio.run(
+        ig_ingest._upsert_strava_browser_stream(
+            pool,
+            {"activity_id": "42", "http_status": 200, "streams": {"latlng": []}},
+        )
+    )
+    assert second["reason"] == "truncated_empty"
+
+
+def test_tiktok_zero_store_revisit_is_never_completed():
+    pool = _FakePool()
+    response = asyncio.run(
+        ig_ingest.tiktok_revisit_result(
+            _FakeRequest(
+                {"pool": pool},
+                {"content_id": "video_1", "claim_attempt": 1, "status": "success", "stored": 0},
+            )
+        )
+    )
+    assert json.loads(response.text)["status"] == "failed"
+    assert pool.conn.executes[0][1][1] == "failed"
+    assert pool.conn.executes[0][1][2] == "zero_store_result"
 
 
 def test_owner_account_for_follow_accepts_dict_and_string_owner():

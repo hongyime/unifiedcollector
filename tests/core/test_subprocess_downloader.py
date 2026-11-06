@@ -46,6 +46,19 @@ def test_output_summary_classifies_timeout_and_cancel():
     assert _result(cancelled=True).output_summary(80) == "process cancelled"
 
 
+def test_check_tool_uses_bounded_lru_cache(monkeypatch):
+    calls = []
+    subprocess_downloader.check_tool.cache_clear()
+    monkeypatch.setattr(subprocess_downloader.shutil, "which", lambda name: calls.append(name) or "/bin/tool")
+
+    assert subprocess_downloader.check_tool("fixture-tool") is True
+    assert subprocess_downloader.check_tool("fixture-tool") is True
+
+    assert calls == ["fixture-tool", "fixture-tool"]
+    assert subprocess_downloader.check_tool.cache_info().maxsize == 16
+    subprocess_downloader.check_tool.cache_clear()
+
+
 @pytest.mark.asyncio
 async def test_yt_dlp_download_disables_update_check(monkeypatch, tmp_path):
     monkeypatch.setattr(subprocess_downloader, "check_tool", lambda name: True)

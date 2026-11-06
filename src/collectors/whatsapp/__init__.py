@@ -39,11 +39,13 @@ import hmac
 import json
 import logging
 import os
+import random
 import re
 import time
 import zipfile
 from pathlib import Path
 from datetime import datetime, timezone
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 import httpx
@@ -59,9 +61,36 @@ from src.core.user_change_tracker import (
 from src.core.link_extractor import extract_all_links
 from src.core.file_naming import sanitize_name
 from src.core.raw_archive import report_raw_archive_result
-from src.core.vault import VAULT_ROOT, write_atomic_artifact, write_raw_payload
+from src.core.profile_media import (
+    approved_profile_image_url,
+    download_qualified_profile_image,
+    profile_image_extension,
+    write_qualified_profile_image,
+)
+from src.core.vault import (
+    VAULT_ROOT,
+    historical_media_storage_gate,
+    write_atomic_artifact,
+    write_raw_payload,
+)
 
 logger = logging.getLogger(__name__)
+
+def _is_whatsapp_profile_photo_url(url: str) -> bool:
+    return approved_profile_image_url(url, ("whatsapp.net",))
+
+
+def _profile_photo_extension(content_type: str, data: bytes) -> str | None:
+    return profile_image_extension(content_type, data)
+
+_WHATSAPP_GROUP_INVITE_RE = re.compile(
+    r"^https://chat\.whatsapp\.com/([A-Za-z0-9]{20,64})(?:[/?#].*)?$", re.IGNORECASE,
+)
+
+
+def _whatsapp_group_invite_code(url: str) -> str | None:
+    match = _WHATSAPP_GROUP_INVITE_RE.fullmatch(url.strip())
+    return match.group(1) if match else None
 
 
 def _wa_staging_enabled() -> bool:
@@ -208,6 +237,10 @@ class WhatsappCollector(BaseCollector):
 
         self._change_tracker = ChangeTracker()
         self._link_discovery_enabled = os.getenv("WHATSAPP_LINK_DISCOVERY_ENABLED", "true").lower() == "true"
+        self._invite_accept_wid = os.getenv("WHATSAPP_INVITE_ACCEPT_WID", "").strip()
+        self._invite_accept_min_delay = max(1, int(os.getenv("WHATSAPP_INVITE_ACCEPT_MIN_DELAY", "30")))
+        self._invite_accept_jitter = max(0, int(os.getenv("WHATSAPP_INVITE_ACCEPT_JITTER", "15")))
+        self._next_invite_accept_at = 0.0
         _spider_sessions = os.getenv("WHATSAPP_SPIDER_SESSIONS", "")
         self._spider_sessions: set[str] = (
             {s.strip().lower() for s in _spider_sessions.split(",") if s.strip()}
@@ -216,6 +249,7 @@ class WhatsappCollector(BaseCollector):
         self._last_pairing_wait_log = 0.0
         self._last_source_health_status: tuple[str, str] | None = None
         self._last_source_health_write = 0.0
+        self._history_lane_sync_at: dict[str, float] = {}
         # Send-side intentionally dropped: no bulk_send_enabled / hourly cap /
         # daily cap / membership gating. This collector is RECEIVE-ONLY.
 
@@ -314,6 +348,9 @@ class WhatsappCollector(BaseCollector):
 
         if self._session_bridges:
             tasks.append(asyncio.create_task(self._bridge_pairing_health_loop()))
+            tasks.append(asyncio.create_task(self._history_lane_sync_loop()))
+            if self._invite_accept_wid:
+                tasks.append(asyncio.create_task(self._link_approval_loop()))
         tasks.append(asyncio.create_task(self._media_archival_loop()))
 
         try:
@@ -1162,6 +1199,55 @@ class WhatsappCollector(BaseCollector):
                     """, chat_jid, name, participant_count, description)
             except Exception as fallback_exc:
                 logger.debug("group metadata fallback upsert failed: %s", fallback_exc)
+                return
+
+        await self._upsert_group_members(chat_jid, event)
+
+    async def _upsert_group_members(self, chat_jid: str, event: dict) -> None:
+        """Persist membership changes emitted by the connected WhatsApp account."""
+        participants = event.get("participants")
+        if not self.pool or not isinstance(participants, list):
+            return
+        action = str(event.get("action") or "snapshot").strip().lower()
+        members: list[tuple[str, str]] = []
+        for item in participants:
+            if isinstance(item, str):
+                jid, role = item, "member"
+            elif isinstance(item, dict):
+                jid = str(item.get("id") or item.get("jid") or "")
+                admin = str(item.get("admin") or "").lower()
+                role = "admin" if admin in {"admin", "superadmin"} else "member"
+            else:
+                continue
+            if jid:
+                members.append((jid, role))
+        if not members:
+            return
+        try:
+            async with self.pool.acquire() as conn:
+                if action == "remove":
+                    await conn.execute(
+                        "UPDATE whatsapp_group_members SET is_active=FALSE, removed_at=NOW(), last_seen_at=NOW() "
+                        "WHERE platform_chat_id=$1 AND participant_jid = ANY($2::text[])",
+                        chat_jid, [jid for jid, _role in members],
+                    )
+                    return
+                for jid, role in members:
+                    await conn.execute(
+                        "INSERT INTO whatsapp_group_members (platform_chat_id, participant_jid, role, is_active, removed_at) "
+                        "VALUES ($1, $2, $3, TRUE, NULL) "
+                        "ON CONFLICT (platform_chat_id, participant_jid) DO UPDATE SET "
+                        "role=EXCLUDED.role, is_active=TRUE, removed_at=NULL, last_seen_at=NOW()",
+                        chat_jid, jid, role,
+                    )
+                if action == "snapshot":
+                    await conn.execute(
+                        "UPDATE whatsapp_group_members SET is_active=FALSE, removed_at=NOW(), last_seen_at=NOW() "
+                        "WHERE platform_chat_id=$1 AND is_active AND NOT (participant_jid = ANY($2::text[]))",
+                        chat_jid, [jid for jid, _role in members],
+                    )
+        except Exception as exc:
+            logger.debug("group membership upsert failed: %s", exc)
 
     async def _process_broker_delivery(self, message, targets: list[str]) -> None:
         """Decode and dispatch one broker delivery; nack/requeue on failure.
@@ -1191,6 +1277,7 @@ class WhatsappCollector(BaseCollector):
             # so scale the timeout by the batch size (bounded).
             if isinstance(body, dict) and isinstance(body.get("messages"), list):
                 batch_session = body.get("session_name")
+                batch_account_wid = body.get("account_wid")
                 batch_msgs = body["messages"]
                 batch_timeout = min(
                     max(self._handler_timeout, self._handler_timeout * len(batch_msgs) / 4),
@@ -1202,6 +1289,9 @@ class WhatsappCollector(BaseCollector):
                             break
                         if batch_session and "session_name" not in m:
                             m["session_name"] = batch_session
+                        if batch_account_wid and "account_wid" not in m:
+                            m["account_wid"] = batch_account_wid
+                        m["_history_sync"] = True
                         await self._handle_message_event(m, targets)
             else:
                 async with asyncio.timeout(self._handler_timeout):
@@ -1221,7 +1311,7 @@ class WhatsappCollector(BaseCollector):
             except Exception:
                 pass
 
-    async def _handle_message_event(self, event: dict, targets: list[str]):
+    async def _handle_message_event(self, event: dict, targets: list[str], *, retry_media: bool = False):
         # WhatsApp "delete for everyone" (revoke) — flag the original message + when.
         if event.get("deletion"):
             rid_for_archive = event.get("revoked_message_id") or event.get("message_id") or event.get("key", {}).get("id", "")
@@ -1257,6 +1347,14 @@ class WhatsappCollector(BaseCollector):
                     logger.debug("wa deletion update failed for %s", rid, exc_info=True)
             return
 
+        if event.get("reaction"):
+            await self._handle_reaction_event(event, targets)
+            return
+
+        if event.get("poll"):
+            await self._handle_poll_event(event, targets)
+            return
+
         msg_id = event.get("message_id") or event.get("key", {}).get("id", "")
         chat_jid = event.get("chat_jid") or event.get("key", {}).get("remoteJid", "")
 
@@ -1283,7 +1381,7 @@ class WhatsappCollector(BaseCollector):
         # _mark_dedupe_complete after every required effect (message
         # persistence plus media/outbox work) completes; claiming it here
         # previously stranded markers over unpersisted messages on failure.
-        if await self._is_duplicate(msg_id, chat_jid):
+        if not retry_media and await self._is_duplicate(msg_id, chat_jid):
             return
 
         chat_name = event.get("chat_name") or event.get("pushName") or chat_jid.split("@")[0]
@@ -1312,6 +1410,17 @@ class WhatsappCollector(BaseCollector):
         async with self.pool.acquire() as conn:
             async with conn.transaction():
                 await self._upsert_message(event, chat_jid, sender_uuid, conn=conn)
+                account_wid = event.get("account_wid")
+                if account_wid:
+                    from src.core.backfill_lanes import mirror_backfill_lane
+                    await mirror_backfill_lane(
+                        conn,
+                        source=self.SOURCE_NAME,
+                        account_identity=str(account_wid),
+                        target_identity=chat_jid,
+                        cursor={"message_id": msg_id, "timestamp": event.get("timestamp")},
+                        complete=False,
+                    )
                 if media_required and not media_already_saved:
                     await self._ensure_media_work_item(conn, msg_id, chat_jid, session)
         self._progress_count += 1
@@ -1329,6 +1438,14 @@ class WhatsappCollector(BaseCollector):
             await self._complete_media_work_item(msg_id)
             await self._mark_dedupe_complete(msg_id, chat_jid)
             return
+
+        if event.get("_history_sync"):
+            storage = historical_media_storage_gate(VAULT_ROOT)
+            if not storage.allowed:
+                await self._defer_media_for_storage(msg_id, storage.reason or "storage reserve active")
+                await self._mark_dedupe_complete(msg_id, chat_jid)
+                logger.warning("WhatsApp historical media paused: %s", storage.reason)
+                return
 
         # 3. Required media is not saved yet: download + save now. Every
         # non-terminal outcome leaves the pending work item in place and
@@ -1389,6 +1506,106 @@ class WhatsappCollector(BaseCollector):
             await self._mark_dedupe_complete(msg_id, chat_jid)
             return
         raise _MediaPending(f"media download returned no data for {cid}; work item left pending")
+
+    async def _handle_reaction_event(self, event: dict, targets: list[str]) -> None:
+        chat_jid = event.get("chat_jid") or ""
+        target_message_id = event.get("target_message_id") or ""
+        actor_jid = event.get("actor_jid") or ""
+        if not chat_jid or not target_message_id or not actor_jid:
+            return
+        if targets and "*" not in targets and "all" not in targets and not any(
+            target.lower() in chat_jid.lower() for target in targets
+        ):
+            return
+        reaction_message_id = event.get("reaction_message_id") or event.get("message_id") or ""
+        await self._archive_raw_event(
+            artifact_id=f"reactions/{chat_jid}/{target_message_id}/{reaction_message_id or actor_jid}",
+            payload=event,
+            target_tables=["whatsapp_reactions"],
+            metadata={
+                "platform_chat_id": chat_jid,
+                "target_message_id": target_message_id,
+                "ingest_path": self.INGEST_PATH,
+                "raw_payload_kind": "reaction",
+            },
+        )
+        try:
+            reacted_at = datetime.fromtimestamp(float(event.get("timestamp")), tz=timezone.utc)
+        except (TypeError, ValueError, OSError):
+            reacted_at = datetime.now(timezone.utc)
+        emoji = event.get("emoji") if isinstance(event.get("emoji"), str) and event["emoji"].strip() else None
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO whatsapp_reactions (
+                    platform_chat_id, target_message_id, actor_jid, emoji,
+                    reaction_message_id, reacted_at, removed_at, session_name, updated_at
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+                ON CONFLICT (platform_chat_id, target_message_id, actor_jid) DO UPDATE SET
+                    emoji=EXCLUDED.emoji,
+                    reaction_message_id=COALESCE(EXCLUDED.reaction_message_id, whatsapp_reactions.reaction_message_id),
+                    reacted_at=EXCLUDED.reacted_at,
+                    removed_at=EXCLUDED.removed_at,
+                    session_name=COALESCE(EXCLUDED.session_name, whatsapp_reactions.session_name),
+                    updated_at=NOW()
+                """,
+                chat_jid, target_message_id, actor_jid, emoji, reaction_message_id or None,
+                reacted_at, reacted_at if emoji is None else None, event.get("session_name"),
+            )
+
+    async def _handle_poll_event(self, event: dict, targets: list[str]) -> None:
+        message_id = event.get("message_id") or ""
+        chat_jid = event.get("chat_jid") or ""
+        if not message_id or not chat_jid:
+            return
+        if targets and "*" not in targets and "all" not in targets and not any(
+            target.lower() in chat_jid.lower() for target in targets
+        ):
+            return
+        await self._archive_raw_event(
+            artifact_id=f"polls/{chat_jid}/{message_id}",
+            payload=event,
+            target_tables=["whatsapp_polls", "whatsapp_messages"],
+            metadata={
+                "platform_message_id": message_id,
+                "platform_chat_id": chat_jid,
+                "ingest_path": self.INGEST_PATH,
+                "raw_payload_kind": "poll",
+            },
+        )
+        if await self._is_duplicate(message_id, chat_jid):
+            return
+        try:
+            created_at = datetime.fromtimestamp(float(event.get("timestamp")), tz=timezone.utc)
+        except (TypeError, ValueError, OSError):
+            created_at = datetime.now(timezone.utc)
+        options = event.get("options") if isinstance(event.get("options"), list) else []
+        await self._upsert_chat(chat_jid, event.get("chat_name") or chat_jid.split("@")[0], event)
+        sender_uuid = await self._track_user_profile(event)
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                await self._upsert_message(event, chat_jid, sender_uuid, conn=conn)
+                await conn.execute(
+                    """
+                    INSERT INTO whatsapp_polls (
+                        platform_message_id, platform_chat_id, creator_jid, question, options,
+                        selectable_options_count, poll_type, created_at, session_name, updated_at
+                    ) VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, NOW())
+                    ON CONFLICT (platform_message_id) DO UPDATE SET
+                        question=COALESCE(NULLIF(EXCLUDED.question, ''), whatsapp_polls.question),
+                        options=CASE WHEN EXCLUDED.options = '[]'::jsonb THEN whatsapp_polls.options ELSE EXCLUDED.options END,
+                        selectable_options_count=COALESCE(EXCLUDED.selectable_options_count, whatsapp_polls.selectable_options_count),
+                        poll_type=EXCLUDED.poll_type,
+                        created_at=COALESCE(EXCLUDED.created_at, whatsapp_polls.created_at),
+                        session_name=COALESCE(EXCLUDED.session_name, whatsapp_polls.session_name),
+                        updated_at=NOW()
+                    """,
+                    message_id, chat_jid, event.get("sender_jid"), event.get("question") or "",
+                    json.dumps(options), event.get("selectable_options_count"),
+                    event.get("poll_type") or "poll", created_at, event.get("session_name"),
+                )
+        self._progress_count += 1
+        await self._mark_dedupe_complete(message_id, chat_jid)
 
     async def _archive_raw_event(
         self,
@@ -1457,7 +1674,7 @@ class WhatsappCollector(BaseCollector):
     async def _upsert_message(self, event: dict, chat_jid: str, sender_uuid: str | None,
                               conn=None):
         msg_id = event.get("message_id") or event.get("key", {}).get("id", "")
-        text = event.get("body") or event.get("text") or event.get("caption")
+        text = event.get("body") or event.get("text") or event.get("caption") or event.get("question")
         timestamp = event.get("timestamp")
         dt = datetime.fromtimestamp(timestamp, tz=timezone.utc) if timestamp else datetime.now(timezone.utc)
         from_me = _coerce_bool(_first_nonempty(
@@ -1557,6 +1774,24 @@ class WhatsappCollector(BaseCollector):
         except Exception:
             logger.warning("wa media work-item failure mark failed for %s", msg_id, exc_info=True)
 
+    async def _defer_media_for_storage(self, msg_id: str, reason: str) -> None:
+        if self.pool is None:
+            return
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE dead_letter_queue
+                    SET error_message=$3, next_retry_at=NOW() + interval '5 minutes', status='pending'
+                    WHERE source=$1 AND content_id=$2 AND status IN ('pending', 'in_progress')
+                    """,
+                    self.SOURCE_NAME,
+                    f"wa_{msg_id}",
+                    f"historical media storage paused: {reason}",
+                )
+        except Exception:
+            logger.warning("wa media storage deferral failed for %s", msg_id, exc_info=True)
+
     async def _media_retry_exhausted(self, msg_id: str, reason: str) -> bool:
         """Advance one durable media attempt and terminalize only at its cap."""
         if self.pool is None:
@@ -1602,6 +1837,71 @@ class WhatsappCollector(BaseCollector):
         if not msg_id:
             return None
         return f"whatsapp://{chat_jid}/{msg_id}"
+
+    async def _download_profile_photo_canary(self, url: str) -> tuple[bytes, str]:
+        return await download_qualified_profile_image(url, allowed_host_suffixes=("whatsapp.net",))
+
+    async def _profile_photo_readback(self, content_id: str, sha256: str, file_path: Path) -> bool:
+        if not self.pool or not file_path.is_file() or self.sha256_bytes(file_path.read_bytes()) != sha256:
+            return False
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT sha256, file_path FROM media_items WHERE source=$1 AND content_id=$2",
+                self.SOURCE_NAME, content_id,
+            )
+        return bool(row and row["sha256"] == sha256 and Path(row["file_path"]).is_file())
+
+    async def accept_profile_photo_canary(self, *, entity_id: str, provider_url: str) -> dict:
+        """Accept one previously proven WhatsApp avatar into vault and media ledger."""
+        if not self.pool or not re.fullmatch(r"\d{7,15}@s\.whatsapp\.net", entity_id):
+            raise ValueError("canonical WhatsApp contact and database pool are required")
+        data, extension = await self._download_profile_photo_canary(provider_url)
+        sha256 = self.sha256_bytes(data)
+        content_id = f"profile_avatar_{sha256}"
+        artifact, sha256 = write_qualified_profile_image(
+            source=self.SOURCE_NAME,
+            artifact_id=f"profile_photo/{entity_id}/{sha256}",
+            data=data,
+            extension=extension,
+            metadata={
+                "entity_id": entity_id,
+                "entity_name": entity_id,
+                "content_type": "profile_photo",
+                "content_id": content_id,
+                "provenance": "baileys_profile_picture_canary",
+                "provider_url_host": urlsplit(provider_url).hostname,
+                "provider_url_sha256": hashlib.sha256(provider_url.encode()).hexdigest(),
+                "rebuild_target_tables": ["media_items", "whatsapp_users"],
+            },
+            root=VAULT_ROOT,
+        )
+        stored = await self.insert_media_item(
+            entity_id=entity_id,
+            entity_name=entity_id,
+            content_type="profile_photo",
+            content_id=content_id,
+            filename=artifact.path.name,
+            file_path=str(artifact.path),
+            file_size=artifact.file_size,
+            sha256=sha256,
+            source_url=f"whatsapp://profile/{entity_id}",
+            metadata={
+                "provenance": "baileys_profile_picture_canary",
+                "provider_url_host": urlsplit(provider_url).hostname,
+                "provider_url_sha256": hashlib.sha256(provider_url.encode()).hexdigest(),
+                "vault_artifact": {
+                    "path": artifact.relative_path,
+                    "blob_path": artifact.blob_relative_path,
+                    "sidecar_path": artifact.sidecar.relative_path if artifact.sidecar else None,
+                    "duplicate_blob": artifact.duplicate_blob,
+                },
+            },
+        )
+        if not stored and not await self._profile_photo_readback(content_id, sha256, artifact.path):
+            raise RuntimeError("profile-photo media ledger did not accept the atomic artifact")
+        if not await self._profile_photo_readback(content_id, sha256, artifact.path):
+            raise RuntimeError("profile-photo media reconciliation readback failed")
+        return {"content_id": content_id, "sha256": sha256, "file_path": str(artifact.path)}
 
     async def _save_media(self, data: bytes, cid: str, chat_jid: str,
                            chat_name: str, content_type: str, ext: str,
@@ -1850,6 +2150,7 @@ class WhatsappCollector(BaseCollector):
                             continue
 
                         saw_ready_bridge = True
+                        await self._sync_history_lanes(client, session_name, bridge_url, health.get("wid"))
                         resp = await client.get(
                             f"{bridge_url}/messages/recent",
                             params={"limit": self._backfill_batch},
@@ -1898,6 +2199,159 @@ class WhatsappCollector(BaseCollector):
                     logger.warning(detail)
 
             await asyncio.sleep(self._backfill_poll)
+
+    async def _sync_history_lanes(self, client, session_name: str, bridge_url: str, account_wid: str | None) -> None:
+        """Mirror persisted bridge watermarks at most once per minute."""
+        if not account_wid or time.monotonic() - self._history_lane_sync_at.get(session_name, 0) < 60:
+            return
+        resp = await client.get(f"{bridge_url}/history/watermarks", headers=self._bridge_headers())
+        if resp.status_code != 200:
+            await self._record_http_event(
+                session_name=session_name, scope="history_watermarks", status_code=resp.status_code,
+                reason=f"WhatsApp history watermark HTTP {resp.status_code}", metadata={"bridge_url": bridge_url},
+            )
+            return
+        payload = resp.json()
+        if str(payload.get("account_wid") or "") != str(account_wid):
+            logger.warning("Skipping WhatsApp history lanes for %s: bridge identity changed", session_name)
+            return
+        watermarks = payload.get("watermarks")
+        if not isinstance(watermarks, list):
+            return
+        from src.core.backfill_lanes import mirror_backfill_lane
+        async with self.pool.acquire() as conn:
+            for watermark in watermarks:
+                chat_jid = str(watermark.get("chat_jid") or "")
+                if not chat_jid:
+                    continue
+                await mirror_backfill_lane(
+                    conn,
+                    source=self.SOURCE_NAME,
+                    account_identity=str(account_wid),
+                    target_identity=chat_jid,
+                    cursor={
+                        "oldest_timestamp": watermark.get("oldest_timestamp"),
+                        "message_count": watermark.get("message_count"),
+                        "last_sync_at": watermark.get("last_sync_at"),
+                    },
+                    complete=bool(watermark.get("complete")),
+                )
+        self._history_lane_sync_at[session_name] = time.monotonic()
+
+    async def _history_lane_sync_loop(self) -> None:
+        """Mirror bridge-persisted cursors even while RabbitMQ handles events."""
+        while not self._stop.is_set():
+            try:
+                async with httpx.AsyncClient(timeout=15) as client:
+                    for session_name, bridge_url in self._session_bridges.items():
+                        if self._stop.is_set():
+                            break
+                        response = await client.get(f"{bridge_url}/health")
+                        if response.status_code != 200:
+                            continue
+                        health = response.json()
+                        if health.get("whatsapp_ready") or str(health.get("status") or "").lower() in {"connected", "ok"}:
+                            await self._sync_history_lanes(
+                                client, session_name, bridge_url, health.get("wid"),
+                            )
+            except Exception:
+                logger.debug("WhatsApp history-lane sync failed", exc_info=True)
+            await asyncio.sleep(30)
+
+    async def _link_approval_loop(self) -> None:
+        """Sequentially accept a canonical group invite for the authorized Bridge-1 identity."""
+        while not self._stop.is_set():
+            try:
+                await self._process_link_approval_once()
+                await self._activate_joined_link_approvals()
+            except Exception:
+                logger.debug("WhatsApp link approval loop failed", exc_info=True)
+            await asyncio.sleep(10)
+
+    async def _process_link_approval_once(self) -> None:
+        if not self.pool or not self._invite_accept_wid:
+            return
+        if time.monotonic() < self._next_invite_accept_at:
+            return
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """UPDATE link_approvals SET state='approved', approved_at=now(), updated_at=now(),
+                       metadata=metadata || '{"join_policy":"automatic"}'::jsonb
+                   WHERE source='whatsapp' AND account_name=$1 AND state='pending'
+                     AND expires_at > now()
+                     AND target_url ~ '^https://chat\\.whatsapp\\.com/[A-Za-z0-9]{20,64}([?#].*)?$'""",
+                self._invite_accept_wid,
+            )
+            row = await conn.fetchrow(
+                """UPDATE link_approvals SET state='joining', started_at=now(), updated_at=now()
+                   WHERE id=(SELECT id FROM link_approvals WHERE source='whatsapp'
+                     AND account_name=$1 AND state='approved' AND expires_at > now()
+                     ORDER BY requested_at FOR UPDATE SKIP LOCKED LIMIT 1)
+                   RETURNING id, target_url""",
+                self._invite_accept_wid,
+            )
+        if not row:
+            return
+        self._next_invite_accept_at = time.monotonic() + self._invite_accept_min_delay + random.uniform(
+            0, self._invite_accept_jitter,
+        )
+        approval_id, target_url = row["id"], str(row["target_url"])
+        invite_code = _whatsapp_group_invite_code(target_url)
+        if not invite_code:
+            await self._finish_link_approval(approval_id, "failed", "invalid WhatsApp group invite")
+            return
+        bridge_url = await self._invite_bridge_url()
+        if not bridge_url:
+            await self._finish_link_approval(approval_id, "failed", "authorized WhatsApp bridge unavailable")
+            return
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.post(
+                    f"{bridge_url}/invite/accept", headers=self._bridge_headers(),
+                    json={"invite_code": invite_code},
+                )
+            payload = response.json()
+            if response.status_code != 200 or payload.get("status") != "joined":
+                await self._finish_link_approval(approval_id, "failed", str(payload.get("error") or f"HTTP {response.status_code}"))
+                return
+            await self._finish_link_approval(
+                approval_id, "joined", None,
+                {"bridge_slot": "1", "group_jid": payload.get("group_jid"),
+                 "snapshot_published": bool(payload.get("snapshot_published"))},
+            )
+        except Exception as exc:
+            await self._finish_link_approval(approval_id, "failed", str(exc)[:500])
+
+    async def _invite_bridge_url(self) -> str | None:
+        async with httpx.AsyncClient(timeout=10) as client:
+            for _session, bridge_url in self._session_bridges.items():
+                response = await client.get(f"{bridge_url}/health")
+                if response.status_code == 200 and response.json().get("wid") == self._invite_accept_wid:
+                    return bridge_url
+        return None
+
+    async def _finish_link_approval(self, approval_id, state: str, error: str | None, metadata: dict | None = None) -> None:
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """UPDATE link_approvals SET state=$2, completed_at=now(), updated_at=now(), last_error=$3,
+                       metadata=metadata || $4::jsonb WHERE id=$1""",
+                approval_id, state, error, json.dumps(metadata or {}),
+            )
+
+    async def _activate_joined_link_approvals(self) -> None:
+        if not self.pool or not self._invite_accept_wid:
+            return
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """UPDATE link_approvals approval SET state='collection_active', completed_at=now(), updated_at=now(),
+                       metadata=metadata || '{\"snapshot_durable\":true,\"history_lane_active\":true}'::jsonb
+                   WHERE source='whatsapp' AND account_name=$1 AND state='joined'
+                     AND EXISTS (SELECT 1 FROM whatsapp_chats chat
+                                 WHERE chat.platform_chat_id=approval.metadata->>'group_jid')
+                     AND EXISTS (SELECT 1 FROM backfill_lanes lane
+                                 WHERE lane.source='whatsapp' AND lane.target_identity=approval.metadata->>'group_jid')""",
+                self._invite_accept_wid,
+            )
 
     @staticmethod
     def _format_pairing_wait_detail(
@@ -2114,6 +2568,16 @@ class WhatsappCollector(BaseCollector):
                             """,
                             chat_uuid, url, domain, effective_kind,
                         )
+                        if effective_kind == "group_invite" and self._invite_accept_wid and _whatsapp_group_invite_code(url):
+                            await conn.execute(
+                                """INSERT INTO link_approvals (source, target_url, account_name, state, approved_at, metadata)
+                                   SELECT 'whatsapp', $1, $2, 'approved', now(),
+                                          '{\"bridge_slot\":\"1\",\"join_policy\":\"automatic\"}'::jsonb
+                                   WHERE NOT EXISTS (SELECT 1 FROM link_approvals WHERE source='whatsapp'
+                                     AND target_url=$1 AND account_name=$2
+                                     AND state NOT IN ('rejected', 'failed', 'expired'))""",
+                                url, self._invite_accept_wid,
+                            )
                     except Exception as e:
                         logger.debug("wa_discovered_links insert skipped (%s): %s", url, e)
         except Exception as e:

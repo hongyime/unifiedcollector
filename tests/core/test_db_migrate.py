@@ -12,6 +12,7 @@ def test_real_migrations_create_rollup_function_before_narrowing_its_trigger():
     assert names.index("add_media_items_ingest_path.sql") < names.index("20260906_recreate_dashboard_matrix_aggregate_indexes.sql")
     assert names.index("add_follow_edges.sql") < names.index("20260930_add_follow_edges_position.sql")
     assert names.index("add_telegram_phase1.sql") < names.index("20261016_add_telegram_poll_voter_refresh.sql")
+    assert names.index("add_tiktok_dm.sql") < names.index("20261104_disable_dm_capture_and_repair_revisits.sql")
     assert set(names) == {path.name for path in migrate.MIGRATIONS_DIR.glob("*.sql")}
 
 

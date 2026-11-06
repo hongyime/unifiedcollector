@@ -21,17 +21,9 @@ to work.
 from aiohttp import web
 
 from .constants import SOCIAL_INGEST_CLIENT_MAX_MB
-from .cookies import cookies_handler
 from .cooldown import ig_cooldown
 from .cors import handle_options
 from .discover import discover, discover_ig
-from .dm import (
-    dm_decoded_handler,
-    dm_frame_handler,
-    dm_hook_heartbeat_handler,
-    dm_probe_handler,
-    dm_sample_handler,
-)
 from .ingest import (
     browser_media_candidates,
     ingest,
@@ -47,6 +39,15 @@ from .middleware import (
     request_timeout_middleware,
 )
 from .native_scrape import native_scrape_ingest, native_scrape_target
+from .recovery import recovery_clean_pass_handler
+from .routes.generic import (
+    comments_handler,
+    posts_handler,
+    profile_handler,
+    seed_handler,
+    target_status_handler,
+    users_handler,
+)
 from .revisit import (
     browser_revisit_result,
     browser_revisit_target,
@@ -65,21 +66,14 @@ from .x_profile import x_profile_target_next, x_profile_target_result
 
 def build_app():
     """Assemble the aiohttp ``Application`` with routes + middlewares."""
-    # Handlers still living in ``__init__.py`` (target_status_handler,
-    # posts_handler, comments_handler, users_handler, profile_handler,
-    # seed_handler, health, _on_startup, _on_cleanup) are
+    # Lifecycle handlers still live in ``__init__.py`` (health, _on_startup,
+    # _on_cleanup) and are
     # imported lazily to avoid the circular that would form if this file
     # were imported at ``__init__.py`` load time.
     from . import (
         _on_cleanup,
         _on_startup,
-        comments_handler,
         health,
-        posts_handler,
-        profile_handler,
-        seed_handler,
-        target_status_handler,
-        users_handler,
     )
 
     app = web.Application(
@@ -109,12 +103,7 @@ def build_app():
     app.router.add_post("/social/users", users_handler)
     app.router.add_post("/social/profile", profile_handler)
     app.router.add_post("/social/seed", seed_handler)
-    app.router.add_post("/social/cookies", cookies_handler)
-    app.router.add_post("/social/dm-frame", dm_frame_handler)
-    app.router.add_post("/social/dm-sample", dm_sample_handler)
-    app.router.add_post("/social/dm-probe", dm_probe_handler)
-    app.router.add_post("/social/dm-heartbeat", dm_hook_heartbeat_handler)
-    app.router.add_post("/social/dm-decoded", dm_decoded_handler)
+    app.router.add_post("/social/recovery-clean-pass", recovery_clean_pass_handler)
     app.router.add_get("/social/x-profile-target", x_profile_target_next)
     app.router.add_post("/social/x-profile-target-result", x_profile_target_result)
     app.router.add_get("/social/browser-revisit-target", browser_revisit_target)

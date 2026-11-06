@@ -109,10 +109,10 @@ async function render() {
   list.innerHTML = platforms
     .map((p) => {
       const login = p.noLogin
-        ? badge("login", "idle", p.id === "airbnb" ? "public listings; Wishlists need login" : "public data; login optional")
-        : p.loggedIn === true ? badge("login", "ok", "logged in")
-        : p.loggedIn === false ? badge("login", "bad", "not logged in")
-        : badge("login", "idle", "login unknown");
+        ? badge("login", "idle", "sign-in not required")
+        : p.loggedIn === true ? badge("login", "ok", "signed in · session verified")
+        : p.loggedIn === false ? badge("login", "bad", "not signed in")
+        : badge("login", "idle", "session unknown");
       const tab = p.tabOpen ? badge("tab", "ok", "tab open") : badge("tab", "idle", "no tab");
       const scr = p.scraper
         ? `<span class="pill">scraper ready</span>`
@@ -143,7 +143,8 @@ async function render() {
   $("note").innerHTML =
     `<b>Scrapers available:</b> ${scrapers}. A listed scraper runs only while its matching tab is open; ` +
     `a platform with no tab is paused. Availability does not mean it is collecting right now. ` +
-    `Public data may not need sign-in; Airbnb Wishlists do. One tab per social platform.`;
+    `Session badges check only for a first-party session cookie; they do not read or show its value. ` +
+    `Collection receipts are separate evidence. One tab per social platform.`;
   maybeAutoProbe(backgroundError);
 }
 

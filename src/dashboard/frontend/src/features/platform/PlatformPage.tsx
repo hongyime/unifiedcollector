@@ -14,7 +14,7 @@ const SPECIALIZED: Record<string, { to: string; label: string }[]> = {
   whatsapp: [{ to: "/whatsapp/chats", label: "Chats" }, { to: "/whatsapp/link", label: "Link device" }, { to: "/whatsapp/links", label: "Links" }],
   discord: [{ to: "/discord/chats", label: "Chats" }],
   beeper: [{ to: "/beeper/chats", label: "Chats" }],
-  tiktok: [{ to: "/tiktok/feed", label: "Feed" }, { to: "/tiktok/dms", label: "Messages" }],
+  tiktok: [{ to: "/tiktok/feed", label: "Feed" }],
 };
 
 function Stat({ label, value, sub }: { label: string; value: string | number; sub?: string }) {

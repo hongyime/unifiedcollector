@@ -13,6 +13,10 @@ from datetime import datetime, timezone
 
 import httpx
 
+from src.core.bluesky_stream_canary import (
+    run_bluesky_profile_change_stream,
+    run_bluesky_stream_canary,
+)
 from src.core.profile_only_collector import ProfileOnlyCollector, ProfileResult
 
 logger = logging.getLogger(__name__)
@@ -36,6 +40,35 @@ def _parse_indexed_at(value: object) -> datetime | None:
 class BlueskyCollector(ProfileOnlyCollector):
     SOURCE_NAME = "bluesky"
     PROFILE_TABLE = "bluesky_profiles"
+
+    async def run_native_cycle(self) -> dict:
+        """Refresh only tracked profiles after a verified stream receipt."""
+        canary = await run_bluesky_stream_canary(self.pool)
+        stream = await run_bluesky_profile_change_stream(self.pool)
+        dids = stream.get("profile_dids") or []
+        if not dids or self.pool is None:
+            return {"processed": 0, "canary": canary, "stream": stream}
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT did, username FROM bluesky_profiles WHERE did = ANY($1::text[])
+                UNION
+                SELECT username AS did, username FROM profile_probe_queue
+                 WHERE source='bluesky' AND username = ANY($1::text[])
+                """,
+                dids,
+            )
+        tracked = {str(row["did"]): str(row["username"]) for row in rows}
+        refreshed = 0
+        for did in dids:
+            username = tracked.get(did)
+            if not username:
+                continue
+            result = await self.probe_profile(did)
+            if result.exists and not result.error:
+                await self._upsert_profile(username, result)
+                refreshed += 1
+        return {"processed": refreshed, "canary": canary, "stream": stream}
 
     async def probe_profile(self, username: str) -> ProfileResult:
         headers = {

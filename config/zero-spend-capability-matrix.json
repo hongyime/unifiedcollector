@@ -111,14 +111,6 @@
       "zero_spend_reason": "Self-hosted client; no paid data vendor or fallback."
     },
     {
-      "service": "collector_paypal",
-      "provider": "PayPal public profile/web endpoints",
-      "charge_status": "No direct per-request billing path in configured client",
-      "credentials_required": "Public pages; user session where available",
-      "effective_enablement": "enabled",
-      "zero_spend_reason": "No transaction or paid API operation is invoked by collection."
-    },
-    {
       "service": "collector_airbnb",
       "provider": "Airbnb public web/client API",
       "charge_status": "No external paid data provider configured; provider API terms/rate risk remains",

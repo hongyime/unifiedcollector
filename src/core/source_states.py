@@ -24,7 +24,8 @@ Usage:
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from enum import Enum
 
 logger = logging.getLogger(__name__)
@@ -84,6 +85,35 @@ _ERROR_STATES = frozenset({
 })
 
 
+def provider_failure(exc: Exception) -> tuple[int | None, str | None]:
+    """Extract a provider status and Retry-After without depending on one HTTP client."""
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None) or getattr(exc, "status_code", None)
+    try:
+        status = int(status) if status is not None else None
+    except (TypeError, ValueError):
+        status = None
+    headers = getattr(response, "headers", {}) or {}
+    retry_after = headers.get("Retry-After") if hasattr(headers, "get") else None
+    return status, str(retry_after) if retry_after is not None else None
+
+
+def provider_backoff_seconds(retry_after: str | None, failures: int, *, cap_seconds: int = 21600) -> int:
+    """Honor a provider Retry-After when supplied, otherwise use capped exponential backoff."""
+    seconds: float | None = None
+    if retry_after:
+        try:
+            seconds = float(retry_after)
+        except ValueError:
+            try:
+                seconds = (parsedate_to_datetime(retry_after) - datetime.now(timezone.utc)).total_seconds()
+            except (TypeError, ValueError, IndexError, OverflowError):
+                pass
+    if seconds is None:
+        seconds = 30 * (2 ** max(0, failures - 1))
+    return max(1, min(cap_seconds, int(seconds)))
+
+
 async def set_source_state(
     pool,
     source: str,
@@ -140,3 +170,37 @@ async def set_source_state(
         )
     except Exception:
         logger.error("set_source_state failed for %s (%s)", source, state.value, exc_info=True)
+
+
+async def clear_automatic_source_state(conn, source: str) -> None:
+    """Clear a recovered provider block without ever resuming an operator pause."""
+    await conn.execute(
+        """
+        UPDATE source_controls
+        SET state='HEALTHY', blocked_until=NULL, stop_reason=NULL,
+            consecutive_failures=0, last_success=NOW(), updated_at=NOW()
+        WHERE source_name=$1 AND state <> 'PAUSED'
+        """,
+        source,
+    )
+
+
+async def record_provider_block(pool, source: str, exc: Exception, *, failures: int) -> int | None:
+    """Persist a 401/403/429 cooldown and return its bounded retry delay."""
+    status, retry_after = provider_failure(exc)
+    if status not in {401, 403, 429}:
+        return None
+    delay = provider_backoff_seconds(retry_after, failures)
+    state = SourceState.RATE_LIMITED if status == 429 else SourceState.AUTH_FAILED
+    try:
+        async with pool.acquire() as conn:
+            await set_source_state(
+                conn,
+                source,
+                state,
+                blocked_until=datetime.now(timezone.utc) + timedelta(seconds=delay),
+                stop_reason=f"HTTP {status}; retry in {delay}s",
+            )
+    except Exception:
+        logger.warning("Failed to record provider block for %s", source, exc_info=True)
+    return delay

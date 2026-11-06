@@ -80,6 +80,23 @@ DEFAULT_MAIGRET_HTTP_TIMEOUT_SECONDS = "10"
 DEFAULT_MAIGRET_TARGET_TIMEOUT_SECONDS = "420"
 SOURCE_HEALTH_NAME = "spiderfoot"
 SUPPORTED_TYPES = {"domain", "ip", "ipv4", "email", "username", "user", "url", "phone"}
+
+
+async def _kill_and_collect_timeout_output(proc) -> tuple[bytes, bytes]:
+    """Kill a timed-out process and collect pipes without extending its timeout."""
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (AttributeError, ProcessLookupError):
+        try:
+            proc.kill()
+        except Exception:
+            pass
+    try:
+        return await asyncio.wait_for(proc.communicate(), timeout=5)
+    except Exception:
+        return b"", b""
+
+
 def allowed_modules(raw: str | None = None) -> list[str]:
     modules = [item.strip() for item in (raw or os.getenv("SPIDERFOOT_MODULES") or "").split(",") if item.strip()]
     modules = modules or list(DEFAULT_MODULES)
@@ -863,11 +880,7 @@ async def _run_maigret_subprocess(
                 proc.communicate(), timeout=timeout_seconds
             )
         except asyncio.TimeoutError:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except (AttributeError, ProcessLookupError):
-                proc.kill()
-            await proc.communicate()
+            await _kill_and_collect_timeout_output(proc)
             retain_reports(Path(tmpdir))
             raise RuntimeError(
                 f"maigret timed out after {timeout_seconds}s for {username}"
@@ -1198,11 +1211,7 @@ async def _run_spiderfoot_cli(
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_seconds)
     except asyncio.TimeoutError:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except (AttributeError, ProcessLookupError):
-            proc.kill()
-        partial_stdout, partial_stderr = await proc.communicate()
+        partial_stdout, partial_stderr = await _kill_and_collect_timeout_output(proc)
         store_private_evidence("spiderfoot", ".timeout.stdout.json", partial_stdout)
         if partial_stderr:
             store_private_evidence("spiderfoot", ".timeout.stderr.log", partial_stderr)

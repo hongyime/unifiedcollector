@@ -617,15 +617,6 @@ _DYNAMIC_TERM_SOURCE_QUERIES = (
            AND (name IS NOT NULL OR pushname IS NOT NULL OR about IS NOT NULL)
          ORDER BY updated_at DESC LIMIT $1
     """),
-    ("paypal_profiles", """
-        SELECT 'paypal' AS platform, username AS source_reference,
-               username, display_name AS full_name, NULL::text AS text_blob,
-               ARRAY[]::text[] AS hashtags
-          FROM paypal_profiles
-         WHERE probed_at >= now() - interval '90 days'
-           AND (username IS NOT NULL OR display_name IS NOT NULL)
-         ORDER BY probed_at DESC LIMIT $1
-    """),
 )
 
 ICON_KEYWORDS = _parse_ICON_KEYWORDS

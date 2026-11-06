@@ -7,6 +7,7 @@ import type {
   CollectorOperationsResponse,
   CollectorDetail,
   SourceCollectionMatrix,
+  SourceRecoveryProfile,
   MediaItem,
   MediaStats,
   RealtimeFeedStatus,
@@ -38,8 +39,6 @@ import type {
   FollowEdgeStat,
   PlatformSummary,
   MessagingCoverageRow,
-  TtDmThread,
-  TtDmMessage,
   TtProfile,
   TtProfileDetail,
   ThreadsProfile,
@@ -128,6 +127,7 @@ export const api = {
   updateFeedControl: (platform: string, enabled: boolean, interval_hours: number) =>
     put(`/collectors/feed-controls/${encodeURIComponent(platform)}`, { enabled, interval_hours }),
   sourceMatrix: () => get<SourceCollectionMatrix>("/collectors/source-matrix"),
+  sourceRecovery: () => get<SourceRecoveryProfile[]>("/api/source-recovery"),
   collectorDetail: (source: string) => get<CollectorDetail>(`/collectors/${source}`),
 
   media: (source?: string, limit = 50) => {
@@ -213,18 +213,6 @@ export const api = {
   waChat: (jid: string, limit = 200) =>
     get<WaChatDetail>(
       `/whatsapp/chat/${encodeURIComponent(jid)}?limit=${limit}`,
-    ),
-
-  // TikTok DMs — backed by tiktok_dm{,_thread}
-  // populated by the extension's client-side protobuf decoder.
-  ttDmThreads: (owner?: string, limit = 100) => {
-    const params = new URLSearchParams({ limit: String(limit) });
-    if (owner) params.set("owner", owner);
-    return get<TtDmThread[]>(`/tiktok/dms/threads?${params}`);
-  },
-  ttDmThread: (threadId: string) =>
-    get<{ thread: TtDmThread | null; messages: TtDmMessage[] }>(
-      `/tiktok/dms/thread/${encodeURIComponent(threadId)}`,
     ),
 
   // TikTok public feed (profiles + posts). List sorts by follower count DESC;

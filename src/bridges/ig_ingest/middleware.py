@@ -6,7 +6,7 @@ around every request:
 
 1. ``request_timeout_middleware`` — path-tuned ``asyncio.timeout`` wrapper.
 2. ``lane_isolation_middleware`` — per-lane semaphores so heartbeat/write/
-   revisit/dm_sample traffic can't starve each other.
+   revisit traffic can't starve each other.
 3. ``db_pool_middleware`` — lazy DB-pool bootstrap (delegates to the
    startup-state helpers still defined in ``__init__.py`` — those move to
    ``pool.py`` in step 3 of the split plan).
@@ -41,10 +41,6 @@ _STRUCTURED_CAPTURE_PATHS = {
     "/social/native-scrape",
     "/social/comments",
     "/social/discover",
-    "/social/dm-decoded",
-    "/social/dm-frame",
-    "/social/dm-probe",
-    "/social/dm-sample",
     "/social/posts",
     "/social/profile",
     "/social/seed",
@@ -58,7 +54,6 @@ _STRUCTURED_CAPTURE_PATHS = {
 
 _HEARTBEAT_LANE_PATHS = {
     "/social/browser-heartbeat",
-    "/social/dm-heartbeat",
 }
 _REVISIT_LANE_PATHS = {
     "/social/browser-revisit-target",
@@ -69,19 +64,12 @@ _REVISIT_LANE_PATHS = {
     "/social/x-profile-target",
     "/social/x-profile-target-result",
 }
-_DM_SAMPLE_LANE_PATHS = {
-    "/social/dm-sample",
-}
 _WRITE_LANE_PATHS = {
     "/ig/discover",
     "/ig/ingest",
     "/social/browser-media-candidates",
     "/social/comments",
-    "/social/cookies",
     "/social/discover",
-    "/social/dm-decoded",
-    "/social/dm-frame",
-    "/social/dm-probe",
     "/social/ingest",
     "/social/ingest-upload",
     "/social/ingest-upload-binary",
@@ -108,8 +96,6 @@ _FAST_LANE_PATHS = {
 def _social_ingest_lane_for_path(path: str) -> str | None:
     if path in _HEARTBEAT_LANE_PATHS:
         return "heartbeat"
-    if path in _DM_SAMPLE_LANE_PATHS:
-        return "dm_sample"
     if path in _REVISIT_LANE_PATHS:
         return "revisit"
     if path in _WRITE_LANE_PATHS or path in _STRUCTURED_CAPTURE_PATHS:
@@ -238,7 +224,6 @@ async def db_pool_middleware(request, handler):
     if request.method == "OPTIONS" or request.path in {
         "/health",
         "/social/browser-heartbeat",
-        "/social/dm-heartbeat",
     }:
         return await handler(request)
     try:

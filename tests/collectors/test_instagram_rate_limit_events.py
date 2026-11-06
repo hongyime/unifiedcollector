@@ -59,6 +59,16 @@ def _bare_collector():
     return coll
 
 
+@pytest.mark.asyncio
+async def test_run_is_intentional_idle_when_browser_only_mode_is_enabled():
+    coll = _bare_collector()
+    coll._collector_enabled = False
+
+    await coll.run(["target_user"])
+
+    assert coll.intentional_idle_reason == "disabled by INSTAGRAM_COLLECTOR_ENABLED=false"
+
+
 def test_instagram_target_timeout_scales_with_current_limiter_delay(monkeypatch):
     coll = _bare_collector()
     coll.rate_limiter = SimpleNamespace(get_delay=MagicMock(return_value=80.0))
@@ -357,6 +367,29 @@ async def test_handle_rate_limit_records_scoped_event_metadata(monkeypatch):
     assert kwargs["metadata"]["uid"] == "123"
     assert kwargs["metadata"]["endpoint"] == "graphql/query"
     assert kwargs["metadata"]["streak"] == 1
+
+
+@pytest.mark.asyncio
+async def test_restriction_event_enters_durable_recovery_profile(monkeypatch):
+    coll = _bare_collector()
+    event = AsyncMock()
+    recovery = AsyncMock()
+    monkeypatch.setattr(instagram_mod, "record_rate_limit_event", event)
+    monkeypatch.setattr(instagram_mod, "enter_recovery", recovery)
+
+    await coll._record_rate_limit_event(
+        scope="profile_fetch_playwright",
+        status_code=401,
+        reason="challenge/auth response",
+    )
+
+    event.assert_awaited_once()
+    recovery.assert_awaited_once_with(
+        coll.pool,
+        coll.SOURCE_NAME,
+        account="acct1",
+        reason="challenge/auth response",
+    )
 
 
 @pytest.mark.asyncio

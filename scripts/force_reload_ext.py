@@ -6,13 +6,13 @@ import urllib.request
 
 import websocket
 
-CDP = os.getenv("UC_CHROME_CDP_URL", f"http://127.0.0.1:{os.getenv('UC_CHROME_CDP_PORT', '9336')}").rstrip('/')
+CDP = os.getenv("UC_CHROME_CDP_URL", f"http://127.0.0.1:{os.getenv('UC_CHROME_CDP_PORT', '9223')}").rstrip('/')
 
 
 def get_sw():
     targets = json.loads(urllib.request.urlopen(f"{CDP}/json/list").read())
     for t in targets:
-        if t["type"] == "service_worker" and "pkmd" in t["url"]:
+        if t["type"] == "service_worker" and t["url"].endswith("/dist/background.js"):
             return t
     return None
 

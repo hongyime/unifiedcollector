@@ -17,6 +17,7 @@ import type {
   RateLimitRecentSummary,
   BrowserExtensionIssue,
   SourceCollectionMatrixRow,
+  SourceRecoveryProfile,
 } from "../../services/types";
 
 function liveBadgeStatus(status: MediaStats["live"]) {
@@ -49,7 +50,9 @@ const columns: ColumnDef<MediaStats, unknown>[] = [
             <div className="uppercase font-medium text-text-primary">{row.display_name ?? (info.getValue() as string)}</div>
             {row.collection_mode && (
               <div className="text-[10px] uppercase tracking-wide text-text-muted">
-                {row.parent_source ? `${row.collection_mode} · ${row.parent_source}` : row.collection_mode}
+                {row.parent_source
+                  ? `${(row.collection_modes ?? [row.collection_mode]).join(" + ")} · ${row.parent_source}`
+                  : (row.collection_modes ?? [row.collection_mode]).join(" + ")}
               </div>
             )}
           </div>
@@ -142,7 +145,8 @@ const sourceMatrixColumns: ColumnDef<SourceCollectionMatrixRow, unknown>[] = [
           <div>
             <div className="uppercase font-medium text-text-primary">{row.display_name ?? (info.getValue() as string)}</div>
             <div className="text-[10px] uppercase tracking-wide text-text-muted">
-              {row.collection_methods.length ? row.collection_methods.join(" + ") : row.collection_mode ?? "unknown mode"}
+              {(row.collection_modes ?? [row.collection_mode ?? "unknown"]).join(" + ")}
+              {row.collection_methods.length ? ` · ${row.collection_methods.join(" + ")}` : ""}
             </div>
           </div>
         </div>
@@ -160,6 +164,7 @@ const sourceMatrixColumns: ColumnDef<SourceCollectionMatrixRow, unknown>[] = [
           <div>{value == null ? "never" : `${formatDuration(value)} ago`}</div>
           <div className="text-[10px] uppercase tracking-wide text-text-muted truncate max-w-[260px]">
             {row.freshness_basis ?? "-"}
+            {row.freshness_target_seconds != null ? ` · target ${formatDuration(row.freshness_target_seconds)}` : ""}
           </div>
           {row.source_health_status && (
             <div className="text-[10px] uppercase tracking-wide text-text-muted truncate max-w-[260px]">
@@ -169,6 +174,20 @@ const sourceMatrixColumns: ColumnDef<SourceCollectionMatrixRow, unknown>[] = [
                 : row.source_health_updated_at
                   ? ` · updated ${relativeTime(row.source_health_updated_at)}`
                   : ""}
+            </div>
+          )}
+          {row.history_throughput && (
+            <div className="mt-1 text-[10px] text-text-muted normal-case tracking-normal">
+              history {row.history_throughput.active_history_workers} active worker(s)
+              {row.history_throughput.queue_depth != null ? ` · ${formatNumber(row.history_throughput.queue_depth)} queued` : ""}
+              {row.history_throughput.historical_lag_seconds != null
+                ? ` · lag ${formatDuration(row.history_throughput.historical_lag_seconds)}`
+                : ""}
+              {row.history_throughput.accounts.slice(0, 5).map((account) => (
+                <div key={account.account_identity}>
+                  {account.account_identity}: {account.active_claims}/{account.claim_budget} claim(s), {account.write_rate.toFixed(2)} msg/s, {account.flood_waits} FloodWait(s)
+                </div>
+              ))}
             </div>
           )}
         </div>
@@ -464,6 +483,12 @@ export function DashboardPage() {
     refetchInterval: 30_000,
   });
 
+  const { data: sourceRecovery } = useQuery({
+    queryKey: ["source-recovery"],
+    queryFn: api.sourceRecovery,
+    refetchInterval: 30_000,
+  });
+
   const { data: messagingCoverage } = useQuery({
     queryKey: ["messaging-coverage"],
     queryFn: api.messagingCoverage,
@@ -509,6 +534,7 @@ export function DashboardPage() {
   const currentRateLimitEvents = currentSummary?.rate_limits ?? currentHourRows.reduce((s, r) => s + r.rate_limits, 0);
   const currentAccessErrors = currentSummary?.access_errors ?? currentHourRows.reduce((s, r) => s + (r.access_errors ?? 0), 0);
   const currentActiveSources = currentSummary?.active_sources ?? new Set(currentHourRows.map((r) => r.source)).size;
+  const activeRecovery = (sourceRecovery ?? []).filter((profile: SourceRecoveryProfile) => profile.state === "restricted");
   const nowMs = Date.now();
   const activeCursorLimits = (rateLimits?.active ?? []).filter((r) => {
     const expiryMs = r.active_until ? new Date(r.active_until).getTime() : Number.NaN;
@@ -960,6 +986,27 @@ export function DashboardPage() {
               )}
             </div>
           )}
+        </div>
+      )}
+
+      {activeRecovery.length > 0 && (
+        <div className="bg-surface rounded-lg border border-warning/50 p-4 mb-6">
+          <div className="flex items-center gap-2">
+            <ShieldAlert size={16} className="text-warning" />
+            <h2 className="text-xs uppercase tracking-wider text-text-muted">Active source recovery</h2>
+          </div>
+          <div className="mt-3 space-y-2">
+            {activeRecovery.map((profile) => (
+              <div key={`${profile.source_name}:${profile.account_identity ?? "source"}`} className="text-xs text-text-muted">
+                <span className="font-medium text-text-primary uppercase">{profile.source_name}</span>
+                {profile.account_identity ? ` / ${profile.account_identity}` : ""}
+                {` · ${profile.reason ?? "provider restriction"}`}
+                {profile.restricted_until ? ` · expires ${relativeTime(profile.restricted_until)}` : ""}
+                {profile.stale_since ? ` · stale since ${relativeTime(profile.stale_since)}` : ""}
+                {` · clean passes ${profile.clean ?? profile.clean_passes ?? 0}/3`}
+              </div>
+            ))}
+          </div>
         </div>
       )}
 

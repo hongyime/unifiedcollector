@@ -90,6 +90,19 @@ def test_constructor_defaults(collector):
     assert collector._bridge_secret == ""
 
 
+def test_constructor_uses_bounded_invite_jitter(configured_collector, monkeypatch):
+    monkeypatch.setenv("WHATSAPP_INVITE_ACCEPT_MIN_DELAY", "30")
+    monkeypatch.setenv("WHATSAPP_INVITE_ACCEPT_JITTER", "15")
+    collector = configured_collector
+    assert collector._invite_accept_min_delay == 30
+    assert collector._invite_accept_jitter == 15
+
+
+def test_whatsapp_group_invite_code_accepts_only_canonical_group_urls():
+    assert wa_mod._whatsapp_group_invite_code("https://chat.whatsapp.com/AbCdEf0123456789GhIjKl?x=1") == "AbCdEf0123456789GhIjKl"
+    assert wa_mod._whatsapp_group_invite_code("https://wa.me/12345") is None
+
+
 @pytest.mark.asyncio
 async def test_handle_session_event_marks_bridge_health_without_message_freshness(collector):
     await collector._handle_session_event({
@@ -472,6 +485,50 @@ async def test_handle_message_event_dedupes(collector):
 
 
 @pytest.mark.asyncio
+async def test_handle_message_event_persists_reaction_and_removal(collector):
+    event = {
+        "reaction": True,
+        "chat_jid": "123@g.us",
+        "target_message_id": "target-1",
+        "reaction_message_id": "reaction-1",
+        "actor_jid": "456@s.whatsapp.net",
+        "emoji": "👍",
+        "timestamp": 1_700_000_000,
+    }
+    await collector._handle_message_event(event, [])
+    sql, *args = collector._test_conn.execute.await_args.args
+    assert "INSERT INTO whatsapp_reactions" in sql
+    assert args[3] == "👍"
+
+    event["emoji"] = ""
+    await collector._handle_message_event(event, [])
+    _sql, *args = collector._test_conn.execute.await_args.args
+    assert args[3] is None
+    assert args[6] is not None
+
+
+@pytest.mark.asyncio
+async def test_handle_message_event_persists_poll_definition(collector):
+    event = {
+        "poll": True,
+        "message_id": "poll-1",
+        "chat_jid": "123@g.us",
+        "sender_jid": "456@s.whatsapp.net",
+        "question": "Lunch?",
+        "options": ["Yes", "No"],
+        "selectable_options_count": 1,
+        "timestamp": 1_700_000_000,
+    }
+    collector._is_duplicate = AsyncMock(return_value=False)
+    collector._track_user_profile = AsyncMock(return_value="user-1")
+    await collector._handle_message_event(event, [])
+    assert any(
+        "INSERT INTO whatsapp_polls" in call.args[0]
+        for call in collector._test_conn.execute.await_args_list
+    )
+
+
+@pytest.mark.asyncio
 async def test_handle_message_event_archives_raw_payload_before_duplicate(collector, monkeypatch):
     monkeypatch.setenv("COLLECTOR_TIER1_RAW_PAYLOADS_ENABLED", "1")
     calls = []
@@ -585,7 +642,7 @@ async def test_handle_contact_event_upserts_whatsapp_user_without_lid(collector)
 
     await collector._handle_contact_event(event)
 
-    sql, *args = collector._test_conn.execute.await_args.args
+    sql, *args = collector._test_conn.execute.await_args_list[0].args
     assert "INSERT INTO whatsapp_users" in sql
     assert "collected_at = NOW()" in sql
     assert args[:5] == [
@@ -635,6 +692,76 @@ async def test_handle_message_event_text_message_no_media(collector):
     await collector._handle_message_event(event, [])
     # At least chat upsert + message insert happened.
     assert collector._test_conn.execute.await_count >= 2
+
+
+@pytest.mark.asyncio
+async def test_handle_message_event_mirrors_account_scoped_lane(collector):
+    event = {
+        "message_id": "m-lane", "chat_jid": "111@s.whatsapp.net", "body": "history",
+        "timestamp": 1_700_000_000, "account_wid": "15551234567:1@s.whatsapp.net",
+    }
+    collector._is_duplicate = AsyncMock(return_value=False)
+    collector._upsert_chat = AsyncMock()
+    collector._track_user_profile = AsyncMock(return_value="user-uuid")
+    collector._upsert_message = AsyncMock()
+    collector._extract_wa_location = AsyncMock()
+
+    await collector._handle_message_event(event, [])
+
+    lane_call = next(
+        call.args for call in collector._test_conn.execute.await_args_list
+        if "INSERT INTO backfill_lanes" in call.args[0]
+    )
+    assert lane_call[1:4] == ("whatsapp", "15551234567:1@s.whatsapp.net", "111@s.whatsapp.net")
+
+
+@pytest.mark.asyncio
+async def test_sync_history_lanes_mirrors_authenticated_bridge_watermarks(collector):
+    response = MagicMock(status_code=200)
+    response.json.return_value = {
+        "account_wid": "15551234567:1@s.whatsapp.net",
+        "watermarks": [{
+            "chat_jid": "111@g.us", "oldest_timestamp": 1_700_000_000,
+            "message_count": 12, "last_sync_at": "2026-11-02T00:00:00Z", "complete": False,
+        }],
+    }
+    client = MagicMock()
+    client.get = AsyncMock(return_value=response)
+
+    await collector._sync_history_lanes(
+        client, "session_1", "http://bridge", "15551234567:1@s.whatsapp.net",
+    )
+
+    lane_call = next(
+        call.args for call in collector._test_conn.execute.await_args_list
+        if "INSERT INTO backfill_lanes" in call.args[0]
+    )
+    assert lane_call[1:4] == ("whatsapp", "15551234567:1@s.whatsapp.net", "111@g.us")
+    client.get.assert_awaited_once_with("http://bridge/history/watermarks", headers=collector._bridge_headers())
+
+
+@pytest.mark.asyncio
+async def test_history_lane_sync_loop_reads_health_then_mirrors(collector, monkeypatch):
+    collector._session_bridges = {"session_1": "http://bridge"}
+    collector._sync_history_lanes = AsyncMock()
+    health = MagicMock(status_code=200)
+    health.json.return_value = {"whatsapp_ready": True, "wid": "15551234567:1@s.whatsapp.net"}
+    client = MagicMock()
+    client.get = AsyncMock(return_value=health)
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=client)
+    cm.__aexit__ = AsyncMock(return_value=None)
+    monkeypatch.setattr(wa_mod.httpx, "AsyncClient", MagicMock(return_value=cm))
+
+    async def stop_after_first_cycle(_seconds):
+        collector._stop.set()
+
+    monkeypatch.setattr(wa_mod.asyncio, "sleep", stop_after_first_cycle)
+    await collector._history_lane_sync_loop()
+
+    collector._sync_history_lanes.assert_awaited_once_with(
+        client, "session_1", "http://bridge", "15551234567:1@s.whatsapp.net",
+    )
 
 
 @pytest.mark.asyncio
@@ -714,6 +841,38 @@ async def test_handle_message_event_allows_safe_document_media(collector):
     args = collector._save_media.await_args.args
     assert args[4] == "document"
     assert args[5] == "pdf"
+
+
+@pytest.mark.asyncio
+async def test_history_media_defers_when_vault_reserve_is_active(collector, monkeypatch):
+    event = {
+        "message_id": "m-history-image",
+        "chat_jid": "111@s.whatsapp.net",
+        "media_type": "imageMessage",
+        "mediaKey": "k",
+        "directPath": "/image",
+        "_history_sync": True,
+    }
+    collector._is_duplicate = AsyncMock(return_value=False)
+    collector._upsert_chat = AsyncMock()
+    collector._track_user_profile = AsyncMock(return_value="user-uuid")
+    collector._upsert_message = AsyncMock()
+    collector._ensure_media_work_item = AsyncMock()
+    collector._extract_wa_location = AsyncMock()
+    collector._defer_media_for_storage = AsyncMock()
+    collector._mark_dedupe_complete = AsyncMock()
+    collector._download_via_bridge = AsyncMock()
+    monkeypatch.setattr(
+        wa_mod,
+        "historical_media_storage_gate",
+        lambda _root: type("Gate", (), {"allowed": False, "reason": "reserve active"})(),
+    )
+
+    await collector._handle_message_event(event, [])
+
+    collector._defer_media_for_storage.assert_awaited_once_with("m-history-image", "reserve active")
+    collector._mark_dedupe_complete.assert_awaited_once_with("m-history-image", "111@s.whatsapp.net")
+    collector._download_via_bridge.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -839,6 +998,18 @@ async def test_handle_group_event_upserts_group_metadata(collector):
 
 
 @pytest.mark.asyncio
+async def test_handle_group_event_persists_participant_membership(collector):
+    await collector._handle_group_event({
+        "chat_jid": "111-222@g.us",
+        "participants": [{"id": "111@s.whatsapp.net", "admin": "admin"}],
+        "action": "add",
+    })
+
+    calls = collector._test_conn.execute.await_args_list
+    assert any("whatsapp_group_members" in call.args[0] for call in calls)
+
+
+@pytest.mark.asyncio
 async def test_upsert_message_inserts_with_chat_uuid(collector):
     collector._test_conn.fetchrow = AsyncMock(return_value={"id": "chat-uuid"})
     event = {
@@ -927,6 +1098,27 @@ async def test_discover_links_stores_url_domain_and_type(collector):
     assert args[2] == "https://chat.whatsapp.com/InviteCode123"
     assert args[3] == "chat.whatsapp.com"
     assert args[4] == "group_invite"
+
+
+@pytest.mark.asyncio
+async def test_discover_links_auto_approves_canonical_invites_for_authorized_bridge(collector):
+    collector._invite_accept_wid = "1565:1@s.whatsapp.net"
+
+    await collector._discover_links(
+        "join https://chat.whatsapp.com/AbCdEf0123456789GhIjKl",
+        "111@g.us",
+        session="session_2",
+    )
+
+    approval_call = next(
+        call.args for call in collector._test_conn.execute.await_args_list
+        if "INSERT INTO link_approvals" in call.args[0]
+    )
+    assert "'approved'" in approval_call[0]
+    assert approval_call[1:] == (
+        "https://chat.whatsapp.com/AbCdEf0123456789GhIjKl",
+        "1565:1@s.whatsapp.net",
+    )
 
 
 @pytest.mark.asyncio
@@ -1587,6 +1779,39 @@ async def test_save_media_writes_vault_blob_and_links_message(collector, monkeyp
     assert update_args[2] == len(data)
     assert update_args[3] == "msg123"
     collector.send_to_dlq.assert_not_awaited()
+
+
+def test_profile_photo_validation_allows_only_whatsapp_images():
+    assert wa_mod._is_whatsapp_profile_photo_url("https://pps.whatsapp.net/photo")
+    assert not wa_mod._is_whatsapp_profile_photo_url("https://example.test/photo")
+    assert wa_mod._profile_photo_extension("image/jpeg", b"\xff\xd8\xffphoto") == "jpg"
+    assert wa_mod._profile_photo_extension("image/jpeg", b"not-an-image") is None
+
+
+@pytest.mark.asyncio
+async def test_profile_photo_canary_writes_atomic_blob_then_media_ledger(collector, monkeypatch, tmp_path):
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    monkeypatch.setattr(wa_mod, "VAULT_ROOT", vault_root)
+
+    async def download(_url):
+        return b"\xff\xd8\xffprofile-photo", "jpg"
+
+    collector._download_profile_photo_canary = download
+    collector.insert_media_item = AsyncMock(return_value=True)
+    collector._profile_photo_readback = AsyncMock(return_value=True)
+    outcome = await collector.accept_profile_photo_canary(
+        entity_id="15551234567@s.whatsapp.net",
+        provider_url="https://pps.whatsapp.net/photo",
+    )
+
+    assert Path(outcome["file_path"]).is_file()
+    kwargs = collector.insert_media_item.await_args.kwargs
+    assert kwargs["content_type"] == "profile_photo"
+    assert kwargs["sha256"] == hashlib.sha256(b"\xff\xd8\xffprofile-photo").hexdigest()
+    assert kwargs["source_url"] == "whatsapp://profile/15551234567@s.whatsapp.net"
+    assert kwargs["metadata"]["provenance"] == "baileys_profile_picture_canary"
+    assert collector._profile_photo_readback.await_count == 1
 
 
 # ── _cleanup_connections ──────────────────────────────────────────────────

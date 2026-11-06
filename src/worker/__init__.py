@@ -15,8 +15,12 @@ from typing import Any
 from src.collectors import get_collector
 from src.core.collection_priority import proximity_priority_score_sql
 from src.core.drive_check import check_drive, wait_for_drive
+from src.core.dlq_consumer import DeferredError
 from src.core.priority_hints import refresh_collector_priority_hints
 from src.core.proximity import ensure_account_proximity_cache, refresh_account_proximity_cache
+from src.core.vault import VAULT_ROOT, assert_media_write_allowed, historical_media_storage_gate
+from src.core.source_controls import automatic_cooldown_seconds
+from src.core.source_states import clear_automatic_source_state, record_provider_block
 from src.db.connection import get_pool, close_pool
 
 logger = logging.getLogger(__name__)
@@ -317,6 +321,7 @@ class WorkerService:
         self.zero_progress_hard_limit = int(os.getenv("COLLECTOR_ZERO_PROGRESS_HARD_LIMIT", "12"))
         self._auth_paused: dict[str, bool] = {}
         self._auth_pause_since: dict[str, float] = {}
+        self._provider_failures: dict[str, int] = {}
         self.auth_retry_interval = float(os.getenv("COLLECTOR_AUTH_RETRY_INTERVAL_SECONDS", "1800"))
         # Hang kills use a separate counter so repeated hang-and-recover cycles
         # do not consume the crash budget. Reset to 0 on a successful cycle.
@@ -674,6 +679,26 @@ class WorkerService:
         except Exception:
             logger.debug("Failed to heartbeat source_health for %s", source, exc_info=True)
 
+    async def _manual_pause_reason(self, source: str) -> str | None:
+        """A PAUSED/disabled row is an operator decision, never an automatic cooldown."""
+        try:
+            async with self.pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT state, enabled, stop_reason FROM source_controls WHERE source_name=$1", source,
+                )
+        except Exception:
+            return None
+        if row and (row["state"] == "PAUSED" or not row["enabled"]):
+            return str(row["stop_reason"] or "operator pause")
+        return None
+
+    async def _record_provider_block(self, source: str, exc: Exception) -> int | None:
+        failures = self._provider_failures[source] = self._provider_failures.get(source, 0) + 1
+        delay = await record_provider_block(self.pool, source, exc, failures=failures)
+        if delay is None:
+            self._provider_failures.pop(source, None)
+        return delay
+
     def _install_signal_handlers(self):
         loop = asyncio.get_event_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
@@ -696,6 +721,16 @@ class WorkerService:
                 raise PermanentError("DLQ row has no entity_id/content_id")
             if source == "telegram" and await self._retry_telegram_media_dlq(row):
                 return
+            if source == "whatsapp" and await self._retry_whatsapp_media_dlq(row):
+                return
+            if source == "threads":
+                from src.core.dlq_consumer import PermanentError
+                content_id = str(row.get("content_id") or "")
+                if content_id.startswith("raw:"):
+                    raise PermanentError("terminal historical raw archive has no replay input")
+                # Requeue only a normal Threads media revisit after proving its
+                # destination is writable; raw payloads are not replay inputs.
+                assert_media_write_allowed(VAULT_ROOT / "media" / "threads" / ".dlq_write_check")
             await asyncio.wait_for(
                 self._requeue_dlq_target(source, str(entity)),
                 timeout=float(os.getenv("DLQ_TARGET_REQUEUE_TIMEOUT_SECONDS", "20")),
@@ -717,55 +752,77 @@ class WorkerService:
             return False
         chat_id = entity_id or match.group("chat")
         message_id = int(match.group("message"))
+        if str(row.get("error_message") or "").startswith("historical media storage paused:"):
+            storage = historical_media_storage_gate()
+            if not storage.allowed:
+                raise DeferredError(f"historical media storage paused: {storage.reason}")
         collector = self._collectors.get("telegram")
         if collector is None or not hasattr(collector, "download_message_media"):
             return False
         timeout = float(os.getenv("TELEGRAM_DLQ_MEDIA_RETRY_TIMEOUT_SECONDS", "120"))
         workers = list(getattr(collector, "_workers", []) or [])
+        if not workers:
+            # The DLQ starts with the worker service, while Telegram may still
+            # be in its deliberate session-bootstrap settle window.
+            raise DeferredError("telegram workers are not ready", delay_seconds=60)
+        scheduler = getattr(collector, "_history_scheduler", None)
+        if scheduler and any(
+            scheduler.snapshot(worker.account.name).get("active_claims")
+            for worker in workers
+        ):
+            # Exact-media retry can otherwise probe every account while the
+            # bounded history window is using them. Preserve realtime/history
+            # capacity and retry without consuming the DLQ retry budget.
+            raise DeferredError("telegram history claims are active", delay_seconds=300)
         last_error: BaseException | None = None
-        if workers:
-            for worker in workers:
-                try:
-                    ok = await asyncio.wait_for(
-                        collector.download_message_media(
-                            message_id,
-                            worker=worker,
-                            chat_id=chat_id,
-                        ),
-                        timeout=timeout,
-                    )
-                except Exception as exc:  # noqa: BLE001 - worker ownership varies.
-                    last_error = exc
-                    continue
-                if ok:
-                    logger.info(
-                        "telegram DLQ media retry succeeded: chat=%s message=%s content_id=%s",
-                        chat_id,
-                        message_id,
-                        content_id,
-                    )
-                    return True
-        else:
+        for worker in workers:
             try:
                 ok = await asyncio.wait_for(
-                    collector.download_message_media(message_id, chat_id=chat_id),
+                    collector.download_message_media(
+                        message_id,
+                        worker=worker,
+                        chat_id=chat_id,
+                    ),
                     timeout=timeout,
                 )
-            except Exception as exc:  # noqa: BLE001 - preserve retry semantics.
+            except Exception as exc:  # noqa: BLE001 - worker ownership varies.
                 last_error = exc
-            else:
-                if ok:
-                    logger.info(
-                        "telegram DLQ media retry succeeded: chat=%s message=%s content_id=%s",
-                        chat_id,
-                        message_id,
-                        content_id,
-                    )
-                    return True
+                continue
+            if ok:
+                logger.info(
+                    "telegram DLQ media retry succeeded: chat=%s message=%s content_id=%s",
+                    chat_id,
+                    message_id,
+                    content_id,
+                )
+                return True
         raise RuntimeError(
             f"telegram exact media retry returned no media for chat={chat_id} "
             f"message={message_id}: {last_error or 'all workers returned empty'}"
         )
+
+    async def _retry_whatsapp_media_dlq(self, row: dict) -> bool:
+        """Retry a deferred WhatsApp history item from its durable message metadata."""
+        content_id = str(row.get("content_id") or "")
+        if not content_id.startswith("wa_"):
+            return False
+        collector = self._collectors.get("whatsapp")
+        if collector is None or not hasattr(collector, "_handle_message_event"):
+            return False
+        async with self.pool.acquire() as conn:
+            metadata = await conn.fetchval(
+                "SELECT metadata FROM whatsapp_messages WHERE platform_message_id=$1",
+                content_id[3:],
+            )
+        if not isinstance(metadata, dict):
+            return False
+        event = dict(metadata)
+        if event.get("_history_sync"):
+            storage = historical_media_storage_gate()
+            if not storage.allowed:
+                raise DeferredError(f"historical media storage paused: {storage.reason}")
+        await collector._handle_message_event(event, [], retry_media=True)
+        return True
 
     async def _requeue_dlq_target(self, source: str, entity: str) -> None:
         async with self.pool.acquire() as conn:
@@ -922,6 +979,22 @@ class WorkerService:
         while not self._stop.is_set():
             try:
                 self._heartbeat[source] = time.monotonic()
+                pause_reason = await self._manual_pause_reason(source)
+                if pause_reason:
+                    logger.info("worker/%s: waiting for explicit operator resume (%s)", source, pause_reason)
+                    try:
+                        await asyncio.wait_for(self._stop.wait(), timeout=60)
+                    except asyncio.TimeoutError:
+                        pass
+                    continue
+                cooldown = await automatic_cooldown_seconds(self.pool, source)
+                if cooldown:
+                    logger.info("worker/%s: provider cooldown; retrying in %.0fs", source, cooldown)
+                    try:
+                        await asyncio.wait_for(self._stop.wait(), timeout=min(cooldown, 60))
+                    except asyncio.TimeoutError:
+                        pass
+                    continue
                 targets = await self._load_targets(source)
                 is_realtime = source in self.REALTIME_SOURCES
                 if not targets and not is_realtime:
@@ -951,6 +1024,12 @@ class WorkerService:
                 await collector.run(targets)
                 self._heartbeat[source] = time.monotonic()
                 self._crash_counts[source] = 0
+                self._provider_failures.pop(source, None)
+                try:
+                    async with self.pool.acquire() as conn:
+                        await clear_automatic_source_state(conn, source)
+                except Exception:
+                    logger.debug("Failed to clear recovered provider state for %s", source, exc_info=True)
                 self._hang_counts[source] = 0  # successful cycle clears hang budget
                 advanced = collector.progress_count - before
                 idle_reason = getattr(collector, "intentional_idle_reason", None)
@@ -999,6 +1078,14 @@ class WorkerService:
             except asyncio.CancelledError:
                 break
             except Exception as e:
+                provider_delay = await self._record_provider_block(source, e)
+                if provider_delay is not None:
+                    logger.warning("%s: provider block; retrying in %ss: %s", source, provider_delay, _format_exception(e))
+                    try:
+                        await asyncio.wait_for(self._stop.wait(), timeout=provider_delay)
+                    except asyncio.TimeoutError:
+                        pass
+                    continue
                 if self._is_network_error(e):
                     # Confirm a REAL internet outage before alerting. Many
                     # per-source/local errors (e.g. beeper's local Desktop API at

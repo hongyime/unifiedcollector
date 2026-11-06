@@ -123,7 +123,7 @@ def _tiktok_item_limit(value: object, *, default: int) -> int:
 # Module-level toggle for the Playwright browser fallback. Re-read at the call
 # site (via ``os.getenv``) so monkeypatch-based tests can flip it after import.
 TIKTOK_BROWSER_FALLBACK_ENABLED = os.getenv(
-    "TIKTOK_BROWSER_FALLBACK_ENABLED", "true"
+    "TIKTOK_BROWSER_FALLBACK_ENABLED", "false"
 ).lower() == "true"
 
 # Substrings in gallery-dl output that signal "no public videos available" —
@@ -462,7 +462,7 @@ class TiktokCollector(BaseCollector):
         self._max_sleep = float(os.getenv("TIKTOK_MAX_SLEEP", "1.5"))
         self._retries = int(os.getenv("TIKTOK_RETRIES", "2"))
         self._timeout = int(os.getenv("TIKTOK_TIMEOUT_SECONDS", "300"))
-        self._browser_fallback = os.getenv("TIKTOK_BROWSER_FALLBACK_ENABLED", "true").lower() == "true"
+        self._browser_fallback = os.getenv("TIKTOK_BROWSER_FALLBACK_ENABLED", "false").lower() == "true"
         self._ytdlp_fallback = os.getenv("TIKTOK_YTDLP_FALLBACK_ENABLED", "true").lower() == "true"
         self._local_tool_cooldown_until = 0.0
         self._local_tool_cooldown_seconds = int(os.getenv("TIKTOK_LOCAL_TOOL_429_COOLDOWN_SECONDS", "1800"))
@@ -2287,7 +2287,7 @@ class TiktokCollector(BaseCollector):
         """
         # Re-read the module-level flag so monkeypatch.setenv at test time
         # toggles behaviour without re-importing the module.
-        if os.getenv("TIKTOK_BROWSER_FALLBACK_ENABLED", "true").lower() != "true":
+        if os.getenv("TIKTOK_BROWSER_FALLBACK_ENABLED", "false").lower() != "true":
             logger.info(
                 "tiktok fallback playwright: disabled via env for %s", username,
             )

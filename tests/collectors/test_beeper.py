@@ -520,8 +520,8 @@ async def test_writer_update_sync_state_marks_complete():
         newest_cursor="c2",
         backfill_complete=True,
     )
-    conn.execute.assert_awaited_once()
-    args = conn.execute.await_args.args
+    assert conn.execute.await_count == 2
+    args = conn.execute.await_args_list[0].args
     assert args[1] == "!a:b"
     assert args[4] is True  # backfill_complete
 
@@ -1415,6 +1415,16 @@ async def test_get_backfill_items_skips_cycle_on_candidate_timeout(monkeypatch, 
 def test_is_transient_network_error_classifies():
     assert _is_transient_network_error(httpx.ConnectError("getaddrinfo failed"))
     assert _is_transient_network_error(httpx.ConnectTimeout("timed out"))
+
+
+def test_network_is_excluded_from_sync(monkeypatch):
+    from src.collectors.beeper import _network_is_excluded
+
+    monkeypatch.setenv("BEEPER_EXCLUDED_NETWORKS", " instagram, Slack ")
+
+    assert _network_is_excluded("Instagram") is True
+    assert _network_is_excluded("slack") is True
+    assert _network_is_excluded("Telegram") is False
     assert _is_transient_network_error(httpx.ReadTimeout("slow"))
     assert _is_transient_network_error(
         Exception("[Errno -3] Temporary failure in name resolution")

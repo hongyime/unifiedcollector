@@ -1,0 +1,14 @@
+[Unit]
+Description=UnifiedCollector browser pre-send egress proxy
+Before=unifiedcollector-chrome.service
+PartOf=unifiedcollector-chrome.service
+
+[Service]
+ExecStart=/usr/bin/python3 /home/bryan/Projects/unifiedcollector/scripts/uc_browser_egress_proxy.py --policy /home/bryan/.config/unifiedcollector/browser-egress-policy.json
+Restart=always
+RestartSec=2
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=default.target

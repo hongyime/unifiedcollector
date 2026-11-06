@@ -72,20 +72,47 @@ FROM (
 """
 
 SOURCE_MODES = {
-    "telegram": "messaging",
-    "whatsapp": "whatsapp bridge",
-    "beeper": "messaging bridge",
-    "instagram": "chrome extension + headless",
-    "tiktok": "chrome extension + headless",
+    "telegram": "native_realtime",
+    "whatsapp": "native_realtime",
+    "beeper": "native_realtime",
+    "instagram": "near_live_polling",
+    "tiktok": "near_live_polling",
     "lemon8": "headless/backend + optional extension probes",
-    "threads": "chrome extension",
-    "facebook": "chrome extension",
-    "x": "chrome extension",
+    "threads": "near_live_polling",
+    "facebook": "near_live_polling",
+    "x": "near_live_polling",
     "youtube": "headless cookies",
     "website": "headless web crawl",
     "github": "api/headless",
-    "strava": "api cookies + browser route capture",
+    "strava": "near_live_polling",
     "search": "headless web search",
+    "bluesky": "near_live_polling",
+    "pinterest": "near_live_polling",
+    "airbnb": "near_live_polling",
+    "snapchat": "near_live_polling",
+}
+
+# These are capability labels, not marketing labels: a source is never shown
+# as native realtime solely because a browser tab happens to poll frequently.
+SOURCE_MODE_CAPABILITIES = {
+    "telegram": ("native_realtime", "history_backfill"),
+    "whatsapp": ("native_realtime", "history_backfill"),
+    "beeper": ("native_realtime", "history_backfill"),
+    "instagram": ("near_live_polling",),
+    "tiktok": ("near_live_polling",),
+    "lemon8": ("near_live_polling",),
+    "threads": ("near_live_polling",),
+    "facebook": ("near_live_polling",),
+    "x": ("near_live_polling",),
+    "youtube": ("near_live_polling", "history_backfill"),
+    "website": ("near_live_polling", "history_backfill"),
+    "github": ("near_live_polling", "history_backfill"),
+    "strava": ("near_live_polling", "history_backfill"),
+    "search": ("near_live_polling",),
+    "bluesky": ("near_live_polling",),
+    "pinterest": ("near_live_polling",),
+    "airbnb": ("near_live_polling",),
+    "snapchat": ("near_live_polling",),
 }
 
 FRESHNESS: list[tuple[str, str, int]] = [
@@ -149,6 +176,10 @@ FRESHNESS: list[tuple[str, str, int]] = [
     ("github",    GITHUB_PROGRESS_QUERY, 3 * _DAY),
     ("strava",    STRAVA_PROGRESS_QUERY, 3 * _DAY),
     ("search",    "SELECT extract(epoch FROM now()-max(collected_at)) FROM search_results", 3 * _DAY),
+    ("bluesky", "SELECT extract(epoch FROM now()-max(probed_at)) FROM bluesky_profiles", 6 * 3600),
+    ("pinterest", "SELECT extract(epoch FROM now()-max(probed_at)) FROM pinterest_profiles", 6 * 3600),
+    ("airbnb", "SELECT extract(epoch FROM now()-max(probed_at)) FROM airbnb_profiles", 6 * 3600),
+    ("snapchat", "SELECT extract(epoch FROM now()-max(probed_at)) FROM snapchat_profiles", 6 * 3600),
 ]
 FRESHNESS_BY_SOURCE = {name: (query, threshold) for name, query, threshold in FRESHNESS}
 FRESHNESS_BASIS = {
@@ -166,6 +197,10 @@ FRESHNESS_BASIS = {
     "github": "newest GitHub profile, repo, commit, issue, PR review, comment, or edge row",
     "strava": "newest Strava athlete profile, activity, GPS stream, or media row",
     "search": "search_results.collected_at",
+    "bluesky": "bluesky_profiles.probed_at; native stream remains disabled until a durable canary receipt",
+    "pinterest": "pinterest_profiles.probed_at",
+    "airbnb": "airbnb_profiles.probed_at",
+    "snapchat": "snapchat_profiles.probed_at",
 }
 
 # Realtime messaging feeds (surfaced distinctly by some consumers).
@@ -405,6 +440,22 @@ async def _recent_browser_media_yield(conn, timeout: float) -> dict[str, dict] |
         return None
 
 
+async def _recent_bluesky_stream_receipt(conn, timeout: float) -> bool:
+    """Native mode needs both a durable reconnect receipt and a fresh check."""
+    try:
+        return bool(await conn.fetchval(
+            """SELECT EXISTS(
+                   SELECT 1 FROM bluesky_stream_receipts
+                    WHERE source_name='bluesky' AND state='ready'
+                      AND reconnect_cursor IS NOT NULL
+                      AND checked_at >= now() - interval '6 hours'
+               )""",
+            timeout=timeout,
+        ))
+    except Exception:
+        return False
+
+
 async def compute_liveness(conn) -> list[dict]:
     """Return per-source liveness using an open asyncpg connection.
 
@@ -446,6 +497,8 @@ async def compute_liveness(conn) -> list[dict]:
     browser_content_progress = await _latest_browser_content_progress(conn, browser_content_timeout)
     browser_media_timeout = min(per_query_timeout, max(0.25, deadline - time.monotonic()))
     browser_media_yield = await _recent_browser_media_yield(conn, browser_media_timeout)
+    stream_timeout = min(per_query_timeout, max(0.25, deadline - time.monotonic()))
+    bluesky_stream_ready = await _recent_bluesky_stream_receipt(conn, stream_timeout)
     browser_stale_after = _env_int(
         "BROWSER_HEARTBEAT_STALE_WARN_SECONDS",
         _env_int("BROWSER_CONTENT_STALE_WARN_SECONDS", 3600, min_value=300),
@@ -630,13 +683,22 @@ async def compute_liveness(conn) -> list[dict]:
             )
             browser_health_status = browser_health_status or "manual_browser_source"
             browser_health_reason = browser_health_reason or "x_manual_mode"
+        collection_mode = SOURCE_MODES.get(name, "unknown")
+        collection_modes = list(SOURCE_MODE_CAPABILITIES.get(name, (collection_mode,)))
+        freshness_basis = FRESHNESS_BASIS.get(name)
+        if name == "bluesky" and bluesky_stream_ready:
+            collection_mode = "native_realtime"
+            collection_modes = ["native_realtime", *collection_modes]
+            freshness_basis = f"{freshness_basis}; recent durable cursor/reconnect stream receipt"
         out.append({
             "source": name,
             "status": status,
             "age_seconds": int(age) if age is not None else None,
             "stale_after_seconds": thresh,
-            "collection_mode": SOURCE_MODES.get(name, "unknown"),
-            "freshness_basis": FRESHNESS_BASIS.get(name),
+            "collection_mode": collection_mode,
+            "collection_modes": collection_modes,
+            "freshness_target_seconds": thresh,
+            "freshness_basis": freshness_basis,
             "source_health_status": hs,
             "source_health_error": h_error,
             "source_health_last_success_at": h.get("last_success_at"),

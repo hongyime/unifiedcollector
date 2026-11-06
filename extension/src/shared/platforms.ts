@@ -32,6 +32,8 @@ export interface Platform {
   readonly aliasHosts?: readonly string[];
   /** Origin used for `chrome.cookies.get()` lookups. */
   readonly cookieUrl: string;
+  /** Additional first-party origins where the same auth cookie may be scoped. */
+  readonly cookieUrls?: readonly string[];
   /** Cookie name whose presence indicates a logged-in session. */
   readonly cookie: string;
   /** `true` if a content-script scraper exists (see content.js PLATFORMS). */
@@ -64,6 +66,6 @@ export const UC_PLATFORMS: readonly Platform[] = [
   { id: "facebook",  label: "Facebook",    url: "https://www.facebook.com/",        host: "www.facebook.com",   cookieUrl: "https://www.facebook.com",       cookie: "c_user",     scraper: true },
   { id: "strava",    label: "Strava",      url: "https://www.strava.com/dashboard", host: "www.strava.com",     cookieUrl: "https://www.strava.com",         cookie: "_strava4_session", scraper: true },
   { id: "pinterest", label: "Pinterest",   url: "https://www.pinterest.com/",       host: "pinterest.com",      cookieUrl: "https://www.pinterest.com",      cookie: "_pinterest_sess", scraper: true },
-  { id: "snapchat",  label: "Snapchat",    url: "https://www.snapchat.com/",        host: "snapchat.com",       cookieUrl: "https://www.snapchat.com",       cookie: "",             scraper: true, noLogin: true },
-  { id: "airbnb",    label: "Airbnb",      url: "https://www.airbnb.com/",           host: "airbnb.com",         aliasHosts: ["airbnb.com.sg", "airbnb.co.uk", "airbnb.co.kr"], cookieUrl: "https://www.airbnb.com", cookie: "", scraper: true, noLogin: true },
+  { id: "snapchat",  label: "Snapchat",    url: "https://www.snapchat.com/",        host: "snapchat.com",       cookieUrl: "https://accounts.snapchat.com",  cookie: "__Host-sc-a-auth-session", scraper: true },
+  { id: "airbnb",    label: "Airbnb",      url: "https://www.airbnb.com/",           host: "airbnb.com",         aliasHosts: ["airbnb.com.sg", "airbnb.co.uk", "airbnb.co.kr"], cookieUrl: "https://www.airbnb.com", cookieUrls: ["https://www.airbnb.com.sg", "https://www.airbnb.co.uk", "https://www.airbnb.co.kr"], cookie: "_aat", scraper: true },
 ];

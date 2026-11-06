@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "task": 45,
+  "browser_transport_decision": "blocked",
+  "exact_use": "Sanitized fixture for browser transport gate verification.",
+  "certification_receipt": {
+    "path": "tests/fixtures/evidence/collector-production-recovery/task-45-browser-certification.txt",
+    "sha256": "923d5e28b60cb74cc42242989e9b1ed45e4194ec9e0c13fbad3e0f447e042c20"
+  },
+  "task_50_rule": {
+    "blocked_prevents_start": true,
+    "required_before_start": "certified browser transport receipt"
+  }
+}

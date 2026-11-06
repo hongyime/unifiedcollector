@@ -15,7 +15,7 @@ evidence=$root/.omo/evidence/collector-production-recovery
 rows=$evidence/task-53-production-forward-media-rows.csv
 coverage=$evidence/task-53-production-forward-media-coverage.json
 delta=$evidence/task-53-production-forward-media
-writers=(unifiedcollector_wa_bridge_1 unifiedcollector_wa_bridge_2 unifiedcollector_collector_whatsapp unifiedcollector_collector_paypal unifiedcollector_recon_egress_guard unifiedcollector_spiderfoot)
+writers=(unifiedcollector_wa_bridge_1 unifiedcollector_wa_bridge_2 unifiedcollector_collector_whatsapp unifiedcollector_recon_egress_guard unifiedcollector_spiderfoot)
 
 for path in \
   "$evidence/task-53-production-forward-db.dump" \

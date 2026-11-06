@@ -14,6 +14,8 @@ from fastapi.responses import FileResponse, StreamingResponse
 
 from src.db.connection import get_pool
 from src.dashboard.api.auth import require_role
+from src.core.media_status import list_recent_media, list_realtime_media_deliveries
+from src.core.realtime_feed_policy import get_realtime_feed_policy
 
 
 def _realtime_feed_status_from_redis(*args, **kwargs):
@@ -59,22 +61,8 @@ router = APIRouter()
 @router.get("/media")
 async def list_media(source: str | None = None, limit: int = 50,
                      _user: dict = Depends(require_role("viewer"))):
-    limit = max(1, min(limit, 500))
     pool = await get_pool()
-    async with pool.acquire() as conn:
-        if source:
-            rows = await conn.fetch(
-                "SELECT id, source, entity_name, content_type, filename, file_size, collected_at "
-                "FROM media_items WHERE source = $1 ORDER BY collected_at DESC LIMIT $2",
-                source, limit,
-            )
-        else:
-            rows = await conn.fetch(
-                "SELECT id, source, entity_name, content_type, filename, file_size, collected_at "
-                "FROM media_items ORDER BY collected_at DESC LIMIT $1",
-                limit,
-            )
-    return [dict(r) for r in rows]
+    return await list_recent_media(pool, source=source, limit=limit)
 
 
 @router.get("/media/stats")
@@ -129,6 +117,8 @@ async def media_stats(_user: dict = Depends(require_role("viewer"))):
                 d["age_seconds"] = cur["age_seconds"]
                 d["stale_after_seconds"] = cur.get("stale_after_seconds")
                 d["collection_mode"] = cur.get("collection_mode")
+                d["collection_modes"] = cur.get("collection_modes")
+                d["freshness_target_seconds"] = cur.get("freshness_target_seconds")
                 d["freshness_basis"] = cur.get("freshness_basis")
                 d["health_detail"] = cur.get("detail")
                 d["source_health_status"] = cur.get("source_health_status")
@@ -150,6 +140,7 @@ async def media_stats(_user: dict = Depends(require_role("viewer"))):
 @router.get("/media/realtime-feed/status")
 async def media_realtime_feed_status(_user: dict = Depends(require_role("viewer"))):
     payload = await _realtime_feed_status_from_redis()
+    payload["policy"] = get_realtime_feed_policy()
     try:
         payload["delivery_ledger"] = await _realtime_delivery_ledger_status()
     except Exception as exc:  # noqa: BLE001 - dashboard visibility must degrade.
@@ -164,35 +155,9 @@ async def media_realtime_feed_deliveries(
     limit: int = Query(100, ge=1, le=500),
     _user: dict = Depends(require_role("viewer")),
 ):
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        exists = await conn.fetchval("SELECT to_regclass('public.realtime_media_deliveries')")
-        if not exists:
-            return {"available": False, "items": []}
-        clauses = []
-        args = []
-        if source:
-            args.append(source.strip().lower())
-            clauses.append(f"source = ${len(args)}")
-        if status:
-            args.append(status.strip().lower())
-            clauses.append(f"status = ${len(args)}")
-        args.append(limit)
-        where = "WHERE " + " AND ".join(clauses) if clauses else ""
-        rows = await conn.fetch(
-            f"""
-            SELECT id::text, media_item_id::text, source, content_id, status,
-                   reason, file_size, content_type, target_name, queued_at,
-                   sent_at, created_at, updated_at
-            FROM realtime_media_deliveries
-            {where}
-            ORDER BY updated_at DESC
-            LIMIT ${len(args)}
-            """,
-            *args,
-            timeout=5,
-        )
-    return {"available": True, "items": [dict(row) for row in rows]}
+    return await list_realtime_media_deliveries(
+        await get_pool(), source=source, status=status, limit=limit,
+    )
 
 
 @router.get("/media/artifact-audit")

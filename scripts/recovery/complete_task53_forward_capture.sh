@@ -20,7 +20,7 @@ done
 docker run --rm --pull=never --network none -v "$evidence:/evidence:ro" pgvector/pgvector:pg16 \
   pg_restore --list /evidence/task-53-production-forward-db.dump >/dev/null
 
-for container in unifiedcollector_collector_paypal unifiedcollector_collector_whatsapp unifiedcollector_wa_bridge_1 unifiedcollector_wa_bridge_2 unifiedcollector_recon_egress_guard unifiedcollector_spiderfoot; do
+for container in unifiedcollector_collector_whatsapp unifiedcollector_wa_bridge_1 unifiedcollector_wa_bridge_2 unifiedcollector_recon_egress_guard unifiedcollector_spiderfoot; do
   [[ $(docker inspect --format '{{.State.Running}}' "$container") == false ]] || { echo "ERROR: writer remains running" >&2; exit 2; }
 done
 
@@ -56,7 +56,7 @@ document = {
     "cursor_queue_sha256": cursor_sha,
     "media_rows_sha256": rows_sha,
     "writer_resume_order": [
-        "wa-bridge-1", "wa-bridge-2", "collector_whatsapp", "collector_paypal",
+        "wa-bridge-1", "wa-bridge-2", "collector_whatsapp",
         "recon_egress_guard", "collector_spiderfoot",
     ],
 }

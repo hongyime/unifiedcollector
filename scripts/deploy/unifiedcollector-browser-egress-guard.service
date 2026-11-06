@@ -1,0 +1,13 @@
+[Unit]
+Description=UnifiedCollector browser egress firewall guard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/unifiedcollector-browser-egress-guard apply
+ExecStop=/usr/local/sbin/unifiedcollector-browser-egress-guard remove
+
+[Install]
+WantedBy=multi-user.target

@@ -73,7 +73,7 @@ def record(evidence: Path) -> dict:
         "service_cursors": len(cursor_document["service_cursors"]),
         "browser_native_scrape_queue": len(cursor_document["browser_native_scrape_queue"]),
         "writer_resume_order": [
-            "wa-bridge-1", "wa-bridge-2", "collector_whatsapp", "collector_paypal",
+            "wa-bridge-1", "wa-bridge-2", "collector_whatsapp",
             "recon_egress_guard", "collector_spiderfoot",
         ],
     }

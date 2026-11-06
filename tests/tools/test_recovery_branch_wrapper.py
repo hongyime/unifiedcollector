@@ -11,7 +11,7 @@ REHEARSAL = ROOT / "scripts" / "recovery" / "rehearse_branch_b.sh"
 MEDIA_EXPORT = ROOT / "scripts" / "export_media_reconciliation_rows.sh"
 TASK47 = ROOT / "scripts" / "verify_task47_cutover.py"
 TASK48 = ROOT / "scripts" / "recovery" / "promote_branch_b.py"
-EVIDENCE = ROOT / ".omo" / "evidence" / "collector-production-recovery"
+EVIDENCE = ROOT / "tests" / "fixtures" / "evidence" / "collector-production-recovery"
 
 
 class _ComposeLoader(yaml.SafeLoader):

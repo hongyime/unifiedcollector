@@ -830,7 +830,6 @@ def test_dynamic_term_sources_cover_additional_social_profiles_and_posts():
         "snapchat_spotlights",
         "snapchat_highlights",
         "telegram_chats",
-        "paypal_profiles",
     } <= source_names
 
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from src.core.seen_targets import refresh_seen_targets_from_sources, seen_target_summary_by_source
@@ -232,4 +232,69 @@ async def build_collection_coverage_snapshot(
             "seen_targets_backfilled": sum(row["seen_targets_backfilled"] for row in snapshots),
         },
         "written": len(snapshots) if write else 0,
+    }
+
+
+def _row_get(row, key: str, default=None):
+    try:
+        return row[key]
+    except (KeyError, TypeError):
+        return row.get(key, default) if isinstance(row, dict) else default
+
+
+async def get_collection_coverage(pool, *, stale_seconds: int = 3600, refresh=None) -> dict[str, Any]:
+    """Shared dashboard/control-room coverage payload over a caller-owned pool."""
+    refresh = refresh or build_collection_coverage_snapshot
+    async with pool.acquire() as conn:
+        async def fetch_latest():
+            return await conn.fetch("""
+                SELECT DISTINCT ON (source)
+                       *, expected_cadence::text AS expected_cadence_text
+                FROM collection_coverage_snapshots
+                ORDER BY source, created_at DESC
+            """)
+
+        rows = await fetch_latest()
+        latest_created_at = max((row["created_at"] for row in rows if row["created_at"]), default=None)
+        snapshot_age_seconds = int((datetime.now(timezone.utc) - latest_created_at.astimezone(timezone.utc)).total_seconds()) if latest_created_at else None
+        refresh_attempted = False
+        refresh_error = None
+        if not rows or snapshot_age_seconds is None or snapshot_age_seconds > stale_seconds:
+            refresh_attempted = True
+            try:
+                await refresh(conn)
+                rows = await fetch_latest()
+                latest_created_at = max((row["created_at"] for row in rows if row["created_at"]), default=None)
+                snapshot_age_seconds = int((datetime.now(timezone.utc) - latest_created_at.astimezone(timezone.utc)).total_seconds()) if latest_created_at else None
+            except Exception as exc:  # coverage must retain a usable stale snapshot
+                refresh_error = str(exc)[:300]
+
+    payload = [{
+        "source": row["source"],
+        "expected_cadence": _row_get(row, "expected_cadence_text", row["expected_cadence"]),
+        "latest_data_at": row["latest_data_at"].isoformat() if row["latest_data_at"] else None,
+        "latest_run_at": row["latest_run_at"].isoformat() if row["latest_run_at"] else None,
+        "status": row["status"],
+        "rows_24h": row["rows_24h"], "media_24h": row["media_24h"],
+        "errors_24h": row["errors_24h"], "rate_limits_24h": row["rate_limits_24h"],
+        "private_access_failures": row["private_access_failures"], "stale_targets": row["stale_targets"],
+        "seen_targets_total": int(_row_get(row, "seen_targets_total", 0) or 0),
+        "seen_targets_backfilled": int(_row_get(row, "seen_targets_backfilled", 0) or 0),
+        "seen_targets_pending": int(_row_get(row, "seen_targets_pending", 0) or 0),
+        "seen_targets_fresh": int(_row_get(row, "seen_targets_fresh", 0) or 0),
+        "seen_targets_stale": int(_row_get(row, "seen_targets_stale", 0) or 0),
+        "seen_targets_newly_discovered": int(_row_get(row, "seen_targets_newly_discovered", 0) or 0),
+        "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+    } for row in rows]
+    fresh = sum(row["status"] == "fresh" for row in payload)
+    degraded = sum(row["status"] == "degraded" for row in payload)
+    stale = sum(row["status"] == "stale" for row in payload)
+    return {
+        "sources": payload, "total": len(payload),
+        "summary": {"total": len(payload), "fresh": fresh, "degraded": degraded,
+                    "stale": stale, "unknown": len(payload) - fresh - degraded - stale},
+        "snapshot_created_at": latest_created_at.isoformat() if latest_created_at else None,
+        "snapshot_age_seconds": snapshot_age_seconds,
+        "snapshot_stale": bool(snapshot_age_seconds is not None and snapshot_age_seconds > stale_seconds),
+        "refresh_attempted": refresh_attempted, "refresh_error": refresh_error,
     }

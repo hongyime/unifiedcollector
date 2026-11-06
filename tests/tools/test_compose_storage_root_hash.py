@@ -27,7 +27,7 @@ COMPOSE = Path(__file__).resolve().parents[2] / "docker" / "docker-compose.yml"
 # Reviewed Compose state after task-42 security hardening, Task 41's one-shot
 # schema-init gate, Task 43's read-only cutover pause marker for watchdog, and
 # the WhatsApp-only durable raw-payload spool on the existing sessions volume.
-FROZEN_COMPOSE_SHA256 = "983dff771dbba9e6a60b194009936dad526603c427c92ec28702f98d7ebb1dc3"
+FROZEN_COMPOSE_SHA256 = "03cc7219d8aca48ad3f4a2289382e753213828b4421a9433c5a73c3d12c225b8"
 
 # The reconciled intended storage root (task 29).
 INTENDED_ROOT = "/media/sg-ultra/unifiedcollector"
@@ -50,7 +50,7 @@ def test_compose_default_storage_root_is_the_intended_sg_ultra_root() -> None:
     assert set(defaults) == {INTENDED_ROOT}
 
 
-def test_whatsapp_history_sync_is_paused_without_disabling_realtime_sync() -> None:
+def test_whatsapp_history_sync_and_deep_backfill_are_enabled() -> None:
     text = COMPOSE.read_text(encoding="utf-8")
-    assert text.count('SYNC_FULL_HISTORY: "false"') == 2
-    assert text.count('WHATSAPP_DEEP_BACKFILL: "false"') == 2
+    assert text.count('SYNC_FULL_HISTORY: "true"') == 2
+    assert text.count('WHATSAPP_DEEP_BACKFILL: "true"') == 2

@@ -6,8 +6,8 @@ cohesive route slice for the first cut. All public names are re-exported from
 ``src.dashboard.api.__init__`` for back-compat (``tests/dashboard/test_targets_dedupe.py``
 and dozens of ``Depends(require_role(...))`` sites in ``__init__.py``).
 
-Import-time behavior: this module fails closed on a missing/default
-``DASHBOARD_JWT_SECRET`` — matches the pre-refactor behavior in ``__init__.py``.
+When local auth is disabled, importing this module does not require a JWT secret.
+Token issuance and validation still reject an unset/default secret.
 """
 from __future__ import annotations
 
@@ -26,16 +26,23 @@ from src.db.connection import get_pool
 
 
 # ---------------------------------------------------------------------------
-# Config — read once at import time (matches pre-refactor semantics).
+# Config — read once at import time.  Secret validation happens only on token
+# paths so the intentional loopback-only auth bypass is import-safe.
 # ---------------------------------------------------------------------------
 
 JWT_SECRET = os.getenv("DASHBOARD_JWT_SECRET", "")
-if not JWT_SECRET or JWT_SECRET == "changeme-in-production":
-    # Fail closed: never allow the dashboard to run with a known/empty signing key.
-    raise RuntimeError(
-        "DASHBOARD_JWT_SECRET env var is not set (or still default). "
-        "Generate one: python -c 'import secrets;print(secrets.token_urlsafe(48))'"
-    )
+
+
+def _jwt_secret() -> str:
+    if not JWT_SECRET or JWT_SECRET == "changeme-in-production":
+        # Fail closed: never sign or validate with a known/empty signing key.
+        raise HTTPException(
+            status_code=503,
+            detail="DASHBOARD_JWT_SECRET is not configured",
+        )
+    return JWT_SECRET
+
+
 JWT_EXPIRY_HOURS = int(os.getenv("DASHBOARD_JWT_EXPIRY_HOURS", "8"))
 ADMIN_USERNAME = os.getenv("DASHBOARD_ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.getenv("DASHBOARD_ADMIN_PASSWORD", "")
@@ -61,7 +68,7 @@ async def get_current_user(creds: HTTPAuthorizationCredentials = Depends(securit
     if creds is None or not creds.credentials:
         raise HTTPException(status_code=401, detail="Missing bearer token")
     try:
-        payload = jwt.decode(creds.credentials, JWT_SECRET, algorithms=["HS256"])
+        payload = jwt.decode(creds.credentials, _jwt_secret(), algorithms=["HS256"])
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token expired")
     except jwt.InvalidTokenError:
@@ -134,7 +141,7 @@ async def login(req: LoginRequest):
             "role": role,
             "exp": datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRY_HOURS),
         },
-        JWT_SECRET,
+        _jwt_secret(),
         algorithm="HS256",
     )
     return {"token": token, "username": req.username, "role": role}

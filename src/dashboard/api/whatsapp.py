@@ -17,6 +17,9 @@ import re
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from src.db.connection import get_pool
+from src.core.messaging_members import list_messaging_members
+from src.core.messaging_messages import get_messaging_messages
+from src.core.whatsapp_users import get_whatsapp_user_history, list_whatsapp_users
 from src.dashboard.api.auth import require_role
 
 logger = logging.getLogger(__name__)
@@ -125,24 +128,7 @@ def _should_wait_for_fresh_wa_qr(health: dict, qrd: dict) -> bool:
 @router.get("/whatsapp/users")
 async def list_wa_users(search: str | None = None, limit: int = 50,
                          _user: dict = Depends(require_role("viewer"))):
-    limit = max(1, min(limit, 500))
-    pool = await _get_pool()
-    async with pool.acquire() as conn:
-        if search:
-            esc = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            rows = await conn.fetch(
-                "SELECT * FROM whatsapp_users "
-                "WHERE platform_user_id ILIKE $1 ESCAPE '\\' OR name ILIKE $1 ESCAPE '\\' "
-                "OR pushname ILIKE $1 ESCAPE '\\' "
-                "ORDER BY updated_at DESC NULLS LAST LIMIT $2",
-                f"%{esc}%", limit,
-            )
-        else:
-            rows = await conn.fetch(
-                "SELECT * FROM whatsapp_users ORDER BY updated_at DESC NULLS LAST LIMIT $1",
-                limit,
-            )
-    return [dict(r) for r in rows]
+    return await list_whatsapp_users(await _get_pool(), search=search, limit=limit)
 
 
 @router.get("/whatsapp/users/{jid}/history")
@@ -153,17 +139,7 @@ async def wa_user_history(jid: str, limit: int = 100,
     There is no separate wa_user_history table; we return the user's recent
     messages joined through whatsapp_users.id -> whatsapp_messages.sender_id.
     """
-    limit = max(1, min(limit, 1000))
-    pool = await _get_pool()
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT m.* FROM whatsapp_messages m "
-            "JOIN whatsapp_users u ON u.id = m.sender_id "
-            "WHERE u.platform_user_id = $1 "
-            "ORDER BY m.collected_at DESC LIMIT $2",
-            jid, limit,
-        )
-    return [dict(r) for r in rows]
+    return await get_whatsapp_user_history(await _get_pool(), jid=jid, limit=limit)
 
 
 @router.get("/whatsapp/chats")
@@ -220,6 +196,13 @@ async def list_wa_chats(limit: int = 100,
     return [dict(r) for r in rows]
 
 
+@router.get("/whatsapp/chat/{jid:path}/members")
+async def wa_chat_members(jid: str, limit: int = 100,
+                          _user: dict = Depends(require_role("viewer"))):
+    """Bounded active WhatsApp group-member roster for one accessible chat."""
+    return await list_messaging_members(await _get_pool(), source="whatsapp", chat_id=jid, limit=limit)
+
+
 @router.get("/whatsapp/chat/{jid:path}")
 async def wa_chat_messages(jid: str, limit: int = 200,
                             _user: dict = Depends(require_role("viewer"))):
@@ -230,93 +213,7 @@ async def wa_chat_messages(jid: str, limit: int = 200,
     sender display name + phone_number, and media_items for a stable media_id
     the frontend can pass to /media/{id}/thumbnail.
     """
-    limit = max(1, min(limit, 2000))
-    pool = await _get_pool()
-    async with pool.acquire() as conn:
-        if await conn.fetchval("SELECT to_regclass('whatsapp_chats')") is None:
-            return {"chat": None, "messages": []}
-        chat = await conn.fetchrow(
-            """
-            SELECT platform_chat_id, name, is_group, chat_type,
-                   participant_count, description, updated_at
-            FROM whatsapp_chats WHERE platform_chat_id = $1
-            """,
-            jid,
-        )
-        if chat is None:
-            return {"chat": None, "messages": []}
-        # Message-slice-then-join with scalar chat_id lookup: joining
-        # whatsapp_chats inside the WHERE stops the planner from using
-        # idx_wa_messages_chat_ts for ORDER BY (it can only use it when
-        # chat_id is bound to a scalar). With the scalar the ORDER BY DESC
-        # + LIMIT is a single index-range walk, ~200ms even for a 3.5k-msg
-        # channel. Reversed to chronological for display.
-        rows = await conn.fetch(
-            """
-            WITH msgs AS (
-                SELECT m.*
-                FROM whatsapp_messages m
-                WHERE m.chat_id = (
-                    SELECT id FROM whatsapp_chats WHERE platform_chat_id = $1
-                )
-                ORDER BY m."timestamp" DESC NULLS LAST
-                LIMIT $2
-            )
-            SELECT m.platform_message_id,
-                   m.from_me,
-                   m.text,
-                   m.media_url,
-                   m.media_mime_type,
-                   m.media_size,
-                   m.thumbnail_url,
-                   m."timestamp",
-                   m.is_deleted,
-                   m.deleted_at,
-                   m.quoted_text,
-                   m.forward_from_name,
-                   u.platform_user_id  AS sender_jid,
-                   u.pushname          AS sender_pushname,
-                   u.name              AS sender_name,
-                   u.phone_number      AS sender_phone,
-                   mi.id::text         AS media_id
-            FROM msgs m
-            LEFT JOIN whatsapp_users u ON u.id = m.sender_id
-            LEFT JOIN LATERAL (
-                SELECT mi.id
-                FROM media_items mi
-                WHERE mi.source = 'whatsapp'
-                  AND (
-                       mi.content_id = 'wa_' || m.platform_message_id
-                    OR (m.media_url IS NOT NULL AND mi.file_path = m.media_url)
-                  )
-                ORDER BY
-                    CASE WHEN mi.content_id = 'wa_' || m.platform_message_id THEN 0 ELSE 1 END,
-                    mi.collected_at DESC
-                LIMIT 1
-            ) mi ON TRUE
-            ORDER BY m."timestamp" DESC NULLS LAST
-            """,
-            jid, limit,
-        )
-    # Reverse to chronological (oldest first) for the chat UI. Cap individual
-    # message text at 1500 chars to bound the response body — the whatsapp_
-    # messages p95 text length is 638 chars, so 1500 is a comfortable ceiling
-    # for anything a person actually typed. A handful of forwards / bot
-    # dumps are 6–38KB each; multiplied by 200 rows those blow the payload
-    # past 1.4 MB and take stdlib json.dumps 5+ seconds to encode. Rows
-    # carrying truncated text set text_truncated so the frontend can offer
-    # a "show full" affordance later.
-    _TEXT_CAP = 1500
-    messages = []
-    for r in reversed(rows):
-        d = dict(r)
-        text = d.get("text")
-        if text is not None and len(text) > _TEXT_CAP:
-            d["text"] = text[:_TEXT_CAP]
-            d["text_truncated"] = True
-            d["text_full_length"] = len(text)
-        messages.append(d)
-    return {"chat": dict(chat), "messages": messages}
+    return await get_messaging_messages(await _get_pool(), source="whatsapp", chat_id=jid, limit=limit)
 
 
 def _wa_link_filter_values(value: str | None, aliases: dict[str, list[str]]) -> list[str] | None:

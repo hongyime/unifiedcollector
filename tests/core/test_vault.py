@@ -815,6 +815,16 @@ def test_ensure_vault_available_raises_for_missing_vault(tmp_path):
         vault.ensure_vault_available(tmp_path / "missing")
 
 
+def test_historical_media_storage_gate_uses_larger_reserve(tmp_path, monkeypatch):
+    usage = type("Usage", (), {"total": 4 * 1024**4, "free": 700 * 1024**3})()
+    monkeypatch.setattr(vault.shutil, "disk_usage", lambda _root: usage)
+
+    gate = vault.historical_media_storage_gate(tmp_path)
+
+    assert gate.allowed is False
+    assert gate.reserve_bytes == usage.total // 5
+
+
 def test_assert_media_write_allowed_accepts_media_inside_vault(tmp_path):
     root = tmp_path / "vault"
     media = root / "media"

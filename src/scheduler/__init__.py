@@ -29,7 +29,6 @@ class Scheduler:
         self.pool = None
         self._stop = asyncio.Event()
         self.check_interval = 60
-        self._collector_bot_task = None
 
     async def start(self):
         logger.info("Scheduler starting")
@@ -46,7 +45,6 @@ class Scheduler:
                 signal.signal(sig, lambda *_: self._stop.set())
 
         await _startup.notify_startup_safe()
-        self._collector_bot_task = await _startup.maybe_start_collector_bot()
 
         while not self._stop.is_set():
             try:
@@ -65,14 +63,8 @@ class Scheduler:
         await self.stop()
 
     async def stop(self):
-        """Send Telegram shutdown notice, cancel bot poller, close pool."""
+        """Send Telegram shutdown notice and close the scheduler pool."""
         await _startup.notify_shutdown_safe()
-        if self._collector_bot_task is not None:
-            try:
-                self._collector_bot_task.cancel()
-                await asyncio.gather(self._collector_bot_task, return_exceptions=True)
-            except Exception:
-                logger.debug("collector-bot: task cancel/await failed (non-fatal)", exc_info=True)
         await close_pool()
         logger.info("Scheduler stopped")
 

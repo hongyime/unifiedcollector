@@ -57,7 +57,7 @@ def _source(status: str = "live", **extra):
     row = {
         "source": "instagram",
         "status": status,
-        "collection_mode": "chrome extension + headless",
+        "collection_mode": "chrome extension",
         "freshness_basis": "media_items.collected_at where source=instagram",
         "age_seconds": 60,
         "stale_after_seconds": 172800,
@@ -953,7 +953,7 @@ def test_source_matrix_row_counts_and_live_blocker():
     )
 
     assert row["source"] == "instagram"
-    assert row["collection_methods"] == ["chrome extension", "headless cookies"]
+    assert row["collection_methods"] == ["chrome extension"]
     assert row["current_hour"]["records"] == 4
     assert row["current_hour"]["media_items"] == 7
     assert row["current_hour"]["rate_limits"] == 1
@@ -1337,7 +1337,7 @@ def test_source_matrix_row_keeps_strava_gps_cooldown_even_with_activity_rows():
         now=now,
     )
 
-    assert row["status_label"] == "degraded"
+    assert row["status_label"] == "cooldown"
     assert row["blocker"]["kind"] == "cooldown"
 
 

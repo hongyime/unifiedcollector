@@ -21,9 +21,9 @@ import { getAuthState, handlePairingCode, requestPairingCode } from './auth_mana
 import { bindStore, getMessage } from './store';
 import { producer } from './producer';
 import { registerMessagesHandler } from './event_handlers/messages';
-import { getHistoryProgress, registerHistoryHandler } from './event_handlers/history';
+import { getHistoryProgress, getHistoryWatermarks, registerHistoryHandler } from './event_handlers/history';
 import { registerContactsHandler } from './event_handlers/contacts';
-import { registerGroupsHandler } from './event_handlers/groups';
+import { publishGroupSnapshot, publishGroupSnapshotForGroup, registerGroupsHandler } from './event_handlers/groups';
 import { probeNumber } from './device_intel';
 
 process.on('uncaughtException', (err) => {
@@ -128,6 +128,7 @@ let socketRegistered = false;
 let lastDisconnectStatusCode: number | null = null;
 let lastDisconnectReason: string | null = null;
 let lastDisconnectAt: number | null = null;
+let lastProfilePhotoProbeAt = 0;
 let pairingRecoveryUntil: number | null = null;
 let terminalQrPrinted = false;
 let lastFreshQrRequestAt = 0;
@@ -268,6 +269,10 @@ function bridgeState() {
         last_disconnect_at: lastDisconnectAt ? new Date(lastDisconnectAt).toISOString() : null,
         pairing_recovery_until: pairingRecoveryUntil ? new Date(pairingRecoveryUntil).toISOString() : null,
         pairing_recovery_active: Boolean(pairingRecoveryUntil && Date.now() < pairingRecoveryUntil),
+        // Availability only: no invite code is accepted or group joined here.
+        // A successful account-scoped canary is still required before enabling joins.
+        invite_accept_available: typeof activeSock?.groupAcceptInvite === 'function',
+        invite_accept_state: 'available_not_proven',
         history: getHistoryProgress(),
     };
 }
@@ -315,6 +320,20 @@ app.get('/qr', (_req, res) => {
 // Returns 200 always; `connected=false` when not paired yet.
 app.get('/session', (_req, res) => {
     res.status(200).json(bridgeState());
+});
+
+// Internal-only cursor inventory. It exposes no messages/media and requires the
+// collector's bridge secret so the common lane ledger can mirror native state.
+app.get('/history/watermarks', (req, res) => {
+    const bridgeSecret = process.env.WHATSAPP_MEDIA_BRIDGE_SECRET || process.env.BRIDGE_SECRET || '';
+    if (!bridgeSecret || req.headers.authorization !== `Bearer ${bridgeSecret}`) {
+        res.status(401).json({ error: 'unauthorized' });
+        return;
+    }
+    res.status(200).json({
+        account_wid: activeSock?.user?.id || null,
+        watermarks: getHistoryWatermarks(),
+    });
 });
 
 // GET /devices/:number — READ-ONLY device + existence intelligence for a phone
@@ -433,6 +452,87 @@ app.post('/fresh-qr', async (_req, res) => {
 // Body: { messageId, mediaKey, directPath, mimetype? }
 // Auth: HMAC-SHA256 of JSON body with BRIDGE_SECRET, passed as X-Signature header.
 app.use(express.json({ limit: '1mb' }));
+
+// POST /invite/accept — account-scoped invite acceptance. The collector must
+// present its bridge secret and this bridge must match the configured immutable
+// WhatsApp identity. It accepts an invite code, never an arbitrary URL.
+app.post('/invite/accept', async (req, res) => {
+    const bridgeSecret = process.env.WHATSAPP_MEDIA_BRIDGE_SECRET || process.env.BRIDGE_SECRET || '';
+    const expectedWid = process.env.WHATSAPP_INVITE_ACCEPT_WID || '';
+    if (!bridgeSecret || req.headers.authorization !== `Bearer ${bridgeSecret}`) {
+        res.status(401).json({ error: 'unauthorized' });
+        return;
+    }
+    const inviteCode = typeof req.body?.invite_code === 'string' ? req.body.invite_code.trim() : '';
+    if (!/^[A-Za-z0-9]{20,64}$/.test(inviteCode)) {
+        res.status(400).json({ error: 'valid invite_code is required' });
+        return;
+    }
+    if (!expectedWid || activeSock?.user?.id !== expectedWid) {
+        res.status(409).json({ error: 'authorized bridge identity is unavailable' });
+        return;
+    }
+    if (!serviceHealthy || typeof activeSock?.groupAcceptInvite !== 'function') {
+        res.status(503).json({ error: 'invite acceptance is unavailable' });
+        return;
+    }
+    try {
+        const groupJid = await activeSock.groupAcceptInvite(inviteCode);
+        let snapshotPublished = false;
+        let snapshotError: string | null = null;
+        try {
+            await publishGroupSnapshotForGroup(activeSock, process.env.SESSION_NAME || 'default', groupJid);
+            snapshotPublished = true;
+        } catch (err: any) {
+            snapshotError = err?.message || 'member snapshot failed';
+            logger.warn({ err: snapshotError }, 'Joined WhatsApp group but member snapshot failed');
+        }
+        res.status(200).json({ status: 'joined', group_jid: groupJid, snapshot_published: snapshotPublished, snapshot_error: snapshotError });
+    } catch (err: any) {
+        const message = err?.message || 'invite acceptance failed';
+        logger.warn({ err: message }, 'WhatsApp invite acceptance failed');
+        res.status(400).json({ error: message });
+    }
+});
+
+// Internal, bounded capability canary. It returns provider URLs only; media is
+// neither downloaded nor relayed by this route.
+app.post('/contacts/profile-photos', async (req, res) => {
+    const bridgeSecret = process.env.WHATSAPP_MEDIA_BRIDGE_SECRET || process.env.BRIDGE_SECRET || '';
+    if (!bridgeSecret || req.headers.authorization !== `Bearer ${bridgeSecret}`) {
+        res.status(401).json({ error: 'unauthorized' });
+        return;
+    }
+    if (process.env.WHATSAPP_PROFILE_PHOTO_CANARY_ENABLED !== '1') {
+        res.status(403).json({ error: 'profile-photo canary is disabled' });
+        return;
+    }
+    const jids = Array.isArray(req.body?.jids) ? req.body.jids : [];
+    if (jids.length < 1 || jids.length > 5 || !jids.every((jid: unknown) =>
+        typeof jid === 'string' && /^\d{7,15}@s\.whatsapp\.net$/.test(jid))) {
+        res.status(400).json({ error: 'one to five canonical user JIDs are required' });
+        return;
+    }
+    if (!serviceHealthy || typeof activeSock?.profilePictureUrl !== 'function') {
+        res.status(503).json({ error: 'profile-photo lookup is unavailable' });
+        return;
+    }
+    if (Date.now() - lastProfilePhotoProbeAt < 60_000) {
+        res.status(429).json({ error: 'profile-photo canary is rate limited' });
+        return;
+    }
+    lastProfilePhotoProbeAt = Date.now();
+    const results = [];
+    for (const jid of jids) {
+        try {
+            const url = await activeSock.profilePictureUrl(jid, 'image', 15_000);
+            results.push({ jid, status: url ? 'found' : 'unavailable', url: url || null });
+        } catch {
+            results.push({ jid, status: 'unavailable', url: null });
+        }
+    }
+    res.status(200).json({ results });
+});
 
 // POST /pairing-code — QR fallback for unregistered slots.
 // Body: { phone: "+6591234567" }. Returns the short WhatsApp pairing code for
@@ -1139,6 +1239,12 @@ async function connectToWhatsApp(): Promise<void> {
             // directly and publish as contacts.update so the collector can
             // seed whatsapp_lid_map without waiting for new live events.
             setTimeout(() => emitStoredLidMappings(sessionName).catch(() => {}), 5000);
+
+            setTimeout(() => {
+                publishGroupSnapshot(sock, sessionName).catch((e: Error) => {
+                    logger.warn({ err: e?.message || String(e), sessionName }, 'group snapshot failed');
+                });
+            }, 8000);
 
             if (heartbeat) clearInterval(heartbeat);
             heartbeat = setInterval(() => {

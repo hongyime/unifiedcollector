@@ -192,7 +192,10 @@ class TelegramWorker:
                     self.worker_id, self.account.name, _bt_err,
                 )
             from src.core.readonly_client import ReadOnlyTelegramClient
-            self.client = ReadOnlyTelegramClient(raw_client)
+            self.client = ReadOnlyTelegramClient(
+                raw_client,
+                allow_membership_joins=self.parent._is_auto_join_account(self.account),
+            )
             if not await self.client.is_user_authorized():
                 raise RuntimeError(
                     f"Telegram session for account={self.account.name} is not "

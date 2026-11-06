@@ -24,7 +24,6 @@ Modules and what they contain:
 * ``rate_limits.py`` — /rate-limits/recent.
 * ``ops.py`` — /dlq, /domain-pacing/*, /api-quotas/*.
 * ``social.py`` — /social/*.
-* ``dm.py`` — /tiktok/dms/*, /dm/telemetry.
 * ``targets.py`` — /targets/*.
 * ``schedules.py`` — /schedules/*, /runs/*.
 * ``accounts.py`` — /platform/{name}/summary, /accounts.
@@ -306,12 +305,6 @@ from src.dashboard.api.social import (  # noqa: E402,F401
     social_page,
     _SOCIAL_HTML,
 )
-from src.dashboard.api.dm import (  # noqa: E402,F401
-    router as _dm_router,
-    list_tt_dm_threads,
-    tt_dm_thread_messages,
-    dm_telemetry,
-)
 from src.dashboard.api.targets import (  # noqa: E402,F401
     router as _targets_router,
     TargetRequest,
@@ -425,7 +418,6 @@ app.include_router(_media_router)
 app.include_router(_rate_limits_router)
 app.include_router(_ops_router)
 app.include_router(_social_router)
-app.include_router(_dm_router)
 app.include_router(_targets_router)
 app.include_router(_schedules_router)
 app.include_router(_accounts_router)
