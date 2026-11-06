@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -13,7 +14,7 @@ def test_disposable_rotation_contract() -> None:
     if probe.returncode:
         pytest.skip("docker daemon unavailable")
     result = subprocess.run(
-        ["python", "scripts/verify_credential_rotation_disposable.py"],
+        [sys.executable, "scripts/verify_credential_rotation_disposable.py"],
         capture_output=True,
         text=True,
     )
