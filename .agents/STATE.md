@@ -1,5 +1,6 @@
-# Clean-boot/Compose stabilization (2026-11-06)
+# Clean-boot/Compose stabilization deployed (2026-11-06)
 
+- Released `77c0bf96` to `main` and rebuilt/recreated the Compose stack. PostgreSQL is healthy, `schema_init` exited successfully, the recon egress guard and SpiderFoot are healthy, and all listed collector, bridge, dashboard, scheduler, control, watchdog, and feed services are running on the rebuilt images. Reloaded the active extension service worker at version 1.23.126. Local `Z:/` sidecar artifacts remain intentionally untracked.
 - Restored schema-init and recon-egress Compose contracts, added clean-schema migration ordering for the DM/recovery/retirement migrations without touching applied SQL, deferred watchdog/JWT configuration reads, bounded collector known IDs, and removed retired DM bridge persistence. Compose renders with required placeholders; focused/Compose contracts and disposable clean-schema rehearsal pass. The only remaining broad-suite environment failure is a legacy test invoking a missing `python` binary.
 
 # Collector production recovery resumed (2026-10-23)
