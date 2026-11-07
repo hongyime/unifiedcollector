@@ -1,3 +1,8 @@
+# Homelab Compose reliability hardening complete (2026-11-07)
+
+- Production Compose now applies `json-file` log rotation (`10m` × `3`) to every 32 long-running service, preserves all existing `unless-stopped` policies/data volumes/shutdown behavior, adds existing read-only health checks to `browser_ingest`, profile-only workers, and control executor, and makes RabbitMQ clients wait for broker health. `schema_init` remains `restart: "no"`.
+- `docker compose config --quiet` passes (33 services; 32 long-running services with bounded logs and healthchecks). Recreated only long-running project services with `--no-build --no-deps --force-recreate`; no image was built/pulled, no migration job was started, and no volume was removed. All 32 are now Docker-healthy. Dashboard (`:8700`), browser ingest (`:8765`), cookie vault (`:8790`), and both WhatsApp bridge health endpoints (`:3011`, `:3012`) returned OK/ready states. Startup logs show no ERROR/traceback/fatal failure; SpiderFoot remains intentionally `admission_halted` under its existing admission guard.
+
 # Clean-boot/Compose stabilization deployed (2026-11-06)
 
 - Released `77c0bf96` to `main` and rebuilt/recreated the Compose stack. PostgreSQL is healthy, `schema_init` exited successfully, the recon egress guard and SpiderFoot are healthy, and all listed collector, bridge, dashboard, scheduler, control, watchdog, and feed services are running on the rebuilt images. Reloaded the active extension service worker at version 1.23.126. Local `Z:/` sidecar artifacts remain intentionally untracked.

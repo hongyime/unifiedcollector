@@ -24,6 +24,11 @@ x-collector-common: &collector-common
     schema_init:
       condition: service_completed_successfully
   restart: unless-stopped
+  logging: &bounded-json-logs
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
 
 
 x-profile-probe: &profile-probe
@@ -34,6 +39,12 @@ x-profile-probe: &profile-probe
     - ../credentials:/app/credentials:ro
   env_file:
     - ./env/common.env
+  healthcheck:
+    test: ["CMD", "python", "-m", "src.core.health"]
+    interval: 60s
+    timeout: 45s
+    retries: 3
+    start_period: 30s
 
 services:
   postgres:
@@ -64,6 +75,7 @@ services:
       timeout: 10s
       retries: 3
     restart: unless-stopped
+    logging: *bounded-json-logs
 # MEM-CAP: PostgreSQL is the shared database for 35+ containers. Without a cap
     # it regularly consumed 3.5-4GB and starved the host (16GB total, 10GB WSL2).
     # 4GB covers shared_buffers=1GB + work_mem headroom + OS cache.
@@ -125,6 +137,7 @@ services:
     volumes:
       - /var/lib/unifiedcollector/recon-guard:/var/lib/unifiedcollector/recon-guard
     restart: unless-stopped
+    logging: *bounded-json-logs
 
   collector_spiderfoot:
     build:
@@ -220,6 +233,7 @@ services:
       retries: 3
       start_period: 180s
     restart: unless-stopped
+    logging: *bounded-json-logs
 
   # P3-1: youtube runs in its OWN process/container, isolated from the main
   # collector's shared event loop. yt-dlp invokes a blocking subprocess that can
@@ -289,6 +303,7 @@ services:
       retries: 3
       start_period: 30s
     restart: unless-stopped
+    logging: *bounded-json-logs
 
   # P3-1 (extended to tiktok): tiktok runs in its OWN process/container. Its
   # gallery-dl / yt-dlp fallbacks invoke blocking subprocesses that wedge on lost
@@ -349,6 +364,7 @@ services:
       retries: 3
       start_period: 30s
     restart: unless-stopped
+    logging: *bounded-json-logs
 
   # ───────────────────────────────────────────────────────────────
   # P3-1 FULL SPLIT: every source runs in its OWN process/container.
@@ -553,6 +569,7 @@ services:
     mem_limit: 128m
     command: python -m src.watchdog.freshness
     restart: unless-stopped
+    logging: *bounded-json-logs
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
       WATCHDOG_INTERVAL: "300"
@@ -660,6 +677,7 @@ services:
       retries: 3
       start_period: 30s
     restart: unless-stopped
+    logging: *bounded-json-logs
 
   collector_exposure:
     image: unifiedcollector-collector:latest
@@ -718,6 +736,7 @@ services:
       retries: 3
       start_period: 30s
     restart: unless-stopped
+    logging: *bounded-json-logs
 
   collector_lemon8:
     image: unifiedcollector-collector:latest
@@ -766,6 +785,7 @@ services:
       retries: 3
       start_period: 30s
     restart: unless-stopped
+    logging: *bounded-json-logs
 
   # Profile probes each run alone so one stalled source cannot block the
   # other four. Shared image, memory, and mounts live in x-profile-probe.
@@ -897,6 +917,7 @@ services:
       retries: 3
       start_period: 30s
     restart: unless-stopped
+    logging: *bounded-json-logs
 
   collector_beeper:
     image: unifiedcollector-collector:latest
@@ -977,6 +998,7 @@ services:
       retries: 3
       start_period: 30s
     restart: unless-stopped
+    logging: *bounded-json-logs
 
   collector_whatsapp:
     image: unifiedcollector-collector:latest
@@ -1033,7 +1055,7 @@ services:
       schema_init:
         condition: service_completed_successfully
       rabbitmq:
-        condition: service_started
+        condition: service_healthy
     env_file:
       - ./env/common.env
       - ./env/whatsapp.env
@@ -1045,6 +1067,7 @@ services:
       retries: 3
       start_period: 30s
     restart: unless-stopped
+    logging: *bounded-json-logs
 
   collector_instagram:
     image: unifiedcollector-collector:latest
@@ -1082,6 +1105,7 @@ services:
       retries: 3
       start_period: 30s
     restart: unless-stopped
+    logging: *bounded-json-logs
 
   # Browser ingest bridge for the Chrome extension. Runs as a reliable
   # auto-restart container (vs a fragile manual host process) and publishes 8765
@@ -1130,7 +1154,14 @@ services:
     env_file:
       - ./env/common.env
       - ./env/instagram.env
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8765/health', timeout=5).status == 200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     restart: unless-stopped
+    logging: *bounded-json-logs
 
   scheduler:
     build:
@@ -1199,6 +1230,7 @@ services:
       retries: 3
       start_period: 30s
     restart: unless-stopped
+    logging: *bounded-json-logs
 
   control_bot:
     image: unifiedcollector-collector:latest
@@ -1234,6 +1266,7 @@ services:
       retries: 3
       start_period: 20s
     restart: unless-stopped
+    logging: *bounded-json-logs
 
   control_executor:
     image: unifiedcollector-collector:latest
@@ -1258,7 +1291,14 @@ services:
     env_file:
       - ./env/common.env
       - ./env/telegram_notify.env
+    healthcheck:
+      test: ["CMD", "python", "-m", "src.core.health"]
+      interval: 60s
+      timeout: 45s
+      retries: 3
+      start_period: 30s
     restart: unless-stopped
+    logging: *bounded-json-logs
 
   onboard_bot:
     build:
@@ -1287,6 +1327,7 @@ services:
       retries: 3
       start_period: 15s
     restart: unless-stopped
+    logging: *bounded-json-logs
 
   # Real-time post feed drain. Reads uc:realtime_post_feed off Redis (produced by
   # every successful media_items insert across the collectors) and posts a
@@ -1347,6 +1388,7 @@ services:
       retries: 3
       start_period: 30s
     restart: unless-stopped
+    logging: *bounded-json-logs
 
   dashboard:
     build:
@@ -1407,6 +1449,7 @@ services:
       retries: 3
       start_period: 10s
     restart: unless-stopped
+    logging: *bounded-json-logs
 
   rabbitmq:
     image: rabbitmq:3.13-alpine
@@ -1415,6 +1458,7 @@ services:
     hostname: rabbitmq
     init: true
     restart: unless-stopped
+    logging: *bounded-json-logs
     environment:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-wac_user}
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD required}
@@ -1444,6 +1488,7 @@ services:
     mem_limit: 256m
     init: true
     restart: unless-stopped
+    logging: *bounded-json-logs
     command: redis-server --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD required} --appendonly yes --appendfsync everysec
     volumes:
       - redis_data:/data
@@ -1463,6 +1508,7 @@ services:
     mem_limit: 384m
     init: true
     restart: unless-stopped
+    logging: *bounded-json-logs
     environment:
       SESSION_NAME: session_1
       AUTH_STORAGE_PATH: /app/auth_info/account1
@@ -1491,7 +1537,7 @@ services:
       - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}/media:/data/media"
     depends_on:
       rabbitmq:
-        condition: service_started
+        condition: service_healthy
     env_file:
       - ./env/common.env
     healthcheck:
@@ -1507,6 +1553,7 @@ services:
     mem_limit: 384m
     init: true
     restart: unless-stopped
+    logging: *bounded-json-logs
     environment:
       SESSION_NAME: session_2
       AUTH_STORAGE_PATH: /app/auth_info/account2
@@ -1530,7 +1577,7 @@ services:
       - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}/media:/data/media"
     depends_on:
       rabbitmq:
-        condition: service_started
+        condition: service_healthy
     env_file:
       - ./env/common.env
     healthcheck:
@@ -1579,6 +1626,7 @@ services:
       retries: 3
       start_period: 30s
     restart: unless-stopped
+    logging: *bounded-json-logs
 
 volumes:
   pgdata:

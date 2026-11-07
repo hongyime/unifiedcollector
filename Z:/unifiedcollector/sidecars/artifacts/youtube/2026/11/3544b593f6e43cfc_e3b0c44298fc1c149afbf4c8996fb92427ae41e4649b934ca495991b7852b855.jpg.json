@@ -1,0 +1,74 @@
+{
+  "artifact_id": "youtube:media/blobs/e3/b0/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.jpg",
+  "artifact_kind": "media_blob",
+  "collection_priority": null,
+  "file": {
+    "absolute_path": "/home/bryan/Projects/unifiedcollector/Z:/unifiedcollector/media/blobs/e3/b0/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.jpg",
+    "path": "media/blobs/e3/b0/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.jpg",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "size": 0
+  },
+  "ingest_path": null,
+  "metadata": {
+    "blob_path": "media/blobs/e3/b0/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.jpg",
+    "collected_at": "2026-11-06T12:01:10.532230+00:00",
+    "content_id": "profile_UC123",
+    "content_type": "profile_photo",
+    "entity_id": "UC123",
+    "entity_name": "Some Channel",
+    "file_size": 0,
+    "filename": "youtube_uc123_some_channel_profile_photo_profile_uc123_20261106_120109.jpg",
+    "original_artifact_id": "profile_UC123",
+    "raw": {
+      "platform_channel_id": "UC123",
+      "thumbnail_url": "https://t/x.jpg"
+    },
+    "rebuild_target_tables": [
+      "media_items",
+      "youtube_videos",
+      "youtube_channels"
+    ],
+    "request_url": "https://t/x.jpg",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "source_url": "https://www.youtube.com/channel/UC123"
+  },
+  "provenance": {
+    "collection_account": null,
+    "extension_version": null,
+    "http_status": null,
+    "partial": false,
+    "platform_ids": null,
+    "rate_limit_scope": null,
+    "request_url": "https://t/x.jpg",
+    "scrape_run_id": null
+  },
+  "raw_payload": {
+    "artifact_id": null,
+    "inline": {
+      "platform_channel_id": "UC123",
+      "thumbnail_url": "https://t/x.jpg"
+    },
+    "path": null,
+    "refs": [],
+    "sidecar_path": null
+  },
+  "rebuild": {
+    "required_fields": [
+      "source",
+      "artifact_kind",
+      "file.path",
+      "file.size",
+      "file.sha256"
+    ],
+    "target_tables": [
+      "media_items",
+      "youtube_videos",
+      "youtube_channels"
+    ]
+  },
+  "schema_version": 1,
+  "source": "youtube",
+  "timestamps": {
+    "collected_at": "2026-11-06T12:01:10.556584+00:00"
+  }
+}
