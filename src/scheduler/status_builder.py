@@ -30,6 +30,7 @@ from pathlib import Path
 def backup_status():
     return {"status": "backup_disabled", "reason": "backup subsystem removed 2026-09-19"}
 from src.core.env import env_int
+from src.core.source_config import STATUS_SOURCES
 from src.core.vault import VAULT_ROOT, vault_artifact_counts, vault_health
 
 logger = logging.getLogger(__name__)
@@ -907,7 +908,9 @@ async def build_status(pool, freshness: list[tuple[str, str, int]]) -> dict:
                 stale_after = {name: thresh for name, _query, thresh in freshness}
                 rows = await conn.fetch(
                     "SELECT source, status, last_error FROM source_health "
-                    "WHERE status IN ('dead','degraded','auth_paused')"
+                    "WHERE source = ANY($1::text[]) "
+                    "AND status IN ('dead','degraded','auth_paused')",
+                    sorted(STATUS_SOURCES),
                 )
                 dead_sources = set(r["source"] for r in rows if r["status"] == "dead")
                 degraded_sources = set(
@@ -1186,7 +1189,7 @@ async def delta_new_dead_sources(conn, since) -> list[str]:
         )
     except Exception:
         return []
-    return [str(r["source"]) for r in fetched if r["source"]]
+    return [str(r["source"]) for r in fetched if str(r["source"] or "") in STATUS_SOURCES]
 
 
 async def delta_extension_hooks(conn) -> list[dict]:

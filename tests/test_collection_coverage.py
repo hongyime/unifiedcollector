@@ -20,7 +20,7 @@ class Conn:
 
     async def fetch(self, sql, *args):
         if "SELECT DISTINCT" in sql and "FROM source_health" in sql:
-            return [{"source": "telegram"}]
+            return [{"source": "telegram"}, {"source": "instagram_dm"}]
         if "FROM media_source_rollups" in sql:
             return [{"source": "telegram", "latest_media_at": self.now - timedelta(hours=1)}]
         if "FROM media_items" in sql:
@@ -65,6 +65,7 @@ def test_collection_coverage_snapshot_writes_digest():
     assert report["summary"]["digest"].startswith("Coverage: 1/1 sources fresh")
     assert report["summary"]["seen_targets_total"] == 5
     assert len(conn.inserted) == 1
+    assert [row[0] for row in conn.inserted] == ["telegram"]
 
 
 def test_collection_coverage_snapshot_dry_run_does_not_write():

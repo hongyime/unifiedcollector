@@ -48,6 +48,13 @@ KNOWN_SOURCES = (
     "youtube", "strava", "website", "search", "exposure", "beeper", "whatsapp",
 )
 
+# Sources that may appear in operator-facing health and coverage reporting.
+# Keep retired source-health residue out of those views even if an old restore
+# reintroduces it into the generic ledger.
+STATUS_SOURCES = frozenset(
+    (*KNOWN_SOURCES, "airbnb", "bluesky", "pinterest", "snapchat", "facebook", "threads", "x", "spiderfoot")
+)
+
 
 def _config_root() -> Path:
     """Resolve the config/sources directory.

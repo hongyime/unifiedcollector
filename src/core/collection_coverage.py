@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from src.core.seen_targets import refresh_seen_targets_from_sources, seen_target_summary_by_source
+from src.core.source_config import STATUS_SOURCES
 
 
 async def _table_exists(conn, table: str) -> bool:
@@ -56,6 +57,7 @@ async def build_collection_coverage_snapshot(
     await _add_sources_from_table(conn, sources, "media_source_rollups", "source", source)
     if not sources:
         await _add_sources_from_table(conn, sources, "collection_runs", "source", source)
+    sources.intersection_update(STATUS_SOURCES)
 
     media_rollups: dict[str, Any] = {}
     if await _table_exists(conn, "media_source_rollups"):
@@ -147,6 +149,7 @@ async def build_collection_coverage_snapshot(
     try:
         seen_targets = await seen_target_summary_by_source(conn, source=source)
         sources.update(seen_targets)
+        sources.intersection_update(STATUS_SOURCES)
     except Exception:
         seen_targets = {}
 

@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from src.core.source_config import KNOWN_SOURCES, _sync_targets_to_db
+from src.core.source_config import KNOWN_SOURCES, STATUS_SOURCES, _sync_targets_to_db
 
 
 def _pool():
@@ -31,6 +31,12 @@ def test_instagram_dm_is_not_a_registered_source():
 
     assert "instagram_dm" not in KNOWN_SOURCES
     assert "instagram_dm" not in COLLECTORS
+
+
+def test_status_sources_include_only_configured_collectors():
+    assert "instagram" in STATUS_SOURCES
+    assert "spiderfoot" in STATUS_SOURCES
+    assert "instagram_dm" not in STATUS_SOURCES
 
 
 @pytest.mark.asyncio
