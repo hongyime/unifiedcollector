@@ -1152,10 +1152,16 @@ class AirbnbCollector(ProfileOnlyCollector):
                 # persisted GraphQL operation returns an application error.
                 # Reuse the existing public profile parser as a bounded
                 # fallback; HTTP 403/429 still preserve their retry windows.
-                if str(graphql_error) not in {
-                    "graphql_query_failed",
-                    "graphql_payload_unavailable",
-                }:
+                if (
+                    str(graphql_error) not in {
+                        "graphql_query_failed",
+                        "graphql_payload_unavailable",
+                    }
+                    and not (
+                        isinstance(graphql_error, _AirbnbPublicHttpError)
+                        and graphql_error.status_code == 400
+                    )
+                ):
                     raise
                 logger.info(
                     "Airbnb host GraphQL returned %s; trying public profile page",
@@ -1254,36 +1260,47 @@ class AirbnbCollector(ProfileOnlyCollector):
             if listing is None:
                 raise RuntimeError("listing_payload_unavailable")
 
-            calendar_payload = await self._graphql(
-                client,
-                "PdpAvailabilityCalendar",
-                _PDP_AVAILABILITY_HASH,
-                {"request": {
-                    "count": 12,
-                    "listingId": listing_id,
-                    "month": today.month,
-                    "year": today.year,
-                }},
-                base_url=base_url,
-                trailing_slash=True,
-            )
-            availability = _parse_airbnb_calendar(calendar_payload)
+            try:
+                calendar_payload = await self._graphql(
+                    client,
+                    "PdpAvailabilityCalendar",
+                    _PDP_AVAILABILITY_HASH,
+                    {"request": {
+                        "count": 12,
+                        "listingId": listing_id,
+                        "month": today.month,
+                        "year": today.year,
+                    }},
+                    base_url=base_url,
+                    trailing_slash=True,
+                )
+                availability = _parse_airbnb_calendar(calendar_payload)
+            except _AirbnbPublicHttpError as exc:
+                if exc.status_code != 400:
+                    raise
+                logger.info("Airbnb calendar unavailable (HTTP 400); retaining listing")
+                availability = []
             price_range = _first_available_stay(availability, today)
             price_amount: float | None = None
             price_currency: str | None = None
             if price_range:
-                price_payload = await self._graphql(
-                    client,
-                    "StaysPdpSections",
-                    _PDP_SECTIONS_HASH,
-                    _stays_detail_variables(
-                        listing_id,
-                        price_range[0],
-                        price_range[1],
-                    ),
-                    base_url=base_url,
-                )
-                price_amount, price_currency = _parse_airbnb_price(price_payload)
+                try:
+                    price_payload = await self._graphql(
+                        client,
+                        "StaysPdpSections",
+                        _PDP_SECTIONS_HASH,
+                        _stays_detail_variables(
+                            listing_id,
+                            price_range[0],
+                            price_range[1],
+                        ),
+                        base_url=base_url,
+                    )
+                    price_amount, price_currency = _parse_airbnb_price(price_payload)
+                except _AirbnbPublicHttpError as exc:
+                    if exc.status_code != 400:
+                        raise
+                    logger.info("Airbnb price unavailable (HTTP 400); retaining listing")
             if price_amount is None and price_range:
                 first_day = next((
                     row for row in availability
@@ -1302,15 +1319,20 @@ class AirbnbCollector(ProfileOnlyCollector):
 
             reviews: list[dict[str, Any]] = []
             if listing["reviews_count"] != 0:
-                review_payload = await self._graphql(
-                    client,
-                    "StaysPdpReviewsQuery",
-                    _PDP_REVIEWS_HASH,
-                    _review_variables(listing_id),
-                    base_url=base_url,
-                    trailing_slash=True,
-                )
-                reviews = _parse_airbnb_reviews(review_payload, listing_id)
+                try:
+                    review_payload = await self._graphql(
+                        client,
+                        "StaysPdpReviewsQuery",
+                        _PDP_REVIEWS_HASH,
+                        _review_variables(listing_id),
+                        base_url=base_url,
+                        trailing_slash=True,
+                    )
+                    reviews = _parse_airbnb_reviews(review_payload, listing_id)
+                except _AirbnbPublicHttpError as exc:
+                    if exc.status_code != 400:
+                        raise
+                    logger.info("Airbnb reviews unavailable (HTTP 400); retaining listing")
         return listing, reviews, availability
 
     async def run_native_cycle(self) -> dict[str, Any]:
@@ -1483,6 +1505,16 @@ class AirbnbCollector(ProfileOnlyCollector):
                 availability_days=len(availability),
             )
         except Exception as exc:
+            if isinstance(exc, _AirbnbPublicHttpError) and exc.status_code == 400:
+                await finish_native_target(
+                    self.pool,
+                    self.SOURCE_NAME,
+                    int(target["id"]),
+                    claim_token=target["claim_token"],
+                    success=True,
+                )
+                logger.info("Airbnb public target unavailable (HTTP 400); completing target")
+                return summary
             attempts = int(target.get("attempts") or 1)
             exponential_retry = min(24 * 60 * 60, 15 * 60 * (2 ** min(max(attempts - 1, 0), 6)))
             retry_after_seconds = getattr(exc, "retry_after_seconds", None)

@@ -301,6 +301,43 @@ async def test_airbnb_host_profile_skips_page_request_when_graphql_has_bio(monke
     collector.probe_profile.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_airbnb_listing_keeps_public_data_when_optional_graphql_is_unavailable(monkeypatch):
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            self.headers = {}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+    monkeypatch.setattr(airbnb_mod.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(
+        airbnb_mod,
+        "_resolve_public_api_key",
+        AsyncMock(return_value=("public-test-key", "https://www.airbnb.com")),
+    )
+    monkeypatch.setattr(airbnb_mod, "_fetch_public_listing_page", AsyncMock(return_value={}))
+    monkeypatch.setattr(
+        airbnb_mod,
+        "_parse_airbnb_listing",
+        lambda _payload, listing_id: {"listing_id": listing_id, "reviews_count": 1},
+    )
+    collector = AirbnbCollector()
+    collector._graphql = AsyncMock(side_effect=[
+        airbnb_mod._AirbnbPublicHttpError(400),
+        airbnb_mod._AirbnbPublicHttpError(400),
+    ])
+
+    listing, reviews, availability = await collector._fetch_listing_data("123456")
+
+    assert listing["listing_id"] == "123456"
+    assert reviews == []
+    assert availability == []
+
+
 def test_airbnb_pdp_parser_extracts_public_listing_and_host_fields():
     payload = {
         "data": {
@@ -829,3 +866,39 @@ async def test_airbnb_empty_calendar_preserves_stored_availability_and_check_tim
     assert "WHEN jsonb_array_length(EXCLUDED.availability)>0 THEN now()" in listing_query
     assert "ELSE airbnb_listings.availability_checked_at END" in listing_query
     assert summary["availability_days"] == 0
+
+
+@pytest.mark.asyncio
+async def test_airbnb_unavailable_public_target_completes_without_error(monkeypatch):
+    from src.collectors import native_platform_scrape as native_scrape
+
+    pool = object()
+    monkeypatch.setenv("AIRBNB_NATIVE_ENABLED", "1")
+    monkeypatch.setattr(native_scrape, "seed_native_targets", AsyncMock())
+    monkeypatch.setattr(
+        native_scrape,
+        "claim_native_target",
+        AsyncMock(return_value={
+            "id": 7,
+            "target_url": "https://www.airbnb.com/users/show/50858791",
+            "attempts": 1,
+            "claim_token": "00000000-0000-0000-0000-000000000001",
+        }),
+    )
+    finish = AsyncMock()
+    monkeypatch.setattr(native_scrape, "finish_native_target", finish)
+
+    collector = AirbnbCollector()
+    collector.pool = pool
+    collector._fetch_host_profile = AsyncMock(
+        side_effect=airbnb_mod._AirbnbPublicHttpError(400),
+    )
+
+    summary = await collector.run_native_cycle()
+
+    finish.assert_awaited_once_with(
+        pool, "airbnb", 7,
+        claim_token="00000000-0000-0000-0000-000000000001",
+        success=True,
+    )
+    assert "error" not in summary
