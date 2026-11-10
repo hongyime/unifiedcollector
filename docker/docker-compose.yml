@@ -111,6 +111,7 @@ services:
     image: unifiedcollector-spiderfoot:latest
     container_name: unifiedcollector_recon_egress_guard
     init: true
+    mem_limit: 256m
     command: python -m src.core.recon_egress_guard --serve --database-host unifiedcollector_postgres
     environment:
       RECON_MAX_EGRESS_BYTES: "${RECON_MAX_EGRESS_BYTES:-1073741824}"

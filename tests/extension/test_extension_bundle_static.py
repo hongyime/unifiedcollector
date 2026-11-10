@@ -203,18 +203,19 @@ def test_x_is_auto_managed_by_scraper_tab_recovery():
     background = _read("extension/background.js")
     tabs_js = _read("extension/tabs.js")
 
-    assert 'const AUTO_SCRAPER_PLATFORM_IDS = new Set(["instagram", "threads", "tiktok", "lemon8", "x", "facebook", "strava", "pinterest", "snapchat", "airbnb"])' in background
+    assert 'const AUTO_SCRAPER_PLATFORM_IDS = new Set(["instagram", "threads", "tiktok", "lemon8", "x", "facebook", "strava", "pinterest", "snapchat", "airbnb", "bluesky", "youtube"])' in background
     assert "p.scraper && AUTO_SCRAPER_PLATFORM_IDS.has(p.id)" in background
     open_all_block = background.split('case "openAll":', 1)[1].split('case "refreshScraperTabs":', 1)[0]
     reload_intent_block = background.split("const openIds = Array.isArray(intent.open_ids)", 1)[1].split(
         "await runStartupRecovery",
         1,
     )[0]
-    assert "for (const p of scraperPlatforms())" in open_all_block
+    assert "residentScraperPlatformIds()" in open_all_block
+    assert "scraperPlatforms().filter((platform) => residentIds.has(platform.id))" in open_all_block
     assert "globalThis.UC_PLATFORMS" not in open_all_block
     assert "const p = platformById(id);" in reload_intent_block
     assert 'const expandedOverride = params.get("expanded")' not in tabs_js
-    assert "One tab per social platform." in tabs_js
+    assert "At most two scheduler-selected social tabs" in tabs_js
 
 
 def test_lemon8_runs_as_visible_scraper_alongside_headless_collector():
@@ -232,7 +233,7 @@ def test_lemon8_runs_as_visible_scraper_alongside_headless_collector():
     assert 'return topic ? "topic_" + topic : "topic";' in content
 
 
-def test_scraper_tabs_are_limited_to_one_per_social_platform():
+def test_scraper_tabs_are_limited_to_scheduler_selected_platforms():
     background = _read("extension/background.js")
     platforms = _read("extension/platforms.js")
     tabs_html = _read("extension/tabs.html")
@@ -253,14 +254,21 @@ def test_scraper_tabs_are_limited_to_one_per_social_platform():
     )[0]
     assert "return platform && platform.id ? platform.id : null;" in background
     assert "const allowed = 1;" in budget_block
+    assert "const BROWSER_RESIDENT_TAB_LIMIT = 2;" in background
+    assert 'const BROWSER_RESIDENT_PLATFORM_IDS = ["x", "instagram", "facebook", "threads", "tiktok", "lemon8", "strava", "pinterest", "snapchat", "airbnb"];' in background
+    assert "async function residentScraperPlatformIds()" in background
+    assert "resident_scraper_tab_budget_exceeded" in budget_block
+    assert "inactive_scraper_tab_open" in budget_block
     assert "const keep = selection.rows[0]" in ensure_block
+    assert "if (!residentIds.has(p.id))" in ensure_block
     assert "for (const tab of tabs)" in ensure_block
     assert "chrome.tabs.remove(tab.id)" in ensure_block
     assert "platformManagedUrls" not in background
     assert "ucOpenExpandedPlatformTabs" not in background
     assert "ucOpenExpandedPlatformTabs" not in tabs_js
     assert 'id="expandedTabs"' not in tabs_html
-    assert "One tab per social" in tabs_html
+    assert "Open scheduled tabs" in tabs_html
+    assert "At most two scheduler-selected social tabs" in tabs_js
     assert "closeDuplicateControlTabs" in tabs_js
     assert 'chrome.tabs.create({ url, pinned: false })' in _read("extension/popup.js")
 
@@ -646,7 +654,7 @@ def test_scraper_refresh_and_loop_nudges_close_canonical_duplicate_tabs():
     assert "closeDuplicateExtensionControlTabs(`refresh:${reason}`)" in refresh_block
     assert "setScraperTabPinnedState(t, pinScraperTabs)" in refresh_block
     assert "pinStateChanged" in refresh_block
-    assert "closeDuplicateScraperTabRows(selection.duplicateRows, `refresh:${reason}`)" in refresh_block
+    assert "...selection.rows.filter((row) => !residentIds.has(row.platform.id))" in refresh_block
     assert "closedDuplicates: closed.closed" in refresh_block
     assert "closeDuplicateScraperTabRows(selection.duplicateRows, `ensure_loops:${reason || \"nudge\"}`)" in loop_block
     tab_lookup = background.split("async function tabForPlatform", 1)[1].split("async function isLoggedIn", 1)[0]

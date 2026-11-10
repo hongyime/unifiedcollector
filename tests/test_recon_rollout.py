@@ -14,12 +14,14 @@ from src.core import recon_rollout
 from src.core.recon_rollout import (
     AdmissionDenied,
     admission_snapshot,
+    begin_run_window,
     collect_stage_metrics,
     commit_claim,
     initialize_state,
     load_policy,
     record_observation,
     reserve_claim,
+    rotate_state,
     resume_after_observation,
     validate_zero_spend_modules,
 )
@@ -37,16 +39,32 @@ GOOD_METRICS = {
 }
 
 
-def test_domain_remediation_policy_preserves_r1_and_excludes_usernames():
+def test_domain_username_policy_preserves_r1_limits_and_exact_sources():
     legacy = load_policy(ROOT / "config" / "task-37-admission-policy-r1.json")
     remediation = load_policy(ROOT / "config" / "task-37-admission-policy.json")
 
     assert legacy["policy_id"] == "collector-production-recovery-2026-10-23"
-    assert remediation["policy_id"].endswith("-domain-remediation-r2")
-    assert remediation["approved_target_types"] == ["domain"]
+    assert remediation["policy_id"].endswith("-domain-username-r3")
+    assert remediation["approved_target_types"] == ["domain", "username"]
+    assert remediation["approved_source_identities"] == legacy["approved_source_identities"]
     assert remediation["limits"] == legacy["limits"]
     assert remediation["stage_gates"] == legacy["stage_gates"]
     assert remediation["paid_or_uncertain_modules_excluded"] == legacy["paid_or_uncertain_modules_excluded"]
+
+
+def test_rotate_state_archives_previous_policy_and_starts_halted(tmp_path, monkeypatch):
+    policy, state_path = _test_policy(tmp_path, monkeypatch, active=True)
+    old_state = state_path.read_text(encoding="utf-8")
+    replacement = copy.deepcopy(policy)
+    replacement["policy_id"] = f"replacement-{id(tmp_path)}"
+
+    state, archive = rotate_state(replacement, state_path)
+
+    assert archive.exists()
+    assert archive.read_text(encoding="utf-8") == old_state
+    assert state["policy_id"] == replacement["policy_id"]
+    assert state["cohort_limit"] == 5
+    assert state["halt"] is True
 
 
 def _test_policy(tmp_path, monkeypatch, *, active=True):
@@ -89,6 +107,21 @@ def test_cohort_gate_advances_only_after_all_stage_metrics_pass(tmp_path, monkey
     assert "queue_age" in failed["failures"]
     assert failed["state"]["halt"] is True
     assert failed["state"]["cohort_limit"] == 25
+
+
+def test_new_run_window_renews_only_an_incomplete_active_cohort(tmp_path, monkeypatch):
+    policy, state_path = _test_policy(tmp_path, monkeypatch)
+    before = json.loads(state_path.read_text(encoding="utf-8"))
+    before["started_at"] = "2000-01-01T00:00:00+00:00"
+    state_path.write_text(json.dumps(before), encoding="utf-8")
+
+    started = begin_run_window(policy=policy, path=state_path)
+    assert started["started_at"] != before["started_at"]
+    assert admission_snapshot(policy, state_path)[2] is None
+
+    _consume_initial_cohort(policy, state_path)
+    exhausted = begin_run_window(policy=policy, path=state_path)
+    assert exhausted["started_at"] == started["started_at"]
 
 
 def test_live_canary_persists_observations_and_advances(tmp_path, monkeypatch):

@@ -13,7 +13,13 @@ from pathlib import Path
 
 from src.db.connection import close_pool, get_pool
 from src.db.migrate import apply_all
-from src.core.recon_rollout import AdmissionPolicyError, admission_snapshot
+from src.core.recon_rollout import (
+    AdmissionPolicyError,
+    admission_snapshot,
+    begin_run_window,
+    collect_stage_metrics,
+    record_observation,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -124,17 +130,24 @@ def _heartbeat_is_fresh(*, now: float | None = None) -> bool:
     return True
 
 
-async def _database_is_healthy(pool) -> bool:
-    async with pool.acquire() as conn:
-        if await conn.fetchval("SELECT 1") != 1:
-            return False
-        row = await conn.fetchrow(
-            "SELECT status, updated_at FROM source_health WHERE source = $1",
-            "spiderfoot",
-        )
-    if not row or row["status"] != "running" or row["updated_at"] is None:
+async def _database_is_healthy(pool, *, expected_status: str | set[str] = "running") -> bool:
+    try:
+        async with pool.acquire() as conn:
+            if await conn.fetchval("SELECT 1") != 1:
+                return False
+            row = await conn.fetchrow(
+                "SELECT status, updated_at FROM source_health WHERE source = $1",
+                "spiderfoot",
+            )
+    except Exception:
         return False
-    age = (time.time() - row["updated_at"].timestamp())
+    expected = {expected_status} if isinstance(expected_status, str) else expected_status
+    if not row or row["status"] not in expected or row["updated_at"] is None:
+        return False
+    try:
+        age = time.time() - row["updated_at"].timestamp()
+    except (AttributeError, OSError, TypeError, ValueError):
+        return False
     return 0 <= age <= _health_max_age_seconds()
 
 
@@ -167,21 +180,27 @@ class _RunWindow:
 
 def _run_window_config() -> tuple[int, int]:
     """Return bounded target/deadline caps; operators may lower, never unbound."""
-    max_targets = min(25, max(1, int(os.getenv("RECON_MAX_TARGETS_PER_RUN", "10"))))
-    deadline = min(3_600, max(30, int(os.getenv("RECON_RUN_DEADLINE_SECONDS", "1800"))))
+    max_targets = min(10, max(1, int(os.getenv("RECON_MAX_TARGETS_PER_RUN", "10"))))
+    deadline = min(1_800, max(30, int(os.getenv("RECON_RUN_DEADLINE_SECONDS", "1800"))))
     return max_targets, deadline
 
 
 async def _check_worker_health() -> bool:
     try:
-        admission_snapshot()
+        _policy, _state, admission_block = admission_snapshot()
     except AdmissionPolicyError:
         return False
     if not _heartbeat_is_fresh():
         return False
-    pool = await get_pool()
     try:
-        return await _database_is_healthy(pool)
+        pool = await get_pool()
+    except Exception:
+        return False
+    try:
+        return await _database_is_healthy(
+            pool,
+            expected_status="admission_halted" if admission_block else {"idle", "running"},
+        )
     finally:
         await close_pool()
 
@@ -221,10 +240,47 @@ async def _worker_loop(worker_id: int, recon_spiderfoot, pool, args, budget: _Ru
         _touch_worker_heartbeat(worker_id)
         if args.once:
             break
-        delay = args.poll_interval if report.get("status") in {
-            "idle", "admission_halted", "admission_unavailable", "guard_unavailable",
-        } else 0.5
+        if report.get("status") in {"admission_halted", "admission_unavailable", "guard_unavailable"}:
+            return
+        delay = args.poll_interval if report.get("status") == "idle" else 0.5
         await asyncio.sleep(delay)
+
+
+async def _advance_completed_cohort(pool) -> dict | None:
+    """Record and apply the installed gate when a cohort has exhausted its claims."""
+    policy, _state, block = admission_snapshot()
+    if block != "cohort_cap_reached":
+        return None
+    async with pool.acquire() as conn:
+        metrics = await collect_stage_metrics(conn, policy=policy)
+    result = record_observation(metrics, policy=policy)
+    state = result["state"]
+    logging.getLogger(__name__).info(
+        "recon cohort gate evaluated (passed=%s next_cohort=%s failures=%s)",
+        result["passed"], state["cohort_limit"], ",".join(result["failures"]) or "none",
+    )
+    return result
+
+
+async def _cooldown_with_heartbeats(seconds: int, workers: int, recon_spiderfoot, pool) -> None:
+    """Remain healthcheck-live while intentionally waiting between run windows."""
+    deadline = time.monotonic() + seconds
+    interval = max(1, min(60, _health_max_age_seconds() // 2))
+    while True:
+        for worker_id in range(1, workers + 1):
+            _touch_worker_heartbeat(worker_id)
+        _policy, _state, admission_block = admission_snapshot()
+        async with pool.acquire() as conn:
+            await recon_spiderfoot._mark_source_health(
+                conn,
+                "admission_halted" if admission_block else "idle",
+                admission_block[:500] if admission_block else None,
+                success=True,
+            )
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        await asyncio.sleep(min(interval, remaining))
 
 
 async def _fp_blocklist_refresh_loop(recon_spiderfoot, pool) -> None:
@@ -313,6 +369,7 @@ async def _run(args) -> None:
             )
         try:
             while True:
+                begin_run_window()
                 max_targets, deadline = _run_window_config()
                 budget = _RunWindow(max_targets, deadline)
                 active_workers = 1 if args.once else workers
@@ -322,12 +379,15 @@ async def _run(args) -> None:
                 ))
                 if args.once:
                     break
+                transition = await _advance_completed_cohort(pool)
+                if transition and transition["passed"] and not transition["state"].get("halt"):
+                    continue
                 cooldown = max(60, int(os.getenv("RECON_RUN_COOLDOWN_SECONDS", "3600")))
                 logging.getLogger(__name__).info(
                     "recon run window ended (targets=%d cap=%d); cooling down %ds",
                     budget.targets, budget.max_targets, cooldown,
                 )
-                await asyncio.sleep(cooldown)
+                await _cooldown_with_heartbeats(cooldown, workers, recon_spiderfoot, pool)
         finally:
             if fp_task is not None:
                 fp_task.cancel()

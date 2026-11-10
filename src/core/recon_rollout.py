@@ -5,6 +5,7 @@ import argparse
 import fcntl
 import json
 import os
+import shutil
 import stat
 import tempfile
 import uuid
@@ -274,6 +275,27 @@ def initialize_state(
     return state
 
 
+def rotate_state(
+    policy: dict[str, Any] | None = None,
+    path: Path | None = None,
+) -> tuple[dict[str, Any], Path]:
+    """Archive the installed private state, then create a halted state for a new policy."""
+    config = policy or load_policy()
+    target = path or state_path()
+    _secure_state_parent(target)
+    if not target.exists():
+        raise AdmissionPolicyError("admission state is not initialized")
+    stamp = _utc_now().strftime("%Y%m%dT%H%M%SZ")
+    archive = target.with_name(f"{target.name}.{stamp}.archive")
+    if archive.exists():
+        raise AdmissionPolicyError("admission state archive already exists")
+    with _locked_state(target):
+        shutil.copy2(target, archive)
+        os.chmod(archive, _state_mode())
+        target.unlink()
+    return initialize_state(config, target, halted=True), archive
+
+
 def admission_snapshot(
     policy: dict[str, Any] | None = None,
     path: Path | None = None,
@@ -314,6 +336,22 @@ def activate_admission(*, policy: dict[str, Any] | None = None, path: Path | Non
             raise AdmissionPolicyError("the existing cohort allowance is exhausted")
         state["halt"] = False
         state["halt_reason"] = None
+        state["started_at"] = _utc_now().isoformat()
+        _write_state(target, state)
+        return dict(state)
+
+
+def begin_run_window(*, policy: dict[str, Any] | None = None, path: Path | None = None) -> dict[str, Any]:
+    """Start the installed per-run deadline without altering cohort admission."""
+    config = policy or load_policy()
+    target = path or state_path()
+    with _locked_state(target) as state:
+        if state.get("policy_id") != config["policy_id"]:
+            raise AdmissionPolicyError("admission state does not match the installed policy")
+        if state.get("halt") or int(state.get("claims_used", 0)) >= int(state.get("cohort_limit", 0)):
+            return dict(state)
+        if state.get("active_reservations"):
+            raise AdmissionPolicyError("cannot begin a run with active admission reservations")
         state["started_at"] = _utc_now().isoformat()
         _write_state(target, state)
         return dict(state)
@@ -595,6 +633,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Inspect or control the persistent recon rollout gate")
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--init-state", action="store_true")
+    group.add_argument("--rotate-state", action="store_true", help="Archive the private state and initialize the installed policy halted")
     group.add_argument("--activate", action="store_true")
     group.add_argument("--observe-live", action="store_true", help="Collect current stage metrics from PostgreSQL and persist them")
     group.add_argument("--resume-after-observation", action="store_true", help="Explicitly reassess a halted completed cohort")
@@ -606,6 +645,9 @@ def main() -> int:
         if args.init_state:
             state = initialize_state(policy)
             result = {"initialized": True, "policy_id": state["policy_id"], "halt": state["halt"]}
+        elif args.rotate_state:
+            state, archive = rotate_state(policy)
+            result = {"rotated": True, "policy_id": state["policy_id"], "halt": state["halt"], "archive": str(archive)}
         elif args.activate:
             state = activate_admission(policy=policy)
             result = {"activated": True, "policy_id": state["policy_id"], "cohort_limit": state["cohort_limit"]}

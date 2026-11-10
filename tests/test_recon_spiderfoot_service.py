@@ -105,10 +105,87 @@ def test_run_window_enforces_target_reservations():
 def test_run_window_deadline_and_config_are_bounded(monkeypatch):
     monkeypatch.setenv("RECON_MAX_TARGETS_PER_RUN", "999")
     monkeypatch.setenv("RECON_RUN_DEADLINE_SECONDS", "999999")
-    assert _run_window_config() == (25, 3600)
+    assert _run_window_config() == (10, 1800)
     budget = _RunWindow(max_targets=1, deadline_seconds=30)
     budget.started -= 31
     assert asyncio.run(budget.reserve()) is False
+
+
+def test_completed_cohort_is_evaluated_and_advances_without_a_restart(monkeypatch):
+    class Acquire:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class Pool:
+        def acquire(self):
+            return Acquire()
+
+    policy = {"policy_id": "test-policy"}
+    calls = []
+
+    monkeypatch.setattr(
+        recon_spiderfoot_service,
+        "admission_snapshot",
+        lambda: (policy, {"cohort_limit": 5}, "cohort_cap_reached"),
+    )
+
+    async def collect(_conn, *, policy):
+        assert policy["policy_id"] == "test-policy"
+        return {"useful_observations": 1}
+
+    def record(metrics, *, policy):
+        calls.append((metrics, policy))
+        return {"passed": True, "failures": [], "state": {"cohort_limit": 25, "halt": False}}
+
+    monkeypatch.setattr(recon_spiderfoot_service, "collect_stage_metrics", collect)
+    monkeypatch.setattr(recon_spiderfoot_service, "record_observation", record)
+
+    result = asyncio.run(recon_spiderfoot_service._advance_completed_cohort(Pool()))
+
+    assert result["state"]["cohort_limit"] == 25
+    assert calls == [({"useful_observations": 1}, policy)]
+
+
+def test_cooldown_refreshes_each_worker_heartbeat(monkeypatch):
+    clock = [0.0]
+    touched = []
+    sleeps = []
+
+    monkeypatch.setattr(recon_spiderfoot_service.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(recon_spiderfoot_service, "_health_max_age_seconds", lambda: 60)
+    monkeypatch.setattr(recon_spiderfoot_service, "_touch_worker_heartbeat", touched.append)
+
+    async def sleep(seconds):
+        sleeps.append(seconds)
+        clock[0] += seconds
+
+    class Acquire:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class Pool:
+        def acquire(self):
+            return Acquire()
+
+    health = []
+
+    class Recon:
+        async def _mark_source_health(self, _conn, status, error, *, success):
+            health.append((status, error, success))
+
+    monkeypatch.setattr(recon_spiderfoot_service.asyncio, "sleep", sleep)
+    monkeypatch.setattr(recon_spiderfoot_service, "admission_snapshot", lambda: ({}, {}, None))
+    asyncio.run(recon_spiderfoot_service._cooldown_with_heartbeats(65, 2, Recon(), Pool()))
+
+    assert sleeps == [30, 30, 5]
+    assert touched == [1, 2, 1, 2, 1, 2, 1, 2]
+    assert health == [("idle", None, True)] * 4
 
 
 def test_worker_count_is_bounded():
@@ -234,10 +311,14 @@ def test_database_healthcheck_requires_pool_and_recent_worker_progress(monkeypat
     assert not asyncio.run(
         recon_spiderfoot_service._database_is_healthy(Pool(Conn(updated_at=stale)))
     )
+    assert asyncio.run(
+        recon_spiderfoot_service._database_is_healthy(Pool(Conn(status="admission_halted")), expected_status="admission_halted")
+    )
 
 
 def test_worker_healthcheck_accepts_a_valid_halted_admission(monkeypatch):
-    async def database_is_healthy(_pool):
+    async def database_is_healthy(_pool, *, expected_status):
+        assert expected_status == "admission_halted"
         return True
 
     async def get_pool():

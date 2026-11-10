@@ -578,7 +578,7 @@ def test_run_spiderfoot_once_fails_when_scan_has_no_useful_observations(monkeypa
     assert conn.health[-1][1] == "degraded"
 
 
-def test_halted_admission_writes_a_healthy_idle_heartbeat(monkeypatch, tmp_path):
+def test_halted_admission_writes_a_healthy_halted_heartbeat(monkeypatch, tmp_path):
     _allow_test_admission(monkeypatch, tmp_path)
     state_path = Path(os.environ["RECON_ADMISSION_STATE_PATH"])
     recon_spiderfoot.halt_admission("error_rate", path=state_path)
@@ -597,7 +597,7 @@ def test_halted_admission_writes_a_healthy_idle_heartbeat(monkeypatch, tmp_path)
     report = asyncio.run(run_spiderfoot_once(conn))
 
     assert report["status"] == "admission_halted"
-    assert conn.health[-1][1] == ("spiderfoot", "running", None, True)
+    assert conn.health[-1][1] == ("spiderfoot", "admission_halted", "error_rate", True)
 
 
 def test_run_spiderfoot_once_dry_run_only_reads_pending_target(monkeypatch, tmp_path):

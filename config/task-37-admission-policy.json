@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "policy_id": "collector-production-recovery-2026-10-23-domain-remediation-r2",
+  "policy_id": "collector-production-recovery-2026-10-23-domain-username-r3",
   "enabled": true,
   "approved_source_identities": [
     "collector:discovered_links",
@@ -14,7 +14,7 @@
     "collector:github_commits"
   ],
   "approved_account_identities": [],
-  "approved_target_types": ["domain"],
+  "approved_target_types": ["domain", "username"],
   "cohorts": [5, 25, 100, 250],
   "limits": {
     "max_claims": 250,

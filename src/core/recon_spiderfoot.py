@@ -1269,7 +1269,7 @@ async def run_spiderfoot_once(
         if not dry_run:
             # A policy halt intentionally prevents claims; the living worker is
             # still healthy and must heartbeat so Docker does not restart it.
-            await _mark_source_health(conn, "running", None, success=True)
+            await _mark_source_health(conn, "admission_halted", admission_block[:500], success=True)
         return {
             "status": "admission_halted",
             "target": None,
@@ -1298,7 +1298,7 @@ async def run_spiderfoot_once(
             return {"status": "admission_unavailable", "target": None, "observations": 0, "error": error, "dry_run": False}
     if not target:
         if not dry_run:
-            await _mark_source_health(conn, "running", None, success=True)
+            await _mark_source_health(conn, "idle", None, success=True)
         return {"status": "dry_run" if dry_run else "idle", "target": None, "observations": 0, "dry_run": dry_run}
     scope = _json_dict(target.get("scope_json"))
     try:
@@ -1318,6 +1318,10 @@ async def run_spiderfoot_once(
         )
         await _mark_source_health(conn, "running", None, success=True)
         return {"status": "blocked", "target": target, "observations": 0, "error": reason, "dry_run": dry_run}
+
+    if not dry_run:
+        # A running health state means the active admission produced a valid claim.
+        await _mark_source_health(conn, "running", None, success=True)
 
     # GHunt: intercept email targets tagged with scope.modules=['ghunt'] (or when
     # RECON_EMAIL_ENGINE=ghunt) BEFORE SpiderFoot module resolution. GHunt does not

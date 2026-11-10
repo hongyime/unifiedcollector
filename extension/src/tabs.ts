@@ -144,7 +144,7 @@ async function render() {
     `<b>Scrapers available:</b> ${scrapers}. A listed scraper runs only while its matching tab is open; ` +
     `a platform with no tab is paused. Availability does not mean it is collecting right now. ` +
     `Session badges check only for a first-party session cookie; they do not read or show its value. ` +
-    `Collection receipts are separate evidence. One tab per social platform.`;
+    `Collection receipts are separate evidence. At most two scheduler-selected social tabs stay open.`;
   maybeAutoProbe(backgroundError);
 }
 
@@ -221,6 +221,23 @@ $("openAll").addEventListener("click", async () => {
   setTimeout(render, 800);
 });
 $("refresh").addEventListener("click", render);
+$("copyDiagnostics").addEventListener("click", async () => {
+  const button = $("copyDiagnostics");
+  const text = $("diag").innerText;
+  try {
+    await navigator.clipboard.writeText(text);
+    button.textContent = "Copied";
+  } catch (e) {
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    document.body.appendChild(textarea);
+    textarea.select();
+    if (document.execCommand("copy")) button.textContent = "Copied";
+    else button.textContent = "Copy failed";
+    textarea.remove();
+  }
+  setTimeout(() => { button.textContent = "Copy diagnostics"; }, 1500);
+});
 $("refreshTabs").addEventListener("click", async () => {
   await sendMessage({ type: "refreshScraperTabs", reason: "tabs_page_button" });
   setTimeout(render, 1000);

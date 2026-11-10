@@ -342,6 +342,8 @@ def test_manual_extension_helpers_reuse_control_tab_instead_of_spawning_duplicat
     assert 'url.endswith("/dist/background.js")' in helper
     assert "preferred_control_tab" in helper
     assert "preferred_control_tab(primary_only=True)" in helper
+    assert "active_id = active_extension_id()" in helper
+    assert "if target is None and active_id is None:" in helper
     assert "/json/new?" in helper
 
     for name in [

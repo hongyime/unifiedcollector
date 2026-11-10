@@ -12,18 +12,15 @@ import urllib.request
 
 import websocket  # type: ignore
 
-from cdp_ext_tabs import close_duplicate_control_tabs, open_or_activate_control_tab
+from cdp_ext_tabs import _collector_extension_ids, close_duplicate_control_tabs, open_or_activate_control_tab
 
 
-EXT_IDS = (
-    "pkmdmcklnjdeocoeigmlakhomhhcpafb",
-    "nkeimhogjdpnpccoofpliimaahmaaome",
-)
 CDP_PORT = os.getenv("UC_CHROME_CDP_PORT", "9223").strip() or "9223"
 CDP = os.getenv("UC_CHROME_CDP_URL", f"http://127.0.0.1:{CDP_PORT}").rstrip("/")
 
 
 def main():
+    ext_ids = _collector_extension_ids()
     ver = json.loads(urllib.request.urlopen(f"{CDP}/json/version").read())
     ws = websocket.create_connection(ver["webSocketDebuggerUrl"], timeout=10)
     n = [0]
@@ -57,7 +54,7 @@ def main():
         (
             t for t in targets
             if t.get("type") == "service_worker"
-            and any(ext_id in t.get("url", "") for ext_id in EXT_IDS)
+            and any(ext_id in t.get("url", "") for ext_id in ext_ids)
         ),
         None,
     )
@@ -93,7 +90,7 @@ def main():
             (
                 t for t in targets
                 if t.get("type") == "service_worker"
-                and any(ext_id in t.get("url", "") for ext_id in EXT_IDS)
+                and any(ext_id in t.get("url", "") for ext_id in ext_ids)
             ),
             None,
         )
@@ -136,7 +133,7 @@ def main():
         (
             t for t in targets
             if t.get("type") == "service_worker"
-            and any(ext_id in t.get("url", "") for ext_id in EXT_IDS)
+            and any(ext_id in t.get("url", "") for ext_id in ext_ids)
         ),
         None,
     )

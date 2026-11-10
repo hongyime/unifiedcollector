@@ -37,6 +37,8 @@
     "https://*.airbnb.co.uk/*",
     "https://airbnb.co.kr/*",
     "https://*.airbnb.co.kr/*",
+    "https://bsky.app/*",
+    "https://www.youtube.com/*",
     "http://127.0.0.1/*",
     "http://localhost/*"
   ],
@@ -65,7 +67,9 @@
         "https://airbnb.co.uk/*",
         "https://*.airbnb.co.uk/*",
         "https://airbnb.co.kr/*",
-        "https://*.airbnb.co.kr/*"
+        "https://*.airbnb.co.kr/*",
+        "https://bsky.app/*",
+        "https://www.youtube.com/*"
       ],
       "js": ["dist/content.js"],
       "run_at": "document_idle"

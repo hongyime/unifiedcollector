@@ -133,7 +133,12 @@ def close_duplicate_control_tabs(keep_id: str | None = None) -> int:
 
 
 def open_or_activate_control_tab(settle_seconds: float = 0.0) -> dict[str, Any] | None:
-    target = preferred_control_tab(primary_only=True) or preferred_control_tab(primary_only=False)
+    active_id = active_extension_id()
+    target = preferred_control_tab(primary_only=True)
+    # A sleeping current worker cannot identify itself, so only reuse an older
+    # known control page when there is no active extension ID to target.
+    if target is None and active_id is None:
+        target = preferred_control_tab(primary_only=False)
     if target and target.get("id"):
         try:
             activate_target(str(target["id"]))
@@ -142,7 +147,7 @@ def open_or_activate_control_tab(settle_seconds: float = 0.0) -> dict[str, Any] 
         close_duplicate_control_tabs(str(target["id"]))
         return target
 
-    extension_id = active_extension_id() or PRIMARY_EXTENSION_ID
+    extension_id = active_id or PRIMARY_EXTENSION_ID
     url = f"chrome-extension://{extension_id}/tabs.html"
     cdp_put("/json/new?" + urllib.parse.quote(url, safe=":/"))
     if settle_seconds > 0:
