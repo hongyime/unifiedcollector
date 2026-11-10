@@ -1,4 +1,4 @@
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -17,6 +17,25 @@ def test_exposure_registered(monkeypatch):
     monkeypatch.delenv("COLLECTOR_DISABLED_SOURCES", raising=False)
     assert "exposure" in list_sources()
     assert isinstance(get_collector("exposure"), ExposureCollector)
+
+
+@pytest.mark.asyncio
+async def test_exposure_uses_bing_without_ddgs(monkeypatch):
+    monkeypatch.setenv("SEARCH_DOWNLOAD_IMAGES", "0")
+    monkeypatch.setenv("SEARCH_SPIDER_PAGES", "0")
+    coll = ExposureCollector()
+    coll._DDGS = MagicMock()
+    coll._BS = MagicMock()
+    coll._search_ddg = AsyncMock(return_value=[])
+    coll._search_bing = AsyncMock(return_value=[
+        {"url": "https://example.edu.sg/result", "engine": "bing", "domain": "example.edu.sg"},
+    ])
+
+    hits = await coll._search_query_unlocked("site:example.edu.sg filename:.env")
+
+    assert [hit["engine"] for hit in hits] == ["bing"]
+    coll._search_ddg.assert_not_awaited()
+    coll._search_bing.assert_awaited_once()
 
 
 def test_gate_allows_exact_wildcard_and_regex(monkeypatch):

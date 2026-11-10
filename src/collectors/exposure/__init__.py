@@ -195,6 +195,9 @@ def classify_exposure(query: str, hit: dict[str, Any]) -> tuple[str, str, float,
 
 class ExposureCollector(SearchCollector):
     SOURCE_NAME = "exposure"
+    # ddgs is an unofficial metasearch client; its configured Yahoo text
+    # backend repeatedly fails while the direct Bing backend succeeds.
+    DEFAULT_ENGINES = ("bing",)
 
     def __init__(self):
         super().__init__()
