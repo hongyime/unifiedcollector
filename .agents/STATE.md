@@ -1,7 +1,7 @@
-# Regression repair bundle complete (2026-11-12)
+# Live rollout in progress (2026-11-12)
 
 - Implemented Strava state restoration, worker health signature compatibility, website TLS classification, SpiderFoot egress/zero-spend preflight and guarded Compose namespace, Beeper readiness-only degradation, exposure test pacing fixture, credential/zero-spend matrix updates, one-shot WhatsApp media cache, and Snapchat httpx migration.
-- Focused Python suite passes (including auth, recon, collector, Compose, and manifest coverage); WhatsApp TypeScript build and Node tests pass; Compose validates with required-secret placeholders. Final diff, JSON, Compose hash, and whitespace checks pass. No unrelated uncommitted work was staged or reverted.
+- Commit db042a13 is pushed to main. PostgreSQL was cleanly started; schema_init applied the pending migrations. SpiderFoot is isolated behind the egress guard and policy checks pass. Both WhatsApp bridges and the Beeper, Website, Strava, and WhatsApp collector services were refreshed and report healthy. Remaining work: align SpiderFoot worker count/healthcheck, wait for its current target to finish, refresh other idle services, and verify end-to-end health.
 
 # Controlled live rollout deployed; acceptance monitoring in progress (2026-11-11)
 

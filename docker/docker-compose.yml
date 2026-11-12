@@ -170,7 +170,7 @@ services:
     security_opt:
       - no-new-privileges:true
     init: true
-    command: python -m src.recon_spiderfoot_service --poll-interval ${RECON_SPIDERFOOT_POLL_INTERVAL:-10} --workers ${RECON_SPIDERFOOT_WORKERS:-1}
+    command: python -m src.recon_spiderfoot_service --poll-interval ${RECON_SPIDERFOOT_POLL_INTERVAL:-10} --workers ${RECON_SPIDERFOOT_WORKERS:-2}
     mem_limit: ${RECON_SPIDERFOOT_MEM:-2g}
     cpus: "${RECON_SPIDERFOOT_CPUS:-2.0}"
     pids_limit: 256
@@ -184,6 +184,7 @@ services:
       SPIDERFOOT_ALLOW_INTRUSIVE: "${SPIDERFOOT_ALLOW_INTRUSIVE:-0}"
       SPIDERFOOT_TARGET_TIMEOUT_SECONDS: "${SPIDERFOOT_TARGET_TIMEOUT_SECONDS:-180}"
       SPIDERFOOT_STALE_TARGET_MINUTES: "${SPIDERFOOT_STALE_TARGET_MINUTES:-30}"
+      RECON_SPIDERFOOT_WORKERS: "${RECON_SPIDERFOOT_WORKERS:-2}"
       RECON_HEALTH_MAX_AGE_SECONDS: "${RECON_HEALTH_MAX_AGE_SECONDS:-360}"
       RECON_EGRESS_GUARD_SOCKET: "/var/lib/unifiedcollector/recon-guard/status.sock"
       RECON_EVIDENCE_ROOT: "/var/lib/unifiedcollector/recon-evidence"
