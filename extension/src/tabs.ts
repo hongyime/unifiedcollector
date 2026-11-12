@@ -111,6 +111,7 @@ async function render() {
       const login = p.noLogin
         ? badge("login", "idle", "sign-in not required")
         : p.loggedIn === true ? badge("login", "ok", "signed in · session verified")
+        : p.id === "bluesky" && p.loggedIn === false ? badge("login", "idle", "session unverified")
         : p.loggedIn === false ? badge("login", "bad", "not signed in")
         : badge("login", "idle", "session unknown");
       const tab = p.tabOpen ? badge("tab", "ok", "tab open") : badge("tab", "idle", "no tab");
@@ -143,8 +144,8 @@ async function render() {
   $("note").innerHTML =
     `<b>Scrapers available:</b> ${scrapers}. A listed scraper runs only while its matching tab is open; ` +
     `a platform with no tab is paused. Availability does not mean it is collecting right now. ` +
-    `Session badges check only for a first-party session cookie; they do not read or show its value. ` +
-    `Collection receipts are separate evidence. At most two scheduler-selected social tabs stay open.`;
+    `Session badges check only for a first-party session cookie; Bluesky may be session-unverified when it keeps login outside that store. ` +
+    `Collection receipts are separate evidence. At most four scheduler-selected social tabs stay open.`;
   maybeAutoProbe(backgroundError);
 }
 

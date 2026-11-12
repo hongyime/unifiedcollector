@@ -47,6 +47,10 @@ def _lookup(name: str):
     return getattr(root, name, None)
 
 
+def _iso(value: datetime | None) -> str | None:
+    return value.isoformat() if value else None
+
+
 async def _get_pool():
     fn = _lookup("get_pool") or get_pool
     return await fn()
@@ -166,6 +170,14 @@ async def social_scrape_config(_user: dict = Depends(require_role("viewer"))):
             "mode": "near_live_polling",
             "volume_profile": "normal",
             "recovery_profiles": [],
+            # Tab eligibility is deliberately based on an explicit health or
+            # control result, never on the age of a last check.
+            "tab_eligible": True,
+            "tab_block_reason": None,
+            "tab_retry_at": None,
+            "health_status": None,
+            "last_successful_check_at": None,
+            "health_checked_at": None,
             "cycle_rest_min_ms": _BROWSER_NORMAL_CYCLE_REST_MS[p][0],
             "cycle_rest_max_ms": _BROWSER_NORMAL_CYCLE_REST_MS[p][1],
             "cooldown_rest_ms": min(_BROWSER_NORMAL_CYCLE_REST_MS[p][1], 300_000),
@@ -179,21 +191,30 @@ async def social_scrape_config(_user: dict = Depends(require_role("viewer"))):
                 "SELECT source, enabled FROM collection_schedules WHERE source = ANY($1::text[])",
                 browser_platforms,
             )
+
+        async def optional_rows(query: str):
+            async with pool.acquire() as optional_conn:
+                return await optional_conn.fetch(query, browser_platforms)
+
         for r in rows:
             enabled_map[str(r["source"])] = bool(r["enabled"])
         # Schedule disablement is the browser's explicit manual/rotation stop.
         # It must win over every automatic profile below.
         for source, enabled in enabled_map.items():
             if not enabled:
-                profiles[source].update(mode="manually_paused", volume_profile="manual")
+                profiles[source].update(
+                    mode="manually_paused",
+                    volume_profile="manual",
+                    tab_eligible=False,
+                    tab_block_reason="manually_paused",
+                )
 
         # The newer tables are optional during a rolling migration. Their
         # absence must retain the historical fail-open scrape-config behavior.
         try:
-            controls = await conn.fetch(
+            controls = await optional_rows(
                 """SELECT source_name, state, enabled, blocked_until
-                   FROM source_controls WHERE source_name = ANY($1::text[])""",
-                browser_platforms,
+                   FROM source_controls WHERE source_name = ANY($1::text[])"""
             )
             now = datetime.now(timezone.utc)
             for control in controls:
@@ -201,20 +222,57 @@ async def social_scrape_config(_user: dict = Depends(require_role("viewer"))):
                 if source not in profiles or profiles[source]["mode"] == "manually_paused":
                     continue
                 if control.get("state") == "PAUSED" or not control.get("enabled", True):
-                    profiles[source].update(mode="manually_paused", volume_profile="manual")
+                    profiles[source].update(
+                        mode="manually_paused",
+                        volume_profile="manual",
+                        tab_eligible=False,
+                        tab_block_reason="manually_paused",
+                    )
                     enabled_map[source] = False
-                elif control.get("state") in {"RATE_LIMITED", "AUTH_FAILED"} and control.get("blocked_until") and control["blocked_until"] > now:
-                    profiles[source].update(mode="cooldown", volume_profile="cooldown")
+                elif control.get("state") in {"RATE_LIMITED", "AUTH_FAILED"}:
+                    blocked_until = control.get("blocked_until")
+                    profiles[source].update(
+                        tab_eligible=False,
+                        tab_block_reason=str(control["state"]).lower(),
+                        tab_retry_at=_iso(blocked_until),
+                    )
+                    if blocked_until and blocked_until > now:
+                        profiles[source].update(mode="cooldown", volume_profile="cooldown")
         except Exception:
             pass
         try:
-            recoveries = await conn.fetch(
+            health_rows = await optional_rows(
+                """SELECT source, status, last_success_at, last_checked_at, blocker
+                   FROM source_health WHERE source = ANY($1::text[])"""
+            )
+            for health in health_rows:
+                source = str(health.get("source") or "").lower()
+                if source not in profiles:
+                    continue
+                profile = profiles[source]
+                profile.update(
+                    health_status=health.get("status"),
+                    last_successful_check_at=_iso(health.get("last_success_at")),
+                    health_checked_at=_iso(health.get("last_checked_at")),
+                )
+                # Manual pauses remain the operator's decision regardless of
+                # a later health write.
+                if profile["mode"] == "manually_paused":
+                    continue
+                if health.get("status") in {"degraded", "dead", "auth_paused"}:
+                    profile.update(
+                        tab_eligible=False,
+                        tab_block_reason=health.get("blocker") or health["status"],
+                    )
+        except Exception:
+            pass
+        try:
+            recoveries = await optional_rows(
                 """SELECT source_name, account_identity, restricted_until,
                           restricted_until <= now() AS exit_required
                    FROM source_recovery_profiles
                    WHERE state='restricted'
                      AND source_name = ANY($1::text[])""",
-                browser_platforms,
             )
             for recovery in recoveries:
                 source = str(recovery.get("source_name") or "").lower()

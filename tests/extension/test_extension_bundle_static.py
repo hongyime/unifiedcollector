@@ -210,12 +210,12 @@ def test_x_is_auto_managed_by_scraper_tab_recovery():
         "await runStartupRecovery",
         1,
     )[0]
-    assert "residentScraperPlatformIds()" in open_all_block
-    assert "scraperPlatforms().filter((platform) => residentIds.has(platform.id))" in open_all_block
+    assert "scraperTabSelection()" in open_all_block
+    assert "scraperPlatforms().filter((platform) => activeIds.has(platform.id))" in open_all_block
     assert "globalThis.UC_PLATFORMS" not in open_all_block
     assert "const p = platformById(id);" in reload_intent_block
     assert 'const expandedOverride = params.get("expanded")' not in tabs_js
-    assert "At most two scheduler-selected social tabs" in tabs_js
+    assert "At most four scheduler-selected social tabs" in tabs_js
 
 
 def test_lemon8_runs_as_visible_scraper_alongside_headless_collector():
@@ -254,13 +254,13 @@ def test_scraper_tabs_are_limited_to_scheduler_selected_platforms():
     )[0]
     assert "return platform && platform.id ? platform.id : null;" in background
     assert "const allowed = 1;" in budget_block
-    assert "const BROWSER_RESIDENT_TAB_LIMIT = 2;" in background
+    assert "const BROWSER_RESIDENT_TAB_LIMIT = 4;" in background
     assert 'const BROWSER_RESIDENT_PLATFORM_IDS = ["x", "instagram", "facebook", "threads", "tiktok", "lemon8", "strava", "pinterest", "snapchat", "airbnb"];' in background
-    assert "async function residentScraperPlatformIds()" in background
+    assert "async function scraperTabSelection()" in background
     assert "resident_scraper_tab_budget_exceeded" in budget_block
     assert "inactive_scraper_tab_open" in budget_block
     assert "const keep = selection.rows[0]" in ensure_block
-    assert "if (!residentIds.has(p.id))" in ensure_block
+    assert "if (!activeIds.has(p.id))" in ensure_block
     assert "for (const tab of tabs)" in ensure_block
     assert "chrome.tabs.remove(tab.id)" in ensure_block
     assert "platformManagedUrls" not in background
@@ -268,9 +268,27 @@ def test_scraper_tabs_are_limited_to_scheduler_selected_platforms():
     assert "ucOpenExpandedPlatformTabs" not in tabs_js
     assert 'id="expandedTabs"' not in tabs_html
     assert "Open scheduled tabs" in tabs_html
-    assert "At most two scheduler-selected social tabs" in tabs_js
+    assert "At most four scheduler-selected social tabs" in tabs_js
     assert "closeDuplicateControlTabs" in tabs_js
     assert 'chrome.tabs.create({ url, pinned: false })' in _read("extension/popup.js")
+
+
+def test_scraper_tab_failover_persists_one_probe_without_preempting_residents():
+    source = (ROOT / "extension/src/background.ts").read_text(encoding="utf-8")
+    bundle = _read("extension/background.js")
+
+    assert 'const SCRAPER_TAB_FAILOVER_KEY = "ucScraperTabFailover";' in source
+    assert "const SCRAPER_TAB_QUARANTINE_MS = 30 * 60 * 1000;" in source
+    assert "const SCRAPER_TAB_PROBE_MS = 15 * 60 * 1000;" in source
+    assert "await chrome.storage.local.set({ [SCRAPER_TAB_FAILOVER_KEY]: state });" in source
+    assert "if (!probeId)" in source
+    assert "!state.evictions[id]" in source
+    assert "profile.tab_eligible !== false" in source
+    assert "scraper recovery probe succeeded" in source
+    assert "scraper recovery probe timed out" in source
+    assert "scraper recovery probe re-quarantined" in source
+    assert "recovery_probe_tab_budget_exceeded" in bundle
+    assert "const { residentIds, activeIds, probeId } = tabSelection;" in bundle
 
 
 def test_native_scraper_does_not_ingest_unclaimed_home_feed_items():
@@ -654,7 +672,7 @@ def test_scraper_refresh_and_loop_nudges_close_canonical_duplicate_tabs():
     assert "closeDuplicateExtensionControlTabs(`refresh:${reason}`)" in refresh_block
     assert "setScraperTabPinnedState(t, pinScraperTabs)" in refresh_block
     assert "pinStateChanged" in refresh_block
-    assert "...selection.rows.filter((row) => !residentIds.has(row.platform.id))" in refresh_block
+    assert "...selection.rows.filter((row) => !activeIds.has(row.platform.id))" in refresh_block
     assert "closedDuplicates: closed.closed" in refresh_block
     assert "closeDuplicateScraperTabRows(selection.duplicateRows, `ensure_loops:${reason || \"nudge\"}`)" in loop_block
     tab_lookup = background.split("async function tabForPlatform", 1)[1].split("async function isLoggedIn", 1)[0]

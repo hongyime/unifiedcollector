@@ -96,7 +96,7 @@
     renderDiagnostics(backgroundError);
     const list = $("list");
     list.innerHTML = platforms.map((p) => {
-      const login = p.noLogin ? badge("login", "idle", "sign-in not required") : p.loggedIn === true ? badge("login", "ok", "signed in \xB7 session verified") : p.loggedIn === false ? badge("login", "bad", "not signed in") : badge("login", "idle", "session unknown");
+      const login = p.noLogin ? badge("login", "idle", "sign-in not required") : p.loggedIn === true ? badge("login", "ok", "signed in \xB7 session verified") : p.id === "bluesky" && p.loggedIn === false ? badge("login", "idle", "session unverified") : p.loggedIn === false ? badge("login", "bad", "not signed in") : badge("login", "idle", "session unknown");
       const tab = p.tabOpen ? badge("tab", "ok", "tab open") : badge("tab", "idle", "no tab");
       const scr = p.scraper ? `<span class="pill">scraper ready</span>` : `<span class="pill">login-ready</span>`;
       return `
@@ -119,7 +119,7 @@
       });
     });
     const scrapers = platforms.filter((p) => p.scraper).map((p) => p.label).join(", ") || "none yet";
-    $("note").innerHTML = `<b>Scrapers available:</b> ${scrapers}. A listed scraper runs only while its matching tab is open; a platform with no tab is paused. Availability does not mean it is collecting right now. Session badges check only for a first-party session cookie; they do not read or show its value. Collection receipts are separate evidence. At most two scheduler-selected social tabs stay open.`;
+    $("note").innerHTML = `<b>Scrapers available:</b> ${scrapers}. A listed scraper runs only while its matching tab is open; a platform with no tab is paused. Availability does not mean it is collecting right now. Session badges check only for a first-party session cookie; Bluesky may be session-unverified when it keeps login outside that store. Collection receipts are separate evidence. At most four scheduler-selected social tabs stay open.`;
     maybeAutoProbe(backgroundError);
   }
   function renderDiagnostics(backgroundError) {

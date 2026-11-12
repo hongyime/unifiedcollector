@@ -488,7 +488,8 @@
     try {
       const allTabs = await chrome.tabs.query({ url: scraperUrlPatterns() });
       const selection = selectCanonicalScraperTabRows(allTabs);
-      const tabs = selection.rows;
+      const activeIds = (await scraperTabSelection()).activeIds;
+      const tabs = selection.rows.filter((row) => activeIds.has(row.platform.id));
       seen = selection.seen;
       canonical = tabs.length;
       skipped = selection.skipped;
@@ -1085,14 +1086,139 @@
   var _mainWorldHookHostRe = /(^|\.)((instagram|tiktok|strava)\.com|threads\.com|x\.com|twitter\.com|facebook\.com)$/i;
   var SCRAPER_TABS_PINNED_KEY = "ucPinScraperTabs";
   var AUTO_SCRAPER_PLATFORM_IDS = /* @__PURE__ */ new Set(["instagram", "threads", "tiktok", "lemon8", "x", "facebook", "strava", "pinterest", "snapchat", "airbnb", "bluesky", "youtube"]);
-  var BROWSER_RESIDENT_TAB_LIMIT = 2;
+  var BROWSER_RESIDENT_TAB_LIMIT = 4;
   var BROWSER_RESIDENT_PLATFORM_IDS = ["x", "instagram", "facebook", "threads", "tiktok", "lemon8", "strava", "pinterest", "snapchat", "airbnb"];
   var BROWSER_RESIDENT_FALLBACK_IDS = ["x", "instagram"];
-  async function residentScraperPlatformIds() {
+  var SCRAPER_TAB_FAILOVER_KEY = "ucScraperTabFailover";
+  var SCRAPER_TAB_QUARANTINE_MS = 30 * 60 * 1e3;
+  var SCRAPER_TAB_PROBE_MS = 15 * 60 * 1e3;
+  function configTime(value) {
+    const parsed = Date.parse(String(value || ""));
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  function scraperFailoverProfile(id) {
+    return _scrapeConfig && _scrapeConfig.profiles && _scrapeConfig.profiles[id] || {};
+  }
+  function scraperFailoverRetryAt(profile, now) {
+    return Math.max(now + SCRAPER_TAB_QUARANTINE_MS, configTime(profile.tab_retry_at));
+  }
+  async function scraperFailoverState() {
+    try {
+      const stored = await chrome.storage.local.get(SCRAPER_TAB_FAILOVER_KEY);
+      const value = stored && stored[SCRAPER_TAB_FAILOVER_KEY] || {};
+      return {
+        residents: Array.isArray(value.residents) ? value.residents.filter((id) => BROWSER_RESIDENT_PLATFORM_IDS.includes(id)) : [],
+        evictions: value.evictions && typeof value.evictions === "object" ? value.evictions : {},
+        probe: value.probe && BROWSER_RESIDENT_PLATFORM_IDS.includes(value.probe.platform) ? value.probe : null
+      };
+    } catch (e) {
+      return { residents: [], evictions: {}, probe: null };
+    }
+  }
+  async function scraperTabSelection() {
     await refreshScrapeConfig();
     const enabled = _scrapeConfig && _scrapeConfig.fail_open !== true && Array.isArray(_scrapeConfig.enabled) ? new Set(_scrapeConfig.enabled.map((id) => String(id).toLowerCase())) : null;
-    const ids = enabled ? BROWSER_RESIDENT_PLATFORM_IDS.filter((id) => enabled.has(id)) : BROWSER_RESIDENT_FALLBACK_IDS;
-    return new Set(ids.slice(0, BROWSER_RESIDENT_TAB_LIMIT));
+    if (!enabled) {
+      return { residentIds: new Set(BROWSER_RESIDENT_FALLBACK_IDS), activeIds: new Set(BROWSER_RESIDENT_FALLBACK_IDS), probeId: null };
+    }
+    const now = Date.now();
+    const state = await scraperFailoverState();
+    let changed = false;
+    const eligible = (id) => enabled.has(id) && scraperFailoverProfile(id).tab_eligible !== false;
+    if (!state.residents.length) {
+      try {
+        const existing = selectCanonicalScraperTabRows(await chrome.tabs.query({ url: scraperUrlPatterns() }));
+        for (const id of BROWSER_RESIDENT_PLATFORM_IDS) {
+          if (state.residents.length >= BROWSER_RESIDENT_TAB_LIMIT) break;
+          if (existing.rows.some((row) => row.platform.id === id)) state.residents.push(id);
+        }
+        changed = state.residents.length > 0;
+      } catch (e) {
+      }
+    }
+    const residents = [];
+    for (const id of state.residents) {
+      if (residents.includes(id)) {
+        changed = true;
+        continue;
+      }
+      if (eligible(id) && !state.evictions[id]) {
+        residents.push(id);
+        continue;
+      }
+      const profile = scraperFailoverProfile(id);
+      if (!state.evictions[id]) {
+        state.evictions[id] = {
+          evicted_at: now,
+          reason: String(profile.tab_block_reason || "ineligible"),
+          retry_at: scraperFailoverRetryAt(profile, now)
+        };
+        await log("warn", `scraper tab evicted: ${id} (${state.evictions[id].reason})`);
+      }
+      changed = true;
+    }
+    for (const id of BROWSER_RESIDENT_PLATFORM_IDS) {
+      if (residents.length >= BROWSER_RESIDENT_TAB_LIMIT) break;
+      if (eligible(id) && !state.evictions[id] && !residents.includes(id)) {
+        residents.push(id);
+        if (Object.keys(state.evictions).length) await log("info", `scraper tab replacement selected: ${id}`);
+      }
+    }
+    if (residents.join(",") !== state.residents.join(",")) changed = true;
+    state.residents = residents;
+    let probeId = state.probe && state.probe.platform;
+    if (probeId) {
+      const profile = scraperFailoverProfile(probeId);
+      const startedAt = Number(state.probe.started_at || 0);
+      const observedAt = configTime(profile.health_checked_at);
+      const succeededAt = configTime(profile.last_successful_check_at);
+      if (succeededAt > startedAt && profile.tab_eligible !== false) {
+        const completedProbeId = probeId;
+        delete state.evictions[probeId];
+        state.probe = null;
+        probeId = null;
+        changed = true;
+        await log("info", `scraper recovery probe succeeded: ${completedProbeId}`);
+      } else if (observedAt > startedAt && profile.tab_eligible === false) {
+        state.evictions[probeId] = {
+          evicted_at: now,
+          reason: String(profile.tab_block_reason || "unhealthy"),
+          retry_at: scraperFailoverRetryAt(profile, now)
+        };
+        state.probe = null;
+        await log("warn", `scraper recovery probe re-quarantined: ${probeId} (${state.evictions[probeId].reason})`);
+        probeId = null;
+        changed = true;
+      } else if (now - startedAt >= SCRAPER_TAB_PROBE_MS) {
+        state.evictions[probeId] = {
+          evicted_at: now,
+          reason: "probe_timeout",
+          retry_at: scraperFailoverRetryAt(profile, now)
+        };
+        state.probe = null;
+        await log("warn", `scraper recovery probe timed out: ${probeId}`);
+        probeId = null;
+        changed = true;
+      }
+    }
+    if (!probeId) {
+      const candidate = BROWSER_RESIDENT_PLATFORM_IDS.find((id) => {
+        const eviction = state.evictions[id];
+        const profile = scraperFailoverProfile(id);
+        return eviction && Number(eviction.retry_at || 0) <= now && enabled.has(id) && profile.mode !== "manually_paused";
+      });
+      if (candidate) {
+        state.probe = { platform: candidate, started_at: now };
+        probeId = candidate;
+        changed = true;
+        await log("info", `scraper recovery probe started: ${candidate}`);
+      }
+    }
+    if (changed) await chrome.storage.local.set({ [SCRAPER_TAB_FAILOVER_KEY]: state });
+    const residentIds = new Set(state.residents);
+    const activeIds = new Set(state.residents);
+    if (probeId) activeIds.add(probeId);
+    return { residentIds, activeIds, probeId };
   }
   async function scraperTabsPinned() {
     try {
@@ -1242,13 +1368,15 @@
   }
   async function browserTabBudgetSnapshot() {
     const pinScraperTabs = await scraperTabsPinned();
-    const residentIds = await residentScraperPlatformIds();
+    const tabSelection = await scraperTabSelection();
+    const { residentIds, activeIds, probeId } = tabSelection;
     const violations = [];
     const counts = {
       extension_control_tabs: 0,
       blank_tabs: 0,
       scraper_tabs: 0,
       resident_scraper_tabs: 0,
+      probe_scraper_tabs: 0,
       pinned_scraper_tabs: 0,
       pinned_control_tabs: 0,
       per_platform: {}
@@ -1281,6 +1409,7 @@
       counts.per_platform[pid] = (counts.per_platform[pid] || 0) + 1;
       if (row.tab && row.tab.pinned) counts.pinned_scraper_tabs++;
       if (residentIds.has(pid)) counts.resident_scraper_tabs++;
+      if (probeId === pid) counts.probe_scraper_tabs++;
     }
     if (controls.length !== 1) {
       violations.push({
@@ -1314,8 +1443,11 @@
         allowed: BROWSER_RESIDENT_TAB_LIMIT
       });
     }
+    if (counts.probe_scraper_tabs > 1 || counts.probe_scraper_tabs && !probeId) {
+      violations.push({ kind: "recovery_probe_tab_budget_exceeded", count: counts.probe_scraper_tabs, allowed: 1 });
+    }
     for (const row of rows) {
-      if (!residentIds.has(row.platform.id)) {
+      if (!activeIds.has(row.platform.id)) {
         violations.push({ kind: "inactive_scraper_tab_open", platform: row.platform.id });
       }
     }
@@ -1336,6 +1468,7 @@
       ok: violations.length === 0,
       violations,
       counts,
+      active_probe: probeId,
       pin_scraper_tabs: pinScraperTabs,
       expanded_platform_tabs: false,
       extension_version: extensionVersion()
@@ -1419,13 +1552,13 @@
     let opened = 0, closed = 0, navigated = 0;
     const groupHint = await scraperGroupHint();
     const pinScraperTabs = await scraperTabsPinned();
-    const residentIds = await residentScraperPlatformIds();
+    const { activeIds } = await scraperTabSelection();
     try {
       await closeDuplicateExtensionControlTabs(`ensure:${reason || "tabs"}`).catch(() => {
       });
       for (const p of scraperPlatforms()) {
         const tabs = await chrome.tabs.query({ url: platformUrlPatterns(p) }) || [];
-        if (!residentIds.has(p.id)) {
+        if (!activeIds.has(p.id)) {
           for (const tab of tabs) {
             try {
               await chrome.tabs.remove(tab.id);
@@ -1483,7 +1616,7 @@
     const requestedGapMs = Number(options.gapMs);
     const gapMs = Number.isFinite(requestedGapMs) && requestedGapMs >= 250 ? requestedGapMs : 8e3;
     const pinScraperTabs = await scraperTabsPinned();
-    const residentIds = await residentScraperPlatformIds();
+    const { activeIds } = await scraperTabSelection();
     let reloaded = 0;
     let errors = 0;
     let pinStateChanged = 0;
@@ -1494,10 +1627,10 @@
       const selection = selectCanonicalScraperTabRows(allTabs);
       const closed = await closeDuplicateScraperTabRows([
         ...selection.duplicateRows,
-        ...selection.rows.filter((row) => !residentIds.has(row.platform.id))
+        ...selection.rows.filter((row) => !activeIds.has(row.platform.id))
       ], `refresh:${reason}`);
       errors += closed.errors;
-      const tabs = selection.rows.filter((row) => residentIds.has(row.platform.id)).map((row) => row.tab);
+      const tabs = selection.rows.filter((row) => activeIds.has(row.platform.id)).map((row) => row.tab);
       for (const t of tabs || []) {
         try {
           if (await setScraperTabPinnedState(t, pinScraperTabs)) pinStateChanged++;
@@ -1589,8 +1722,8 @@
       return { skipped: true, reason: "tabs_query_failed", error: e && e.message || String(e), checked: 0, reloaded: 0 };
     }
     const selection = selectCanonicalScraperTabRows(allTabs);
-    const residentIds = await residentScraperPlatformIds();
-    const rows = selection.rows.filter((r) => r.platform && residentIds.has(r.platform.id) && MEMORY_SENSITIVE_PLATFORMS.has(r.platform.id));
+    const { activeIds } = await scraperTabSelection();
+    const rows = selection.rows.filter((r) => r.platform && activeIds.has(r.platform.id) && MEMORY_SENSITIVE_PLATFORMS.has(r.platform.id));
     let checked = 0;
     let reloaded = 0;
     const reasons = [];
@@ -2005,8 +2138,8 @@
     const allTabs = await chrome.tabs.query({ url: scraperUrlPatterns() });
     const selection = selectCanonicalScraperTabRows(allTabs);
     await closeDuplicateScraperTabRows(selection.duplicateRows, `ensure_loops:${reason || "nudge"}`);
-    const residentIds = await residentScraperPlatformIds();
-    const tabs = selection.rows.filter((row) => residentIds.has(row.platform.id)).map((row) => row.tab);
+    const { activeIds } = await scraperTabSelection();
+    const tabs = selection.rows.filter((row) => activeIds.has(row.platform.id)).map((row) => row.tab);
     if (!selection.seen) {
       await log("warn", `no scraper tab open \u2014 paused (${reason}). Open one via \u{1F5C2} Manage social tabs.`);
       await setStatus({ loopRunning: false });
@@ -3014,8 +3147,8 @@
           }
           case "openAll": {
             let opened = 0, focused = 0, errors = 0, first = true;
-            const residentIds = await residentScraperPlatformIds();
-            for (const p of scraperPlatforms().filter((platform) => residentIds.has(platform.id))) {
+            const { activeIds } = await scraperTabSelection();
+            for (const p of scraperPlatforms().filter((platform) => activeIds.has(platform.id))) {
               const r = await openOrFocus(p, { active: first });
               first = false;
               if (r.opened) opened++;

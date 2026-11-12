@@ -738,6 +738,7 @@ async def test_social_scrape_config_fails_open(monkeypatch):
     assert res["disabled"] == []
     assert "x" in res["enabled"]
     assert res["profiles"]["instagram"]["volume_profile"] == "normal"
+    assert res["profiles"]["instagram"]["tab_eligible"] is True
 
 
 @pytest.mark.asyncio
@@ -763,6 +764,8 @@ async def test_social_scrape_config_prioritizes_manual_pause_over_recovery(monke
     profile = res["profiles"]["instagram"]
     assert profile["mode"] == "manually_paused"
     assert profile["volume_profile"] == "manual"
+    assert profile["tab_eligible"] is False
+    assert profile["tab_block_reason"] == "manually_paused"
     assert profile["recovery_profiles"] == []
     assert profile["cycle_rest_min_ms"] == 180_000
     assert profile["cycle_rest_max_ms"] == 360_000
@@ -787,4 +790,65 @@ async def test_social_scrape_config_marks_expired_recovery_as_exit_required(monk
     res = await dashboard_api.social_scrape_config()
 
     assert res["profiles"]["instagram"]["recovery_profiles"] == [{"account": "owner", "exit_required": True}]
+
+
+@pytest.mark.asyncio
+async def test_social_scrape_config_exposes_explicit_tab_failover_blocks(monkeypatch):
+    now = datetime.now(timezone.utc)
+
+    class _Conn:
+        async def fetch(self, query, *_args, **_kwargs):
+            if "collection_schedules" in query:
+                return [{"source": "instagram", "enabled": False}]
+            if "source_controls" in query:
+                return [
+                    {"source_name": "x", "state": "RATE_LIMITED", "enabled": True, "blocked_until": now + timedelta(minutes=8)},
+                    {"source_name": "facebook", "state": "AUTH_FAILED", "enabled": True, "blocked_until": now + timedelta(minutes=3)},
+                ]
+            if "source_health" in query:
+                return [
+                    {"source": "threads", "status": "degraded", "last_success_at": now - timedelta(minutes=2), "last_checked_at": now, "blocker": "upstream error"},
+                    {"source": "tiktok", "status": "dead", "last_success_at": None, "last_checked_at": now, "blocker": "worker stopped"},
+                    {"source": "lemon8", "status": "auth_paused", "last_success_at": now - timedelta(minutes=4), "last_checked_at": now, "blocker": "login expired"},
+                ]
+            return []
+
+    async def fake_get_pool():
+        return _Pool(_Conn())
+
+    monkeypatch.setattr(dashboard_api, "get_pool", fake_get_pool)
+    res = await dashboard_api.social_scrape_config()
+
+    assert res["profiles"]["instagram"]["tab_block_reason"] == "manually_paused"
+    assert res["profiles"]["x"]["tab_eligible"] is False
+    assert res["profiles"]["x"]["tab_block_reason"] == "rate_limited"
+    assert res["profiles"]["x"]["tab_retry_at"] == (now + timedelta(minutes=8)).isoformat()
+    assert res["profiles"]["facebook"]["tab_block_reason"] == "auth_failed"
+    assert res["profiles"]["facebook"]["tab_retry_at"] == (now + timedelta(minutes=3)).isoformat()
+    for source, status, reason in (("threads", "degraded", "upstream error"), ("tiktok", "dead", "worker stopped"), ("lemon8", "auth_paused", "login expired")):
+        assert res["profiles"][source]["tab_eligible"] is False
+        assert res["profiles"][source]["health_status"] == status
+        assert res["profiles"][source]["tab_block_reason"] == reason
+    assert res["profiles"]["threads"]["last_successful_check_at"] == (now - timedelta(minutes=2)).isoformat()
+
+
+@pytest.mark.asyncio
+async def test_social_scrape_config_does_not_evict_for_an_old_successful_check(monkeypatch):
+    class _Conn:
+        async def fetch(self, query, *_args, **_kwargs):
+            if "source_health" in query:
+                return [{
+                    "source": "x", "status": "running",
+                    "last_success_at": datetime.now(timezone.utc) - timedelta(days=3),
+                    "last_checked_at": datetime.now(timezone.utc) - timedelta(days=3),
+                    "blocker": None,
+                }]
+            return []
+
+    async def fake_get_pool():
+        return _Pool(_Conn())
+
+    monkeypatch.setattr(dashboard_api, "get_pool", fake_get_pool)
+    res = await dashboard_api.social_scrape_config()
+    assert res["profiles"]["x"]["tab_eligible"] is True
 
