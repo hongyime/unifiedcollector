@@ -1,7 +1,7 @@
-# Live rollout in progress (2026-11-12)
+# Live rollout complete with active-work deferrals (2026-11-12)
 
 - Implemented Strava state restoration, worker health signature compatibility, website TLS classification, SpiderFoot egress/zero-spend preflight and guarded Compose namespace, Beeper readiness-only degradation, exposure test pacing fixture, credential/zero-spend matrix updates, one-shot WhatsApp media cache, and Snapchat httpx migration.
-- Commit db042a13 is pushed to main. PostgreSQL was cleanly started; schema_init applied the pending migrations. SpiderFoot is isolated behind the egress guard and policy checks pass. Both WhatsApp bridges and the Beeper, Website, Strava, and WhatsApp collector services were refreshed and report healthy. Remaining work: align SpiderFoot worker count/healthcheck, wait for its current target to finish, refresh other idle services, and verify end-to-end health.
+- Commits db042a13 and 91465221 are pushed to main; local HEAD matches origin/main. PostgreSQL is healthy and schema_init recorded the four pending migrations. Dashboard image was rebuilt/recreated and `/health` returns status ok with database healthy. Cookie vault and idle source services were refreshed; WhatsApp bridges, Beeper, Website, Strava, and refreshed collectors are healthy. SpiderFoot uses the healthy egress guard and its in-container policy check passes, but its current process still has one worker and fails health because a recent target remains active; Compose now defaults both worker count settings to two. Preserve that active target, then recreate SpiderFoot with `RECON_SPIDERFOOT_WORKERS=2` and verify health. Also defer browser-ingest, Pinterest, Telegram, X, and YouTube restarts while their respective queues have active claims. Two ignored generated YouTube JSON artifacts remain modified and were intentionally not included in commits.
 
 # Controlled live rollout deployed; acceptance monitoring in progress (2026-11-11)
 
