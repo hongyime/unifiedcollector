@@ -149,16 +149,25 @@ async def run() -> None:
                 continue
             try:
                 summary = await c.run_cycle()
+                # Pinterest and Bluesky retain their profile probes as primary
+                # collection; this drains only their own exhausted handoffs.
+                fallback_summary = {}
+                if c.SOURCE_NAME in {"pinterest", "airbnb"}:
+                    from src.core.extractor_fallback import run_extractor_fallback
+                    fallback_summary = await run_extractor_fallback(pool, c.SOURCE_NAME)
                 provider_failures.pop(c.SOURCE_NAME, None)
                 async with pool.acquire() as conn:
                     await clear_automatic_source_state(conn, c.SOURCE_NAME)
-                if summary.get("processed", 0) or summary.get("skipped"):
+                if summary.get("processed", 0) or summary.get("skipped") or fallback_summary.get("claimed", 0):
                     logger.info("%s: %s", c.SOURCE_NAME, summary)
                 native_cycle = getattr(c, "run_native_cycle", None)
                 if callable(native_cycle):
                     native_summary = await native_cycle()
                     if native_summary and native_summary.get("processed", 0):
                         logger.info("%s native scrape: %s", c.SOURCE_NAME, native_summary)
+                heartbeat = getattr(c, "heartbeat_source_health", None)
+                if callable(heartbeat):
+                    await heartbeat()
             except Exception as exc:
                 failures = provider_failures[c.SOURCE_NAME] = provider_failures.get(c.SOURCE_NAME, 0) + 1
                 if await record_provider_block(pool, c.SOURCE_NAME, exc, failures=failures):

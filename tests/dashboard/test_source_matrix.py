@@ -1196,6 +1196,39 @@ def test_source_matrix_row_suppresses_x_auth_wall_when_current_posts_flow():
     assert row["blocker"]["kind"] == "none"
 
 
+def test_source_matrix_suppresses_x_stale_shell_after_fresh_browser_receipt():
+    blocker = _source_matrix_blocker(
+        _source(
+            source="x",
+            browser_url="https://x.com/i/flow/login?redirect_after_login=%2Fhome",
+            browser_health_status="content_script_boot",
+            browser_health_reason="first-boot ping before mainLoop starts",
+            browser_content_stale=False,
+            detail="fresh browser content/probe event is inside the freshness window",
+        ),
+        rate_row=None,
+        cursor_row=None,
+        extension_issues=[],
+    )
+
+    assert blocker["kind"] == "none"
+
+
+def test_source_matrix_preserves_operational_idle_status():
+    row = _source_matrix_row(
+        _source(operational_status="idle"),
+        current_content=None,
+        current_rate=None,
+        day_content=None,
+        day_rate=None,
+        media_total=None,
+        cursor_row=None,
+        extension_issues=[],
+    )
+
+    assert row["operational_status"] == "idle"
+
+
 def test_source_matrix_row_suppresses_stale_browser_content_when_current_media_flows():
     row = _source_matrix_row(
         _source(source="threads"),

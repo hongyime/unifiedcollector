@@ -440,6 +440,15 @@ class ProfileOnlyCollector(BaseCollector):
                     source,
                     username,
                 )
+        if (not transient or attempts >= self.probe_max_attempts) and source in {"pinterest", "bluesky"}:
+            from .extractor_fallback import enqueue_extractor_fallback
+            profile_url = (
+                f"https://www.pinterest.com/{username}/"
+                if source == "pinterest" else f"https://bsky.app/profile/{username.lstrip('@')}"
+            )
+            await enqueue_extractor_fallback(
+                self.pool, source=source, kind="profile", content_id=username, url=profile_url,
+            )
 
     # --- profile write. Subclass may override for platform-specific INSERT. ---
 

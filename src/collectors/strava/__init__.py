@@ -782,7 +782,66 @@ class StravaCollector(BaseCollector):
         if not self._collector_enabled:
             self._intentional_idle_reason = self._disabled_reason
             return
-        await super().run(targets)
+        # The browser vault is the source of truth.  Keep its source-filtered
+        # cookie jar only for this cycle; no cookie value is copied to logs or
+        # durable configuration.
+        from src.core.extractor_fallback import temporary_vault_cookie_jar
+
+        with temporary_vault_cookie_jar("strava") as vault_jar:
+            original_file = self._cookies_file
+            original_cookie = self._session_cookie
+            original_accounts = self._cookie_accounts
+            original_use_web = self._use_web
+            if vault_jar:
+                self._cookies_file = vault_jar
+                self._session_cookie = self._load_session_cookie_from_file(vault_jar)
+                self._cookie_accounts = self._load_all_cookie_accounts()
+                self._use_web = bool(self._session_cookie)
+            try:
+                if self._use_web and not await self._preflight_cookie_auth():
+                    return
+                await super().run(targets)
+            finally:
+                self._cookies_file = original_file
+                self._session_cookie = original_cookie
+                self._cookie_accounts = original_accounts
+                self._use_web = original_use_web
+
+    async def _preflight_cookie_auth(self) -> bool:
+        """Require an authenticated Strava response before any web work."""
+        jar = self._build_cookie_jar()
+        if jar is None:
+            return await self._pause_for_cookie_auth("missing _strava4_session cookie")
+        try:
+            async with httpx.AsyncClient(timeout=30, cookies=jar, follow_redirects=True) as client:
+                response = await client.get(f"{STRAVA_WEB}/dashboard")
+        except httpx.HTTPError as exc:
+            return await self._pause_for_cookie_auth(f"Strava auth preflight failed: {type(exc).__name__}")
+        authenticated = (
+            response.status_code == 200
+            and "/login" not in str(response.url).lower()
+            and not re.search(r"\b(log in|sign up)\b", response.text[:20_000], re.IGNORECASE)
+        )
+        if not authenticated:
+            return await self._pause_for_cookie_auth(
+                f"Strava auth preflight returned HTTP {response.status_code}"
+            )
+        self.record_upstream_check()
+        return True
+
+    async def _pause_for_cookie_auth(self, reason: str) -> bool:
+        self._intentional_idle_reason = reason
+        if self.pool is not None:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    """INSERT INTO source_health (source,status,last_error,freshness_state,blocker,updated_at)
+                       VALUES ('strava','auth_paused',$1,'degraded',$1,NOW())
+                       ON CONFLICT (source) DO UPDATE SET status='auth_paused',last_error=$1,
+                         freshness_state='degraded',blocker=$1,updated_at=NOW()""",
+                    reason[:1000],
+                )
+        logger.warning("strava: %s; refresh the Chrome Strava session", reason)
+        return False
 
     async def collect(self, targets: list[str]):
         if not self._collector_enabled:

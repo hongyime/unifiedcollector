@@ -24,7 +24,6 @@ from urllib.parse import quote, urljoin, urlparse
 
 from bs4 import BeautifulSoup
 import httpx
-import requests
 
 from src.core.profile_only_collector import ProfileOnlyCollector, ProfileResult
 from src.collectors.native_platform_scrape import (
@@ -442,6 +441,66 @@ class SnapchatCollector(ProfileOnlyCollector):
     SOURCE_NAME = "snapchat"
     PROFILE_TABLE = "snapchat_profiles"
 
+    async def _collect_authenticated_feeds(self) -> int:
+        """Seed Discover and Spotlight from the existing Chrome session only."""
+        if self.pool is None:
+            return 0
+        from src.core.extractor_fallback import _snapshot_cookies, filter_vault_cookies
+        from pathlib import Path
+
+        cookies = filter_vault_cookies(
+            "snapchat",
+            _snapshot_cookies(Path(os.getenv("BROWSER_COOKIE_VAULT_DIR", "credentials/browser_cookies")), "snapchat"),
+        )
+        if not cookies:
+            return 0
+
+        def fetch() -> list[tuple[str, list[dict[str, Any]]]]:
+            session = httpx.Client(timeout=(5, 20), follow_redirects=True)
+            for cookie in cookies:
+                session.cookies.set(str(cookie["name"]), str(cookie["value"]), domain=str(cookie.get("domain") or ".snapchat.com"), path=str(cookie.get("path") or "/"))
+            try:
+                output = []
+                for surface, url in (("discover", "https://www.snapchat.com/discover"), ("spotlight", "https://www.snapchat.com/spotlight")):
+                    response = session.get(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "text/html"})
+                    if response.status_code >= 400 or "/login" in str(response.url).lower():
+                        raise RuntimeError("feed_auth_required")
+                    output.append((surface, _extract_public_snap_items(response.text, str(response.url), None)))
+                return output
+            finally:
+                session.close()
+
+        feeds = await asyncio.to_thread(fetch)
+        stored = 0
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                for surface, items in feeds:
+                    for item in items:
+                        content_type = str(item.get("metadata", {}).get("content_type") or "public_story")
+                        table_name, id_column = _snapchat_storage_target(content_type)
+                        status = await conn.execute(
+                            f"""INSERT INTO {table_name}
+                                  ({id_column},username,title,story_url,media_url,thumbnail_url,posted_at,expires_at,collected_at,metadata)
+                                VALUES ($1,$2,$3,$4,$5,$6,$7::text::timestamptz,$8::text::timestamptz,NOW(),$9::jsonb)
+                                ON CONFLICT ({id_column}) DO UPDATE SET
+                                  title=COALESCE(EXCLUDED.title,{table_name}.title),
+                                  story_url=EXCLUDED.story_url,media_url=COALESCE(EXCLUDED.media_url,{table_name}.media_url),
+                                  thumbnail_url=COALESCE(EXCLUDED.thumbnail_url,{table_name}.thumbnail_url),collected_at=NOW(),
+                                  metadata={table_name}.metadata||EXCLUDED.metadata""",
+                            item["id"], item["username"], item["title"], item["url"], item["media_url"], item["thumbnail_url"],
+                            item["posted_at"], item["expires_at"], json.dumps({**item["metadata"], "collector": "authenticated_feed", "surface": surface}),
+                        )
+                        stored += int(status.endswith(" 1"))
+                    await conn.execute(
+                        """INSERT INTO collector_feed_cursors (source,surface,cursor,checked_at)
+                           VALUES ('snapchat',$1,$2,NOW())
+                           ON CONFLICT (source,surface) DO UPDATE SET cursor=EXCLUDED.cursor,checked_at=NOW()""",
+                        surface, items[-1]["id"] if items else None,
+                    )
+        self.record_upstream_check()
+        self._progress_count += stored
+        return stored
+
     async def probe_profile(self, username: str) -> ProfileResult:
         url = f"https://snapchat.com/add/{username}"
         headers = {
@@ -506,15 +565,12 @@ class SnapchatCollector(ProfileOnlyCollector):
             "Accept-Language": "en-US,en;q=0.9",
         }
         try:
-            with requests.Session() as session:
+            with httpx.Client(timeout=(5, 20), follow_redirects=False) as session:
                 current_url = target_url
                 for redirect_count in range(_MAX_PUBLIC_REDIRECTS + 1):
-                    with session.get(
+                    with session.stream(
                         current_url,
                         headers=headers,
-                        timeout=(5, 20),
-                        stream=True,
-                        allow_redirects=False,
                     ) as response:
                         if response.status_code in _REDIRECT_STATUSES:
                             if redirect_count >= _MAX_PUBLIC_REDIRECTS:
@@ -535,7 +591,7 @@ class SnapchatCollector(ProfileOnlyCollector):
                         if not _allowed_public_page(getattr(response, "url", None) or current_url):
                             raise RuntimeError("public_redirect_rejected")
                         chunks = bytearray()
-                        for chunk in response.iter_content(chunk_size=64 * 1024):
+                        for chunk in response.iter_bytes(chunk_size=64 * 1024):
                             if not chunk:
                                 continue
                             chunks.extend(chunk)
@@ -543,7 +599,7 @@ class SnapchatCollector(ProfileOnlyCollector):
                                 raise RuntimeError("public_page_too_large")
                         return bytes(chunks).decode(response.encoding or "utf-8", "replace")
                 raise RuntimeError("public_redirect_limit")
-        except requests.RequestException as exc:
+        except httpx.HTTPError as exc:
             raise RuntimeError("public_request_failed") from exc
 
     async def run_native_cycle(self) -> dict[str, Any]:
@@ -555,6 +611,11 @@ class SnapchatCollector(ProfileOnlyCollector):
             summary["skipped"] = "no_pool"
             return summary
 
+        try:
+            summary["feed_items"] = await self._collect_authenticated_feeds()
+        except Exception as exc:
+            summary["feed_error"] = type(exc).__name__.lower()
+            logger.warning("Snapchat authenticated feeds deferred: %s", summary["feed_error"])
         await seed_native_targets(self.pool, self.SOURCE_NAME)
         target = await claim_native_target(self.pool, self.SOURCE_NAME)
         if target is None:

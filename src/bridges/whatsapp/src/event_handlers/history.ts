@@ -18,6 +18,7 @@
 import { WASocket, WAMessageKey } from '@whiskeysockets/baileys';
 import { producer } from '../producer';
 import { normalizeMessage } from '../utils/normalize';
+import { rememberMedia } from '../media_cache';
 import pino from 'pino';
 import fs from 'fs';
 import path from 'path';
@@ -241,7 +242,11 @@ export function registerHistoryHandler(sock: WASocket, canFetchHistory?: () => b
                 for (let i = 0; i < chatMsgs.length; i += batchSize) {
                     const batch = chatMsgs.slice(i, i + batchSize);
                     const canonical = batch
-                        .map((m) => normalizeMessage(m))
+                        .map((m) => {
+                            const normalized = normalizeMessage(m);
+                            if (normalized?.has_media) rememberMedia(m);
+                            return normalized;
+                        })
                         .filter((m): m is NonNullable<ReturnType<typeof normalizeMessage>> => Boolean(m));
 
                     for (const _c of canonical) {

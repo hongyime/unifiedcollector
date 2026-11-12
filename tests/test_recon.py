@@ -137,6 +137,21 @@ def test_queue_recon_target_requeues_legacy_blocked_target():
     assert row["status"] == "pending"
 
 
+def test_successful_spiderfoot_claim_records_an_upstream_check():
+    class Conn:
+        def __init__(self):
+            self.sql = ""
+
+        async def execute(self, sql, *_args):
+            self.sql = sql
+
+    conn = Conn()
+    asyncio.run(recon_spiderfoot._mark_source_health(conn, "running", success=True))
+
+    assert "last_checked_at" in conn.sql
+    assert "freshness_state" in conn.sql
+
+
 def test_spiderfoot_scope_modules_and_observation_normalization(monkeypatch):
     monkeypatch.delenv("SPIDERFOOT_MODULES", raising=False)
 
@@ -424,8 +439,9 @@ def test_unavailable_free_module_is_not_silently_dropped():
 
 def test_requested_modules_are_not_silently_truncated(monkeypatch):
     monkeypatch.setenv("SPIDERFOOT_MAX_MODULES", "2")
-    with pytest.raises(ValueError, match="raise the limit or explicitly reduce"):
-        allowed_modules("sfp_dnsresolve,sfp_whois,sfp_names")
+    assert allowed_modules("sfp_dnsresolve,sfp_whois,sfp_names") == [
+        "sfp_dnsresolve", "sfp_whois", "sfp_names",
+    ]
 
 
 def test_spiderfoot_parser_tolerates_mixed_stdout():
@@ -578,7 +594,7 @@ def test_run_spiderfoot_once_fails_when_scan_has_no_useful_observations(monkeypa
     assert conn.health[-1][1] == "degraded"
 
 
-def test_halted_admission_writes_a_healthy_halted_heartbeat(monkeypatch, tmp_path):
+def test_halted_admission_does_not_block_an_idle_worker(monkeypatch, tmp_path):
     _allow_test_admission(monkeypatch, tmp_path)
     state_path = Path(os.environ["RECON_ADMISSION_STATE_PATH"])
     recon_spiderfoot.halt_admission("error_rate", path=state_path)
@@ -591,13 +607,22 @@ def test_halted_admission_writes_a_healthy_halted_heartbeat(monkeypatch, tmp_pat
             self.health.append((sql, args))
             return "INSERT 0 1"
 
+        async def fetchrow(self, *_args):
+            return None
+
+        def transaction(self):
+            class Transaction:
+                async def __aenter__(self): return self
+                async def __aexit__(self, *_args): return False
+            return Transaction()
+
     monkeypatch.setattr(recon_spiderfoot, "network_policy_installed", lambda: True)
     conn = Conn()
 
     report = asyncio.run(run_spiderfoot_once(conn))
 
-    assert report["status"] == "admission_halted"
-    assert conn.health[-1][1] == ("spiderfoot", "admission_halted", "error_rate", True)
+    assert report["status"] == "idle"
+    assert conn.health[-1][1] == ("spiderfoot", "idle", None, True)
 
 
 def test_run_spiderfoot_once_dry_run_only_reads_pending_target(monkeypatch, tmp_path):
@@ -893,11 +918,12 @@ def test_run_spiderfoot_once_rejects_private_ip_before_engine(monkeypatch, tmp_p
     assert any("non-public destination" in str(args) for _sql, args in conn.updates)
 
 
-def test_run_spiderfoot_once_fails_closed_without_network_policy(monkeypatch):
+def test_run_spiderfoot_once_fails_closed_before_claim_when_guard_is_missing(monkeypatch):
     class Conn:
         def __init__(self):
             self.claimed = False
             self.health = []
+            self.transactions = 0
 
         async def execute(self, sql, *args):
             if "source_health" in sql:
@@ -905,12 +931,43 @@ def test_run_spiderfoot_once_fails_closed_without_network_policy(monkeypatch):
 
         async def fetchrow(self, sql, *args):
             self.claimed = True
-            pytest.fail("target was claimed without the egress guard")
+            return None
+
+        def transaction(self):
+            self.transactions += 1
+            class Transaction:
+                async def __aenter__(self): return self
+                async def __aexit__(self, *_args): return False
+            return Transaction()
 
     monkeypatch.setattr(recon_spiderfoot, "network_policy_installed", lambda: False)
     conn = Conn()
 
     report = asyncio.run(run_spiderfoot_once(conn))
 
-    assert report["status"] == "guard_unavailable"
+    assert report["status"] == "blocked"
     assert not conn.claimed
+    assert conn.transactions == 0
+
+
+def test_run_spiderfoot_once_rejects_paid_module_before_claim(monkeypatch):
+    class Conn:
+        claimed = False
+        transactions = 0
+
+        async def fetchrow(self, *_args):
+            self.claimed = True
+
+        def transaction(self):
+            self.transactions += 1
+            raise AssertionError("preflight opened a claim transaction")
+
+    monkeypatch.setattr(recon_spiderfoot, "network_policy_installed", lambda: True)
+    monkeypatch.setenv("SPIDERFOOT_MODULES", "sfp_shodan")
+    conn = Conn()
+
+    report = asyncio.run(run_spiderfoot_once(conn))
+
+    assert report["status"] == "blocked"
+    assert not conn.claimed
+    assert conn.transactions == 0

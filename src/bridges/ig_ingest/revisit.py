@@ -257,6 +257,16 @@ async def browser_revisit_target(request):
                 max_attempts,
                 claim_timeout,
             )
+            # Only stable page URLs cross this ownership boundary. The helper
+            # rejects signed/volatile CDN URLs before enqueueing a job.
+            exhausted = await conn.fetch(
+                """SELECT platform, content_id, post_url, source_url
+                     FROM browser_media_revisit_queue
+                    WHERE platform=$1 AND status='failed' AND attempts >= $2
+                      AND COALESCE(metadata->>'exhausted_browser_revisit_attempts', 'false')='true'""",
+                platform,
+                max_attempts,
+            )
             row = await conn.fetchrow(
                 """
                 WITH platform_lock AS MATERIALIZED (
@@ -316,6 +326,19 @@ async def browser_revisit_target(request):
                 claim_timeout,
                 claim_hold,
             )
+        if exhausted:
+            from src.core.extractor_fallback import handoff_browser_fallback
+            for item in exhausted:
+                values = dict(item)
+                try:
+                    await handoff_browser_fallback(
+                        request.app["pool"], source=values["platform"], kind="post",
+                        content_id=values["content_id"],
+                        url=values.get("post_url") or values.get("source_url") or "",
+                        exhausted=True,
+                    )
+                except Exception:
+                    logger.debug("browser fallback handoff failed", exc_info=True)
         if not row:
             return _cors(web.json_response({"ok": True, "target": None}))
         target = dict(row)

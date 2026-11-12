@@ -95,3 +95,38 @@ async def test_realtime_zero_progress_return_does_not_mark_source_healthy(monkey
     await svc._run_source("whatsapp")
 
     mark_healthy.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_polling_source_heartbeats_when_no_targets_remain(monkeypatch):
+    import src.worker as worker_mod
+
+    class _FakeCollector:
+        progress_count = 0
+
+        def set_pool(self, _pool):
+            pass
+
+    svc = worker_mod.WorkerService()
+    svc.pool = _Pool()
+    svc._stop = asyncio.Event()
+    svc._collectors = {}
+    svc._progress_baseline = {}
+    svc._last_success_progress = {}
+    svc._zero_progress_streak = {}
+    svc._crash_counts = {"search": 0}
+    svc._hang_counts = {}
+    svc._heartbeat = {}
+    svc._auth_paused = {}
+    svc._auth_pause_since = {}
+    monkeypatch.setattr(worker_mod, "get_collector", lambda _source: _FakeCollector())
+    monkeypatch.setattr(svc, "_load_targets", AsyncMock(return_value=[]))
+
+    async def mark_healthy(_source, **_kwargs):
+        svc._stop.set()
+
+    monkeypatch.setattr(svc, "_mark_source_healthy", mark_healthy)
+
+    await svc._run_source("search")
+
+    assert svc._zero_progress_streak["search"] == 0

@@ -1984,9 +1984,11 @@ class TiktokCollector(BaseCollector):
         from src.core.subprocess_downloader import gallery_dl_download, managed_tempdir
         try:
             async with managed_tempdir("tiktok_gdl_") as tmpdir:
+                from src.core.extractor_fallback import materialize_vault_cookie_jar
                 result = await gallery_dl_download(
                     profile_url,
-                    cookies_file=self._cookies_file,
+                    cookies_file=(materialize_vault_cookie_jar("tiktok", Path(tmpdir) / "cookies.txt")
+                                  or self._cookies_file),
                     extra_args=self._gallery_dl_archive_args(username),
                     timeout=self._timeout,
                     tempdir=tmpdir,
@@ -2078,9 +2080,11 @@ class TiktokCollector(BaseCollector):
         from src.core.subprocess_downloader import yt_dlp_download, managed_tempdir
         try:
             async with managed_tempdir("tiktok_ytdlp_") as tmpdir:
+                from src.core.extractor_fallback import materialize_vault_cookie_jar
                 result = await yt_dlp_download(
                     profile_url,
-                    cookies_file=self._cookies_file,
+                    cookies_file=(materialize_vault_cookie_jar("tiktok", Path(tmpdir) / "cookies.txt")
+                                  or self._cookies_file),
                     max_downloads=(self._yt_dlp_max_downloads or None),
                     timeout=self._timeout,
                     retries=self._retries,

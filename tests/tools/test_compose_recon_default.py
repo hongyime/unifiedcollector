@@ -29,23 +29,18 @@ def test_spiderfoot_healthcheck_probes_worker_progress_and_database() -> None:
     assert "sf.py -V" not in block
 
 
-def test_spiderfoot_evidence_is_ext4_root_bind_with_bounded_run_defaults() -> None:
+def test_spiderfoot_keeps_private_evidence_and_isolated_guard_without_admission_gates() -> None:
     block = _service_block("collector_spiderfoot")
     assert 'user: "${RECON_UID:-1000}:${RECON_GID:-1000}"' in block
     assert 'RECON_EVIDENCE_ROOT: "/var/lib/unifiedcollector/recon-evidence"' in block
     assert "/var/lib/unifiedcollector/recon-evidence:/var/lib/unifiedcollector/recon-evidence" in block
     assert 'MAIGRET_REPORT_KEEPDIR: "${MAIGRET_REPORT_KEEPDIR:-/var/lib/unifiedcollector/recon-evidence/maigret}"' in block
-    assert 'RECON_MAX_TARGETS_PER_RUN: "${RECON_MAX_TARGETS_PER_RUN:-10}"' in block
-    assert 'RECON_ADMISSION_POLICY_PATH: "/app/config/task-37-admission-policy.json"' in block
-    assert 'RECON_ADMISSION_STATE_PATH: "/var/lib/unifiedcollector/recon-admission/task-37-admission-state.json"' in block
-    assert 'RECON_ADMISSION_STATE_MODE: "0660"' in block
-    assert 'RECON_EGRESS_GUARD_SOCKET: "/var/lib/unifiedcollector/recon-guard/status.sock"' in block
-    assert "/var/lib/unifiedcollector/recon-admission:/var/lib/unifiedcollector/recon-admission" in block
+    assert 'network_mode: "service:recon_egress_guard"' in block
+    assert "recon_egress_guard:" in block
+    assert 'condition: service_healthy' in block
+    assert "RECON_ADMISSION_" not in block
+    assert "/var/lib/unifiedcollector/recon-admission" not in block
     assert "/var/lib/unifiedcollector/recon-guard:/var/lib/unifiedcollector/recon-guard:ro" in block
-    assert "task-37-admission-policy.json:/app/config/task-37-admission-policy.json:ro" in block
-    guard = _service_block("recon_egress_guard")
-    assert "RECON_MAX_EGRESS_BYTES" in guard
-    assert "/var/lib/unifiedcollector/recon-guard:/var/lib/unifiedcollector/recon-guard" in guard
 
 
 def test_recon_seed_scheduler_shares_the_admission_gate_without_evidence_access() -> None:

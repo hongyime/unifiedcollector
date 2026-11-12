@@ -13,6 +13,11 @@ from src.collectors.exposure import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _disable_exposure_query_delay(monkeypatch):
+    monkeypatch.setenv("EXPOSURE_QUERY_DELAY_SECONDS", "0")
+
+
 def test_exposure_registered(monkeypatch):
     monkeypatch.delenv("COLLECTOR_DISABLED_SOURCES", raising=False)
     assert "exposure" in list_sources()
@@ -269,7 +274,6 @@ def _write_two_dork_queries(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("EXPOSURE_ENABLED", "1")
     monkeypatch.setenv("EXPOSURE_DORKS_FILE", str(dorks))
     monkeypatch.setenv("EXPOSURE_ALLOWED_DOMAINS", "example.edu.sg")
-    monkeypatch.setenv("EXPOSURE_QUERY_DELAY_SECONDS", "0")
 
 
 @pytest.mark.asyncio
@@ -340,7 +344,6 @@ async def test_collect_rotation_reaches_every_scope_across_runs(monkeypatch, tmp
     monkeypatch.setenv("EXPOSURE_DORKS_FILE", str(dorks))
     monkeypatch.setenv("EXPOSURE_ALLOWED_DOMAINS", "alpha.edu.sg,beta.edu.sg")
     monkeypatch.setenv("EXPOSURE_MAX_QUERIES_PER_CYCLE", "1")
-    monkeypatch.setenv("EXPOSURE_QUERY_DELAY_SECONDS", "0")
 
     coll = ExposureCollector()
     coll.search_query = AsyncMock(return_value=[])

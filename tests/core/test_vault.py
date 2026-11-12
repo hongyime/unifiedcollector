@@ -473,7 +473,26 @@ def test_write_atomic_artifact_from_path_can_keep_source_file(tmp_path):
     assert result.ok is True
     assert source_path.exists() is True
     assert source_path.read_bytes() == data
-    assert result.path.read_bytes() == data
+
+
+def test_write_atomic_artifact_from_path_does_not_copy_source_metadata(tmp_path, monkeypatch):
+    root = tmp_path / "vault"
+    root.mkdir()
+    source_path = tmp_path / "metadata-safe.part"
+    source_path.write_bytes(b"metadata-safe")
+
+    def fail_copy2(*_args, **_kwargs):
+        raise AssertionError("copy2 must not run")
+
+    monkeypatch.setattr(vault.shutil, "copy2", fail_copy2)
+
+    result = vault.write_atomic_artifact_from_path(
+        source="website", artifact_id="video/metadata-safe", artifact_kind="media_blob",
+        source_path=source_path, extension=".mp4", root=root, delete_source=False,
+    )
+
+    assert result.ok is True
+    assert result.path.read_bytes() == b"metadata-safe"
 
 
 def test_write_atomic_artifact_reports_db_failure_as_partial(tmp_path):

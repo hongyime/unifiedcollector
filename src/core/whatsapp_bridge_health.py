@@ -92,7 +92,8 @@ def summarize_whatsapp_bridge_health(states: list[dict[str, Any]]) -> dict[str, 
     reachable = [s for s in states if s.get("ok")]
     ready = [
         s for s in reachable
-        if s.get("whatsapp_ready") is True or s.get("ready") is True or s.get("connected") is True
+        if (s.get("whatsapp_ready") is True or s.get("ready") is True or s.get("connected") is True)
+        and s.get("rabbitmq_deliverable") is not False
     ]
     qr_waiting_statuses = {
         "awaiting_scan",

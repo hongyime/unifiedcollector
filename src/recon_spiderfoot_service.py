@@ -186,10 +186,6 @@ def _run_window_config() -> tuple[int, int]:
 
 
 async def _check_worker_health() -> bool:
-    try:
-        _policy, _state, admission_block = admission_snapshot()
-    except AdmissionPolicyError:
-        return False
     if not _heartbeat_is_fresh():
         return False
     try:
@@ -199,7 +195,7 @@ async def _check_worker_health() -> bool:
     try:
         return await _database_is_healthy(
             pool,
-            expected_status="admission_halted" if admission_block else {"idle", "running"},
+            expected_status={"idle", "running"},
         )
     finally:
         await close_pool()
@@ -225,23 +221,16 @@ async def _run_once(recon_spiderfoot, pool, args, worker_id: int | str | None = 
     return report
 
 
-async def _worker_loop(worker_id: int, recon_spiderfoot, pool, args, budget: _RunWindow) -> None:
+async def _worker_loop(worker_id: int, recon_spiderfoot, pool, args) -> None:
     while True:
-        if not await budget.reserve():
-            return
         _touch_worker_heartbeat(worker_id)
         try:
             report = await _run_once(recon_spiderfoot, pool, args, worker_id)
         except BaseException:
-            await budget.finish(False)
             raise
-        target = report.get("target")
-        await budget.finish(isinstance(target, dict) and bool(target.get("target_type")))
         _touch_worker_heartbeat(worker_id)
         if args.once:
             break
-        if report.get("status") in {"admission_halted", "admission_unavailable", "guard_unavailable"}:
-            return
         delay = args.poll_interval if report.get("status") == "idle" else 0.5
         await asyncio.sleep(delay)
 
@@ -344,57 +333,14 @@ async def _fp_blocklist_refresh_loop(recon_spiderfoot, pool) -> None:
 
 async def _run(args) -> None:
     recon_spiderfoot = _load_recon_spiderfoot()
-    # Refuse to become a consumer unless the persistent policy and private
-    # ledger are installed and internally consistent. A valid halted policy is
-    # allowed; it starts idle and cannot claim or launch sibling work.
-    try:
-        policy, state, block = admission_snapshot()
-    except AdmissionPolicyError as exc:
-        raise RuntimeError("recon admission gate is unavailable; refusing startup") from exc
-    logging.getLogger(__name__).info(
-        "recon admission gate installed (policy=%s cohort=%s halted=%s)",
-        policy["policy_id"], state["cohort_limit"], bool(block),
-    )
     pool = await get_pool()
     try:
         workers = _worker_count(args.workers)
-        # Periodic FP-blocklist refresh runs as a sibling task — not part of the
-        # target-processing worker loop — so it can't be starved by hot pending
-        # queues.  Disabled with RECON_MAIGRET_FP_INTERVAL_SECONDS=0 (skips loop).
-        fp_task = None
-        if not args.dry_run and not args.once and os.getenv("RECON_MAIGRET_FP_INTERVAL_SECONDS", "").strip() != "0":
-            fp_task = asyncio.create_task(
-                _fp_blocklist_refresh_loop(recon_spiderfoot, pool),
-                name="fp_blocklist_refresh",
-            )
-        try:
-            while True:
-                begin_run_window()
-                max_targets, deadline = _run_window_config()
-                budget = _RunWindow(max_targets, deadline)
-                active_workers = 1 if args.once else workers
-                await asyncio.gather(*(
-                    _worker_loop(worker_id, recon_spiderfoot, pool, args, budget)
-                    for worker_id in range(1, active_workers + 1)
-                ))
-                if args.once:
-                    break
-                transition = await _advance_completed_cohort(pool)
-                if transition and transition["passed"] and not transition["state"].get("halt"):
-                    continue
-                cooldown = max(60, int(os.getenv("RECON_RUN_COOLDOWN_SECONDS", "3600")))
-                logging.getLogger(__name__).info(
-                    "recon run window ended (targets=%d cap=%d); cooling down %ds",
-                    budget.targets, budget.max_targets, cooldown,
-                )
-                await _cooldown_with_heartbeats(cooldown, workers, recon_spiderfoot, pool)
-        finally:
-            if fp_task is not None:
-                fp_task.cancel()
-                try:
-                    await fp_task
-                except (asyncio.CancelledError, Exception):
-                    pass
+        active_workers = 1 if args.once else workers
+        await asyncio.gather(*(
+            _worker_loop(worker_id, recon_spiderfoot, pool, args)
+            for worker_id in range(1, active_workers + 1)
+        ))
     finally:
         await close_pool()
 

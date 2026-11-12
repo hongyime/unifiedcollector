@@ -92,6 +92,9 @@ SERVICE_SOURCES: dict[str, list[str]] = {
     # Per-source collectors -- COMMON_WORKER_PATHS union per-source subdir
     "collector_youtube": COMMON_WORKER_PATHS + ["src/collectors/youtube"],
     "collector_tiktok": COMMON_WORKER_PATHS + ["src/collectors/tiktok", "src/core/tiktok_browser.py"],
+    "collector_facebook": ["src/core/extractor_fallback.py", "src/core/subprocess_downloader.py", "src/core/vault.py", "src/db"],
+    "collector_x": ["src/core/extractor_fallback.py", "src/core/subprocess_downloader.py", "src/core/vault.py", "src/db"],
+    "collector_threads": ["src/core/extractor_fallback.py", "src/core/subprocess_downloader.py", "src/core/vault.py", "src/db"],
     "collector_github": COMMON_WORKER_PATHS + ["src/collectors/github"],
     "collector_snapchat": PROFILE_PROBE_PATHS + ["src/collectors/snapchat"],
     "collector_airbnb": PROFILE_PROBE_PATHS + ["src/collectors/airbnb"],

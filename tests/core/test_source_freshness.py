@@ -171,6 +171,92 @@ async def test_compute_liveness_uses_fresh_source_health_when_query_times_out(mo
 
 
 @pytest.mark.asyncio
+async def test_clean_no_work_cycle_is_operationally_idle_not_stale(monkeypatch):
+    from src.core import source_freshness
+
+    class IdleConn:
+        async def fetch(self, query: str, *args, **kwargs):
+            if "FROM source_health" in query:
+                now = datetime.now(timezone.utc)
+                return [{
+                    "source": "pinterest", "status": "running", "last_error": None,
+                    "last_success_at": now - timedelta(seconds=30), "updated_at": now,
+                }]
+            raise AssertionError(query)
+
+        async def fetchval(self, query: str, **kwargs):
+            if "pinterest_profiles" in query:
+                return 90_000
+            return False
+
+    monkeypatch.setattr(
+        source_freshness,
+        "FRESHNESS",
+        [("pinterest", "SELECT 90000 FROM pinterest_profiles", 21_600)],
+    )
+
+    row = (await source_freshness.compute_liveness(IdleConn()))[0]
+
+    assert row["status"] == "live"
+    assert row["operational_status"] == "idle"
+    assert row["age_seconds"] == 90_000
+    assert "clean no-work cycle" in row["detail"]
+
+
+@pytest.mark.asyncio
+async def test_real_degraded_health_wins_over_stale_content(monkeypatch):
+    from src.core import source_freshness
+
+    class DegradedConn:
+        async def fetch(self, query: str, *args, **kwargs):
+            if "FROM source_health" in query:
+                now = datetime.now(timezone.utc)
+                return [{
+                    "source": "search", "status": "degraded", "last_error": "database write failed",
+                    "last_success_at": now - timedelta(seconds=30), "updated_at": now,
+                }]
+            raise AssertionError(query)
+
+        async def fetchval(self, query: str, **kwargs):
+            return 90_000
+
+    monkeypatch.setattr(source_freshness, "FRESHNESS", [("search", "SELECT 90000", 21_600)])
+
+    row = (await source_freshness.compute_liveness(DegradedConn()))[0]
+
+    assert row["status"] == "degraded"
+    assert row["operational_status"] == "degraded"
+    assert row["detail"] == "database write failed"
+
+
+@pytest.mark.asyncio
+async def test_stale_eligible_check_degrades_even_when_content_is_recent(monkeypatch):
+    from src.core import source_freshness
+
+    class CheckConn:
+        async def fetch(self, query: str, *args, **kwargs):
+            if "FROM source_health" in query:
+                now = datetime.now(timezone.utc)
+                return [{
+                    "source": "website", "status": "running", "last_error": None,
+                    "last_success_at": now - timedelta(hours=2),
+                    "last_checked_at": now - timedelta(hours=2),
+                    "last_content_at": now - timedelta(seconds=30),
+                    "freshness_state": "checked", "blocker": None, "updated_at": now,
+                }]
+            raise AssertionError(query)
+
+        async def fetchval(self, query: str, **kwargs):
+            return 30
+
+    monkeypatch.setattr(source_freshness, "FRESHNESS", [("website", "SELECT 30", 259200)])
+    row = (await source_freshness.compute_liveness(CheckConn()))[0]
+    assert row["status"] == "degraded"
+    assert row["last_content_at"] is not None
+    assert "eligible upstream check" in row["detail"]
+
+
+@pytest.mark.asyncio
 async def test_strava_liveness_counts_route_and_media_progress(monkeypatch):
     from src.core import source_freshness
 

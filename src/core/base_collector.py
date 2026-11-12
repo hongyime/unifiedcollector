@@ -148,6 +148,9 @@ class BaseCollector(ABC):
         # Set by a collector when a no-write cycle is intentional, for example
         # when a safer browser/extension path is already fresh.
         self._intentional_idle_reason: str | None = None
+        # Set only after a collector has received a usable upstream response.
+        # A completed local/no-target loop must not satisfy source freshness.
+        self._upstream_check_succeeded = False
         # WorkerService may inject these to serialize risky active scrape phases
         # for sources that share platform anti-bot infrastructure.
         self._collect_mutex_acquire = None
@@ -180,24 +183,41 @@ class BaseCollector(ABC):
                 await conn.execute(
                     """
                     INSERT INTO source_health
-                        (source, status, last_error, last_success_at, crash_count, updated_at)
-                    VALUES ($1, 'running', NULL, NOW(), 0, NOW())
+                        (source, status, last_error, last_success_at, last_checked_at,
+                         freshness_state, blocker, crash_count, updated_at)
+                    VALUES ($1, 'running', NULL, NOW(), NOW(), 'checked', NULL, 0, NOW())
                     ON CONFLICT (source) DO UPDATE
                     SET status='running',
                         last_error=NULL,
                         last_success_at=NOW(),
+                        last_checked_at=NOW(),
+                        freshness_state='checked',
+                        blocker=NULL,
                         crash_count=0,
                         updated_at=NOW()
                     """,
                     self.SOURCE_NAME,
                 )
             self._last_source_health_heartbeat = now
+            self._upstream_check_succeeded = True
         except Exception:
             logger.debug("source_health heartbeat failed for %s", self.SOURCE_NAME, exc_info=True)
 
     @property
     def intentional_idle_reason(self) -> str | None:
         return self._intentional_idle_reason
+
+    @property
+    def upstream_check_succeeded(self) -> bool:
+        return self._upstream_check_succeeded
+
+    def record_upstream_check(self) -> None:
+        """Record an in-memory eligible check for this run.
+
+        Collectors call this only after authentication and a usable upstream
+        response; the worker persists it once the cycle completes.
+        """
+        self._upstream_check_succeeded = True
 
     def set_pool(self, pool):
         self.pool = pool
@@ -279,6 +299,7 @@ class BaseCollector(ABC):
     async def run(self, targets: list[str]):
         """Entry point with all safety checks."""
         self._intentional_idle_reason = None
+        self._upstream_check_succeeded = False
         if self.pool is not None:
             from .source_controls import is_manually_paused
             pause_reason = await is_manually_paused(self.pool, self.SOURCE_NAME)
@@ -343,6 +364,15 @@ class BaseCollector(ABC):
                     mutex_handle = None
             self.circuit_breaker.record_success()
             await self.run_backfill()
+            # Generic extractors are a source-local last resort.  They consume
+            # only rows handed off after this collector's native/browser budget.
+            if self.pool is not None:
+                from .extractor_fallback import _YTDLP_SOURCES, run_extractor_fallback
+                if self.SOURCE_NAME in _YTDLP_SOURCES:
+                    try:
+                        await run_extractor_fallback(self.pool, self.SOURCE_NAME)
+                    except Exception:
+                        logger.warning("%s extractor fallback cycle failed", self.SOURCE_NAME, exc_info=True)
         except Exception as e:
             self.circuit_breaker.record_failure()
             if self.should_notify_run_error(e):

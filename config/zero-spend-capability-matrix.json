@@ -181,6 +181,30 @@
       "credentials_required": "Existing browser login sessions",
       "effective_enablement": "enabled",
       "zero_spend_reason": "Ingests pages already open in the user's browser; does not purchase external data."
+    },
+    {
+      "service": "collector_facebook",
+      "provider": "Source-owned exhausted-work extractor fallback",
+      "charge_status": "No direct paid API; public page extraction only",
+      "credentials_required": "Existing browser session vault when applicable",
+      "effective_enablement": "enabled by Compose; claims only source-owned fallback jobs",
+      "zero_spend_reason": "Uses the existing self-hosted extractor worker; no paid provider, proxy, or login automation fallback."
+    },
+    {
+      "service": "collector_x",
+      "provider": "Source-owned exhausted-work extractor fallback",
+      "charge_status": "No direct paid API; public page extraction only",
+      "credentials_required": "Existing browser session vault when applicable",
+      "effective_enablement": "enabled by Compose; claims only source-owned fallback jobs",
+      "zero_spend_reason": "Uses the existing self-hosted extractor worker; no paid provider, proxy, or login automation fallback."
+    },
+    {
+      "service": "collector_threads",
+      "provider": "Source-owned exhausted-work extractor fallback",
+      "charge_status": "No direct paid API; public page extraction only",
+      "credentials_required": "Existing browser session vault when applicable",
+      "effective_enablement": "enabled by Compose; claims only source-owned fallback jobs",
+      "zero_spend_reason": "Uses the existing self-hosted extractor worker; no paid provider, proxy, or login automation fallback."
     }
   ],
   "data_use_owner": {

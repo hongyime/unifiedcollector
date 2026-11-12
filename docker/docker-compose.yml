@@ -37,6 +37,23 @@ x-profile-probe: &profile-probe
   volumes:
     - ../src:/app/src
     - ../credentials:/app/credentials:ro
+    - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}:/vault"
+  env_file:
+    - ./env/common.env
+  healthcheck:
+    test: ["CMD", "python", "-m", "src.core.health"]
+    interval: 60s
+    timeout: 45s
+    retries: 3
+    start_period: 30s
+
+x-extractor-fallback: &extractor-fallback
+  <<: *collector-common
+  mem_limit: 256m
+  volumes:
+    - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}:/vault"
+    - ../credentials:/app/credentials:ro
+    - ../src:/app/src
   env_file:
     - ./env/common.env
   healthcheck:
@@ -159,12 +176,6 @@ services:
     pids_limit: 256
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
-      RECON_ALLOWLIST: "${RECON_ALLOWLIST:-}"
-      RECON_ALLOW_UNSCOPED: "${RECON_ALLOW_UNSCOPED:-0}"
-      RECON_ALLOWED_SOURCES: "${RECON_ALLOWED_SOURCES:-beeper,facebook,github,instagram,lemon8,search,strava,telegram,threads,tiktok,website,whatsapp,x,youtube}"
-      RECON_ALLOWED_SOURCE_TABLES: "${RECON_ALLOWED_SOURCE_TABLES:-collector_seen_targets,collection_targets,discovered_links,follow_edges,github_spider_queue,github_users,github_commits,instagram_spider_queue,social_users,website_targets,youtube_profile_queue,youtube_spider_queue}"
-      RECON_COLLECTOR_TARGET_TYPES: "${RECON_COLLECTOR_TARGET_TYPES:-domain,url,email,phone,ip,ipv4,user,username,channel}"
-      RECON_ALLOWED_DOMAIN_SUFFIXES: "${RECON_ALLOWED_DOMAIN_SUFFIXES:-}"
       RECON_USERNAME_MODULES: "${RECON_USERNAME_MODULES:-maigret}"
       SPIDERFOOT_CLI: "${SPIDERFOOT_CLI:-/usr/local/bin/spiderfoot-cli}"
       SPIDERFOOT_MODULES: "${SPIDERFOOT_MODULES:-sfp_dnsresolve,sfp_whois,sfp_names}"
@@ -174,17 +185,8 @@ services:
       SPIDERFOOT_TARGET_TIMEOUT_SECONDS: "${SPIDERFOOT_TARGET_TIMEOUT_SECONDS:-180}"
       SPIDERFOOT_STALE_TARGET_MINUTES: "${SPIDERFOOT_STALE_TARGET_MINUTES:-30}"
       RECON_HEALTH_MAX_AGE_SECONDS: "${RECON_HEALTH_MAX_AGE_SECONDS:-360}"
-      RECON_MAX_TARGETS_PER_RUN: "${RECON_MAX_TARGETS_PER_RUN:-10}"
-      RECON_RUN_DEADLINE_SECONDS: "${RECON_RUN_DEADLINE_SECONDS:-1800}"
-      RECON_RUN_COOLDOWN_SECONDS: "${RECON_RUN_COOLDOWN_SECONDS:-3600}"
-      RECON_ADMISSION_POLICY_PATH: "/app/config/task-37-admission-policy.json"
-      RECON_ADMISSION_STATE_PATH: "/var/lib/unifiedcollector/recon-admission/task-37-admission-state.json"
-      RECON_ADMISSION_STATE_MODE: "0660"
-      RECON_ADMISSION_SHARED_GID: "${RECON_ADMISSION_SHARED_GID:-1000}"
       RECON_EGRESS_GUARD_SOCKET: "/var/lib/unifiedcollector/recon-guard/status.sock"
       RECON_EVIDENCE_ROOT: "/var/lib/unifiedcollector/recon-evidence"
-      RECON_MIN_DISK_FREE_BYTES: "${RECON_MIN_DISK_FREE_BYTES:-2147483648}"
-      RECON_MAX_EVIDENCE_BYTES: "${RECON_MAX_EVIDENCE_BYTES:-10737418240}"
       RECON_SPIDERFOOT_HEARTBEAT_PATH: "/tmp/recon-spiderfoot-worker.heartbeat"
       SPIDERFOOT_STATE_ROOT: "${SPIDERFOOT_STATE_ROOT:-/tmp/spiderfoot-state}"
       # maigret: HTTP-only OSS account-enumeration engine (MIT), replaces the
@@ -213,10 +215,8 @@ services:
       PYTHONUNBUFFERED: "1"
     volumes:
       - /var/lib/unifiedcollector/recon-evidence:/var/lib/unifiedcollector/recon-evidence
-      - /var/lib/unifiedcollector/recon-admission:/var/lib/unifiedcollector/recon-admission
-      - ../src:/app/src
       - /var/lib/unifiedcollector/recon-guard:/var/lib/unifiedcollector/recon-guard:ro
-      - ./../config/task-37-admission-policy.json:/app/config/task-37-admission-policy.json:ro
+      - ../src:/app/src
       # GHunt credentials: set GHUNT_CREDS_HOST to an existing private session file.
       # Read-only bind so a bug in ghunt cannot rewrite the operator's file. Path
       # inside the container is GHUNT_CREDS (default /app/.ghunt/creds.m).
@@ -517,9 +517,7 @@ services:
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
       COLLECTOR_HANG_TIMEOUT_SECONDS: "7200"
-      # Strava is browser/CDP-only; retain the service as an intentional-idle
-      # compatibility shell so watchdog/source-health do not restart a crawler.
-      STRAVA_COLLECTOR_ENABLED: "false"
+      STRAVA_COLLECTOR_ENABLED: "true"
       STRAVA_PAGE_SCRAPE_BATCH: "20"
       STRAVA_SPIDER_ENABLED: "true"
       STRAVA_FOLLOW_SCRAPE_ENABLED: "true"
@@ -538,6 +536,7 @@ services:
       - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}/media:/media"
       - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
+      - ../credentials/browser_cookies:/app/credentials/browser_cookies:ro
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
       - ../src:/app/src
@@ -630,10 +629,10 @@ services:
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
       WEBSITE_TARGET_TIMEOUT_SECONDS: "240"
-      WEBSITE_TARGET_RETRY_BACKOFF_SECONDS: "21600"
-      WEBSITE_TARGET_RETRY_BACKOFF_MAX_SECONDS: "604800"
-      WEBSITE_ROBOTS_POLICY: "allowlist_override"
-      WEBSITE_ROBOTS_OVERRIDE_DOMAINS: "${WEBSITE_ROBOTS_OVERRIDE_DOMAINS:-}"
+      WEBSITE_TARGET_RETRY_BACKOFF_SECONDS: "0"
+      WEBSITE_TARGET_RETRY_BACKOFF_MAX_SECONDS: "0"
+      WEBSITE_RESPECT_ROBOTS: "0"
+      WEBSITE_ROBOTS_POLICY: "disabled"
       WEBSITE_URL_ALLOW: "${WEBSITE_URL_ALLOW:-https://*.com.sg,http://*.com.sg,https://*.com,http://*.com}"
       WEBSITE_URL_BLOCK: "${WEBSITE_URL_BLOCK:-}"
       WEBSITE_URL_POLICY_FILE: "${WEBSITE_URL_POLICY_FILE:-/app/config/sources/website.url-policy.txt}"
@@ -645,8 +644,6 @@ services:
       # the host OOM, dialled 10 -> 6 to lower website's memory peak — a real RSS
       # cut (unlike a mem_limit cap), minor throughput cost across 421 sites.
       WEBSITE_MAX_CONCURRENT_TASKS: "16"
-      WEBSITE_MAX_ACTIVE_DOMAINS: "8"
-      WEBSITE_MAX_REQUESTS_PER_DOMAIN: "2"
       # CPU hygiene (A#4): website crawls are multi-hour; idle longer between cycles.
       COLLECTOR_CYCLE_SLEEP_WEBSITE: "600"
       # Conn-budget hygiene (P2 review §5): default 10 -> 6. Kept above lowrisk/main
@@ -823,6 +820,7 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
       COLLECTOR_STARTUP_DELAY_SECONDS: "75"
+      COLLECTOR_VAULT_ROOT: /vault
       BLUESKY_PROBE_ENABLED: "${BLUESKY_PROBE_ENABLED:-1}"
       # Disabled until a controlled capability canary has a durable
       # cursor/reconnect/readback receipt; this alone never enables live mode.
@@ -837,10 +835,35 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
       COLLECTOR_STARTUP_DELAY_SECONDS: "90"
+      COLLECTOR_VAULT_ROOT: /vault
       PINTEREST_PROBE_ENABLED: "${PINTEREST_PROBE_ENABLED:-1}"
       PINTEREST_NATIVE_ENABLED: "${PINTEREST_NATIVE_ENABLED:-1}"
       NATIVE_PUBLIC_DISCOVERY_ENABLED: "${NATIVE_PUBLIC_DISCOVERY_ENABLED:-0}"
       PROFILE_ROUND_ROBIN_INTERVAL_SECONDS: "${PROFILE_ROUND_ROBIN_INTERVAL_SECONDS:-60}"
+
+  # Browser/extension capture stays primary. These isolated processes only
+  # claim their own exhausted fallback jobs and never drive browser login.
+  collector_facebook:
+    <<: *extractor-fallback
+    container_name: unifiedcollector_collector_facebook
+    command: python -m src.core.extractor_fallback --source facebook
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
+      COLLECTOR_VAULT_ROOT: /vault
+  collector_x:
+    <<: *extractor-fallback
+    container_name: unifiedcollector_collector_x
+    command: python -m src.core.extractor_fallback --source x
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
+      COLLECTOR_VAULT_ROOT: /vault
+  collector_threads:
+    <<: *extractor-fallback
+    container_name: unifiedcollector_collector_threads
+    command: python -m src.core.extractor_fallback --source threads
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
+      COLLECTOR_VAULT_ROOT: /vault
 
   collector_telegram:
     image: unifiedcollector-collector:latest
@@ -1012,6 +1035,7 @@ services:
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
       WHATSAPP_INVITE_ACCEPT_WID: ${WHATSAPP_INVITE_ACCEPT_WID:-}
+      WHATSAPP_SESSION_BRIDGES_JSON: '{"session_1":"http://wa-bridge-1:3001","session_2":"http://wa-bridge-session-2:3001"}'
       WHATSAPP_SPIDER_SESSIONS: "session_2"
       # Backfill ALL history, not just 90 days (user: "whatsapp backfill all").
       WHATSAPP_MAX_BACKFILL_AGE_DAYS: "36500"
@@ -1090,6 +1114,7 @@ services:
     volumes:
       - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}/media:/media"
       - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}:/vault"
+      - ../credentials:/app/credentials:ro
       - ../config/sources:/app/config/sources:ro
       - ../src:/app/src
     depends_on:
@@ -1572,6 +1597,10 @@ services:
       LOG_LEVEL: info
     ports:
       - "127.0.0.1:3012:3001"
+    networks:
+      default:
+        aliases:
+          - wa-bridge-session-2
     volumes:
       - ../sessions/whatsapp:/app/auth_info
       - ../src/bridges/whatsapp/build:/app/build
@@ -1631,6 +1660,14 @@ services:
 
 volumes:
   pgdata:
+    external: true
+    name: unifiedcollector_pgdata
   rabbitmq_data:
+    external: true
+    name: unifiedcollector_rabbitmq_data
   redis_data:
+    external: true
+    name: unifiedcollector_redis_data
   sessions_data:
+    external: true
+    name: unifiedcollector_sessions_data

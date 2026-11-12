@@ -9,6 +9,7 @@
 // messages backfill on first connect (the old bridge left it off -> 0/0 sync).
 
 import makeWASocket, { DisconnectReason, fetchLatestBaileysVersion, downloadMediaMessage } from '@whiskeysockets/baileys';
+import { takeMedia } from './media_cache';
 import { Boom } from '@hapi/boom';
 import pino from 'pino';
 import fs from 'fs';
@@ -22,6 +23,11 @@ import { bindStore, getMessage } from './store';
 import { producer } from './producer';
 import { registerMessagesHandler } from './event_handlers/messages';
 import { getHistoryProgress, getHistoryWatermarks, registerHistoryHandler } from './event_handlers/history';
+
+const MAX_MEDIA_HANDOFF_BYTES = Math.min(
+    100 * 1024 * 1024,
+    Math.max(1 * 1024 * 1024, Number(process.env.WHATSAPP_MEDIA_MAX_BYTES || 64 * 1024 * 1024) || 64 * 1024 * 1024),
+);
 import { registerContactsHandler } from './event_handlers/contacts';
 import { publishGroupSnapshot, publishGroupSnapshotForGroup, registerGroupsHandler } from './event_handlers/groups';
 import { probeNumber } from './device_intel';
@@ -256,6 +262,7 @@ function bridgeState() {
         whatsapp_ready: serviceHealthy,
         connected: serviceHealthy,
         registered: socketRegistered,
+        rabbitmq_deliverable: producer.isDeliverable(),
         qr_available: Boolean(latestQr),
         needs_scan: !serviceHealthy && !auth_state.has_registered_creds,
         last_qr_at: latestQrAt ? new Date(latestQrAt).toISOString() : null,
@@ -448,8 +455,8 @@ app.post('/fresh-qr', async (_req, res) => {
     }
 });
 
-// POST /media/decrypt — decrypt and stream WhatsApp media bytes back to caller.
-// Body: { messageId, mediaKey, directPath, mimetype? }
+// POST /media/decrypt — decrypt and stream bytes for one in-memory message.
+// Body: { messageId }; session-bound paths and media keys never leave this bridge.
 // Auth: HMAC-SHA256 of JSON body with BRIDGE_SECRET, passed as X-Signature header.
 app.use(express.json({ limit: '1mb' }));
 
@@ -607,37 +614,29 @@ app.post('/media/decrypt', async (req, res) => {
         });
         return;
     }
-    const { messageId, mediaKey, directPath, mimetype } = req.body;
-    if (!mediaKey || !directPath) {
-        res.status(400).json({ error: 'mediaKey and directPath required' });
+    const messageId = typeof req.body?.messageId === 'string' ? req.body.messageId : '';
+    if (!messageId) {
+        res.status(400).json({ error: 'messageId required' });
+        return;
+    }
+    const message = takeMedia(messageId);
+    if (!message) {
+        res.status(410).json({ error: 'media is no longer available in this paired bridge', code: 'media_unavailable', retryable: false });
         return;
     }
     try {
-        // Reconstruct a minimal WAMessage-like object that downloadMediaMessage accepts
-        const msgType = (mimetype || '').startsWith('image') ? 'imageMessage'
-                      : (mimetype || '').startsWith('video') ? 'videoMessage'
-                      : (mimetype || '').startsWith('audio') ? 'audioMessage'
-                      : (mimetype || '').startsWith('application') ? 'documentMessage'
-                      : 'imageMessage';
-        const fakeMsg = {
-            key: { id: messageId, remoteJid: 'status@broadcast' },
-            message: {
-                [msgType]: {
-                    mediaKey,
-                    directPath,
-                    mimetype: mimetype || 'application/octet-stream',
-                    url: `https://mmg.whatsapp.net${directPath}`,
-                }
-            }
-        };
         const buffer = await downloadMediaMessage(
-            fakeMsg as any,
+            message,
             'buffer',
             {},
             { logger, reuploadRequest: activeSock.updateMediaMessage }
         );
+        if (buffer.length > MAX_MEDIA_HANDOFF_BYTES) {
+            res.status(413).json({ error: 'media exceeds the bridge handoff limit', code: 'media_too_large', retryable: false });
+            return;
+        }
         res.status(200)
-           .set('Content-Type', mimetype || 'application/octet-stream')
+           .set('Content-Type', 'application/octet-stream')
            .send(buffer);
     } catch (err: any) {
         const classified = classifyMediaDecryptError(err);

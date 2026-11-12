@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>CDP tab selection — UnifiedCollector</title>
+<style>
+:root{--background:#101418;--surface:#171D23;--raised:#202830;--border:#36434F;--text:#E8EDF2;--muted:#A8B5C2;--accent:#67D4E8;--accent-soft:#182D34;font-family:"Segoe UI",system-ui,-apple-system,sans-serif;color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:var(--background);color:var(--text);font-size:17px;line-height:1.65}.page{width:min(1080px,calc(100% - 40px));margin:auto}.masthead{padding:24px 0;border-bottom:1px solid var(--border);font-size:14px;font-weight:650}.masthead:before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--accent);margin-right:10px}.intro,.section{padding:38px 0;border-bottom:1px solid var(--border)}h1,h2{line-height:1.15;letter-spacing:-.025em}h1{font-size:clamp(32px,5vw,50px);margin:14px 0}h2{font-size:27px;margin:0 0 12px}.eyebrow{font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);font-weight:600}.lead,.muted{color:var(--muted);max-width:790px}.panel{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:24px}.diagram-frame{overflow:auto;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:18px}.diagram-frame svg{display:block;min-width:820px;width:100%;height:auto}.caption{font-size:14px;color:var(--muted);margin:14px 0 0}.grid{display:grid;grid-template-columns:1fr 1fr;gap:22px}.card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:20px}.card h3{margin:0 0 8px;font-size:18px}.card p{margin:0;color:var(--muted)}.rule{border-left:2px solid var(--accent);padding-left:18px;margin:22px 0}.next{margin:0;padding-left:22px;color:var(--muted)}.next li{padding:5px 0}a{color:var(--accent)}svg text{font-family:"Segoe UI",system-ui,sans-serif}.node{fill:var(--raised);stroke:var(--border);stroke-width:1.5}.active{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.5}.wait{fill:none;stroke:var(--border);stroke-width:1.5;stroke-dasharray:6 5}.edge{fill:none;stroke:var(--muted);stroke-width:1.5}.accent-edge{fill:none;stroke:var(--accent);stroke-width:1.7}.title{fill:var(--text);font-size:17px;font-weight:600}.sub{fill:var(--muted);font-size:13px}.small{fill:var(--muted);font-size:12px}@media(max-width:700px){.grid{grid-template-columns:1fr}.intro,.section{padding:30px 0}.panel{padding:18px}}@media print{:root{--background:#fff;--surface:#fff;--raised:#f2f4f5;--border:#67727d;--text:#111820;--muted:#344350;--accent:#075a6b;--accent-soft:#e8f0f2}body{font-size:11pt}.page{width:100%}}
+</style>
+</head>
+<body>
+<div class="page">
+  <header class="masthead">UnifiedCollector · CDP scheduling</header>
+  <main>
+    <section class="intro">
+      <div class="eyebrow">Current behavior · 12 Nov 2026</div>
+      <h1>Degraded sources do not jump the line.</h1>
+      <p class="lead">Four selected sources hold four browser tabs and run independently. A degraded source is not promoted. However, if it is already selected, it keeps its tab until the control plane changes the selection.</p>
+    </section>
+
+    <section class="section" id="overview" aria-labelledby="overview-title">
+      <h2 id="overview-title">Visual overview</h2>
+      <div class="diagram-frame" tabindex="0" role="region" aria-label="CDP tab selection diagram; scroll horizontally on narrow screens">
+        <svg viewBox="0 0 1000 430" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+          <title id="title">How four CDP browser tabs are selected</title>
+          <desc id="desc">The control plane supplies five enabled sources. Priority order fills four resident browser tabs. The fifth waits. A degraded source does not move ahead, and a degraded source already selected still holds its slot.</desc>
+          <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" fill="#A8B5C2"/></marker><marker id="cyan-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" fill="#67D4E8"/></marker></defs>
+          <rect x="20" y="36" width="215" height="356" rx="10" class="node"/><text x="42" y="68" class="title">Control plane</text><text x="42" y="91" class="sub">Checks selection every 60 sec</text><text x="42" y="128" class="small">Enabled right now</text><text x="42" y="154" class="title">X · Instagram · Pinterest</text><text x="42" y="177" class="title">Snapchat · Airbnb</text><text x="42" y="220" class="small">Priority is fixed by configured order.</text><text x="42" y="241" class="small">It is not a fair round-robin queue.</text><text x="42" y="296" class="sub">Watchdog reconciles tabs</text><text x="42" y="317" class="sub">every 7 min + 15–120 sec jitter.</text>
+          <path d="M235 206 H320" class="edge" marker-end="url(#arrow)"/><text x="278" y="188" text-anchor="middle" class="small">pick first 4</text>
+          <rect x="342" y="36" width="390" height="356" rx="10" class="node"/><text x="365" y="68" class="title">Resident CDP tabs — capacity: 4</text><text x="365" y="91" class="sub">Each tab has its own paced loop. No front-of-queue fight.</text>
+          <rect x="370" y="119" width="155" height="76" rx="8" class="active"/><text x="447" y="151" text-anchor="middle" class="title">Slot 1 · X</text><text x="447" y="174" text-anchor="middle" class="sub">independent loop</text>
+          <rect x="548" y="119" width="155" height="76" rx="8" class="active"/><text x="625" y="151" text-anchor="middle" class="title">Slot 2 · Instagram</text><text x="625" y="174" text-anchor="middle" class="sub">independent loop</text>
+          <rect x="370" y="222" width="155" height="76" rx="8" class="active"/><text x="447" y="254" text-anchor="middle" class="title">Slot 3 · Pinterest</text><text x="447" y="277" text-anchor="middle" class="sub">independent loop</text>
+          <rect x="548" y="222" width="155" height="76" rx="8" class="active"/><text x="625" y="254" text-anchor="middle" class="title">Slot 4 · Snapchat</text><text x="625" y="277" text-anchor="middle" class="sub">independent loop</text>
+          <text x="536" y="342" text-anchor="middle" class="small">45-min refresh reloads these same tabs; it does not choose new ones.</text>
+          <path d="M732 206 H798" class="edge" marker-end="url(#arrow)"/>
+          <rect x="820" y="132" width="156" height="88" rx="8" class="wait"/><text x="898" y="164" text-anchor="middle" class="title">Airbnb waits</text><text x="898" y="187" text-anchor="middle" class="sub">5th enabled source</text><text x="898" y="207" text-anchor="middle" class="sub">no time slice</text>
+          <rect x="820" y="270" width="156" height="86" rx="8" class="node"/><text x="898" y="302" text-anchor="middle" class="title">If degraded</text><text x="898" y="325" text-anchor="middle" class="sub">not promoted</text><text x="898" y="345" text-anchor="middle" class="sub">not auto-evicted</text>
+          <path d="M703 260 C765 260 770 313 820 313" class="accent-edge" marker-end="url(#cyan-arrow)"/><text x="761" y="283" text-anchor="middle" class="small">health warning only</text>
+        </svg>
+      </div>
+      <p class="caption">The observed selection is based on the live scrape configuration: five sources are enabled, while the four-tab cap admits the first four in configured priority order.</p>
+    </section>
+
+    <section class="section" id="details" aria-labelledby="details-title">
+      <h2 id="details-title">What “degraded” changes</h2>
+      <div class="grid">
+        <article class="card"><h3>Degraded source that is waiting</h3><p>It stays waiting. It does not skip ahead of any selected source and does not consume a browser tab.</p></article>
+        <article class="card"><h3>Degraded source already in a tab</h3><p>It keeps that tab today. The current scheduler reports the warning but does not automatically replace the source with the next waiting one.</p></article>
+      </div>
+      <div class="rule"><strong>So: no surprise promotion, but also no automatic failover.</strong><br><span class="muted">If you want to avoid wasting a selected tab after a real degradation, that is a separate health-aware replacement policy—not the behavior currently deployed.</span></div>
+    </section>
+
+    <section class="section" id="next-steps" aria-labelledby="next-title">
+      <h2 id="next-title">Next step</h2>
+      <ol class="next"><li>Keep this policy if stable, predictable source selection is more important than automatically chasing temporary warnings.</li><li>Add health-aware replacement only if you want a degraded selected source to surrender its tab after a defined failure window.</li></ol>
+    </section>
+  </main>
+</div>
+</body>
+</html>

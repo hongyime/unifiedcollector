@@ -150,7 +150,7 @@ async def test_collect_demotes_timed_out_target(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_collect_skips_recent_timed_out_target(monkeypatch):
+async def test_collect_retries_previously_timed_out_target_without_backoff(monkeypatch):
     c = WebsiteCollector()
     c.pool = _make_pool()
     c.pool._conn.fetchrow.return_value = {
@@ -159,19 +159,19 @@ async def test_collect_skips_recent_timed_out_target(monkeypatch):
         "error_message": "target exceeded 45s wall-clock cap",
     }
     c.checkpoint.save_progress = AsyncMock()
-    spider = AsyncMock()
+    spider = AsyncMock(return_value={"pages": 1, "images": 0, "pdfs": 0, "docs": 0, "videos": 0, "errors": 0})
 
     monkeypatch.setattr(c, "spider_domain", spider)
     monkeypatch.setattr(c, "_promote_discovered_sg_domains", AsyncMock())
 
     await c.collect(["https://example.com"])
 
-    spider.assert_not_awaited()
+    spider.assert_awaited_once()
     c.checkpoint.save_progress.assert_awaited_once_with("https://example.com")
 
 
 @pytest.mark.asyncio
-async def test_collect_uses_exponential_backoff_for_repeated_timeouts(monkeypatch):
+async def test_collect_ignores_configured_timeout_backoff(monkeypatch):
     monkeypatch.setenv("WEBSITE_TARGET_RETRY_BACKOFF_SECONDS", "10")
     monkeypatch.setenv("WEBSITE_TARGET_RETRY_BACKOFF_MAX_SECONDS", "80")
     c = WebsiteCollector()
@@ -182,14 +182,14 @@ async def test_collect_uses_exponential_backoff_for_repeated_timeouts(monkeypatc
         "error_message": "target exceeded 45s wall-clock cap",
     }
     c.checkpoint.save_progress = AsyncMock()
-    spider = AsyncMock()
+    spider = AsyncMock(return_value={"pages": 1, "images": 0, "pdfs": 0, "docs": 0, "videos": 0, "errors": 0})
 
     monkeypatch.setattr(c, "spider_domain", spider)
     monkeypatch.setattr(c, "_promote_discovered_sg_domains", AsyncMock())
 
     await c.collect(["https://example.com"])
 
-    spider.assert_not_awaited()
+    spider.assert_awaited_once()
     c.checkpoint.save_progress.assert_awaited_once_with("https://example.com")
 
 
@@ -410,7 +410,7 @@ def test_constructor_defaults(monkeypatch):
     assert c._max_depth == 3
     assert c._max_pages == 500
     assert c._max_concurrent == 5
-    assert c._respect_robots is True
+    assert c._respect_robots is False
     assert c._follow_external is False
     assert c._download_images is True
     assert c._download_pdfs is True
@@ -434,13 +434,13 @@ def test_constructor_honours_env_overrides(monkeypatch):
     assert c._download_pdfs is False
 
 
-def test_robots_policy_allowlist_matches_suffix(monkeypatch):
+def test_robots_are_disabled_for_every_domain(monkeypatch):
     monkeypatch.setenv("WEBSITE_ROBOTS_POLICY", "allowlist_override")
     monkeypatch.setenv("WEBSITE_ROBOTS_OVERRIDE_DOMAINS", "example.com")
     c = WebsiteCollector()
 
     assert c._should_respect_robots("https://sub.example.com/private") is False
-    assert c._should_respect_robots("https://not-example.net/private") is True
+    assert c._should_respect_robots("https://not-example.net/private") is False
 
 
 # ── _extract_metadata / _extract_links / _extract_images ──────────────────
@@ -549,15 +549,17 @@ async def test_fetch_url_url_filter_blocks(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_fetch_url_robots_disallow_returns_none(monkeypatch):
+async def test_fetch_url_ignores_robots_disallow(monkeypatch):
     c = WebsiteCollector()
-    c._respect_robots = True
+    c._respect_robots = False
     # Bypass URL filter
     c._url_filter = MagicMock()
     c._url_filter.is_allowed = MagicMock(return_value=(True, ""))
 
     fake_client = MagicMock()
-    fake_client.get = AsyncMock()
+    response = MagicMock(status_code=200)
+    response.headers = {"content-type": "text/html"}
+    fake_client.get = AsyncMock(return_value=response)
     fake_client.aclose = AsyncMock()
     monkeypatch.setattr(c, "_build_client", lambda domain: fake_client)
 
@@ -569,9 +571,10 @@ async def test_fetch_url_robots_disallow_returns_none(monkeypatch):
     monkeypatch.setattr(c, "wait_rate_limit", AsyncMock())
 
     out = await c.fetch_url("https://example.com/blocked")
-    assert out is None
-    # We must not have issued the GET — robots blocked us first.
-    fake_client.get.assert_not_called()
+    assert out is response
+    fake_client.get.assert_awaited_once_with("https://example.com/blocked")
+    c._robots.load.assert_not_awaited()
+    c._robots.is_allowed.assert_not_called()
     fake_client.aclose.assert_awaited()
 
 
@@ -580,7 +583,7 @@ async def test_fetch_url_robots_allowlist_override_fetches(monkeypatch):
     monkeypatch.setenv("WEBSITE_ROBOTS_POLICY", "allowlist_override")
     monkeypatch.setenv("WEBSITE_ROBOTS_OVERRIDE_DOMAINS", "example.com")
     c = WebsiteCollector()
-    c._respect_robots = True
+    c._respect_robots = False
     c._url_filter = MagicMock()
     c._url_filter.is_allowed = MagicMock(return_value=(True, ""))
     c._record_domain_pacing_event = AsyncMock()
@@ -603,7 +606,7 @@ async def test_fetch_url_robots_allowlist_override_fetches(monkeypatch):
     c._robots.load.assert_not_awaited()
     c._robots.is_allowed.assert_not_called()
     fake_client.get.assert_awaited_once_with("https://example.com/blocked")
-    c._record_domain_pacing_event.assert_awaited()
+    c._record_domain_pacing_event.assert_not_awaited()
 
 
 @pytest.mark.asyncio

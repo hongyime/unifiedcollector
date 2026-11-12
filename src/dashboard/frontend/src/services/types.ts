@@ -325,7 +325,14 @@ export interface SourceCollectionMatrixRow {
   source_health_status?: string | null;
   source_health_error?: string | null;
   source_health_last_success_at?: string | null;
+  last_checked_at?: string | null;
+  last_content_at?: string | null;
+  freshness_state?: string | null;
+  source_health_blocker?: string | null;
+  source_check_age_seconds?: number | null;
+  source_content_age_seconds?: number | null;
   source_health_updated_at?: string | null;
+  operational_status?: string | null;
   bridge_status?: string | null;
   bridge_detail?: string | null;
   current_hour: SourceWindowCounts;

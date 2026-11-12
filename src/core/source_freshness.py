@@ -469,13 +469,19 @@ async def compute_liveness(conn) -> list[dict]:
     health: dict[str, dict] = {}
     try:
         for r in await conn.fetch(
-            "SELECT source, status, last_error, last_success_at, updated_at FROM source_health"
+            "SELECT source, status, last_error, last_success_at, last_checked_at, "
+            "last_content_at, freshness_state, blocker, updated_at FROM source_health"
         ):
             row = dict(r)
             health[row["source"]] = {
                 "status": row["status"],
                 "last_error": row["last_error"],
                 "last_success_at": row.get("last_success_at"),
+                "last_checked_at": row.get("last_checked_at") or row.get("last_success_at"),
+                "has_explicit_check": row.get("last_checked_at") is not None,
+                "last_content_at": row.get("last_content_at"),
+                "freshness_state": row.get("freshness_state"),
+                "blocker": row.get("blocker"),
                 "updated_at": row.get("updated_at"),
             }
     except Exception:
@@ -551,9 +557,21 @@ async def compute_liveness(conn) -> list[dict]:
         hs = h.get("status")
         h_error = h.get("last_error")
         health_age = _age_seconds(h.get("last_success_at"), now_utc)
+        check_age = _age_seconds(h.get("last_checked_at"), now_utc)
+        content_check_age = _age_seconds(h.get("last_content_at"), now_utc)
+        freshness_sla = _env_int("SOURCE_CHECK_FRESHNESS_SECONDS", 3600, min_value=60)
         if hs == "dead":
             status = "dead"
             detail = h_error or "source_health reports the source as dead"
+        elif hs == "auth_paused":
+            status = "degraded"
+            detail = h_error or "source_health reports auth_paused"
+        elif hs == "degraded" and not _watchdog_marker(h_error):
+            status = "degraded"
+            detail = h_error or "source_health reports degraded"
+        elif h.get("has_explicit_check") and check_age is not None and check_age > freshness_sla:
+            status = "degraded"
+            detail = h.get("blocker") or f"no eligible upstream check in {freshness_sla} seconds"
         elif age is None:
             if (
                 health_age is not None
@@ -567,15 +585,18 @@ async def compute_liveness(conn) -> list[dict]:
             else:
                 status = "unknown"
                 detail = "no freshness row could be read"
+        elif (
+            age > thresh
+            and health_age is not None
+            and health_age <= thresh
+            and hs in {"running", "idle"}
+            and not h_error
+        ):
+            status = "live"
+            detail = "source_health heartbeat is fresh after a clean no-work cycle; content age is reported separately"
         elif age > thresh:
             status = "stale"
             detail = f"newest row is older than {thresh} seconds"
-        elif hs == "auth_paused":
-            status = "degraded"
-            detail = h_error or "source_health reports auth_paused"
-        elif hs == "degraded" and not _watchdog_marker(h_error):
-            status = "degraded"
-            detail = h_error or "source_health reports degraded"
         else:
             status = "live"
             if hs == "degraded" and _watchdog_marker(h_error):
@@ -702,7 +723,20 @@ async def compute_liveness(conn) -> list[dict]:
             "source_health_status": hs,
             "source_health_error": h_error,
             "source_health_last_success_at": h.get("last_success_at"),
+            "last_checked_at": h.get("last_checked_at"),
+            "last_content_at": h.get("last_content_at"),
+            "freshness_state": h.get("freshness_state"),
+            "source_health_blocker": h.get("blocker"),
+            "source_check_age_seconds": check_age,
+            "source_content_age_seconds": content_check_age,
             "source_health_updated_at": h.get("updated_at"),
+            "operational_status": (
+                "idle"
+                if status == "live" and data_age is not None and data_age > thresh
+                and health_age is not None and health_age <= thresh
+                and hs in {"running", "idle"}
+                else ("running" if status == "live" else status)
+            ),
             "browser_heartbeat_at": browser_heartbeat.get("last_seen_at") if browser_heartbeat else None,
             "browser_heartbeat_age_seconds": browser_age,
             "browser_heartbeat_stale_after_seconds": (

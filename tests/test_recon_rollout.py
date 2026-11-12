@@ -179,7 +179,7 @@ def test_zero_useful_output_halts_instead_of_passing(tmp_path, monkeypatch):
     assert result["state"]["halt"] is True
 
 
-def test_zero_spend_rejection_halts_before_any_claim(tmp_path, monkeypatch):
+def test_zero_spend_rejection_blocks_before_any_claim(tmp_path, monkeypatch):
     _policy, state_path = _test_policy(tmp_path, monkeypatch)
     monkeypatch.setenv("SPIDERFOOT_MODULES", "sfp_shodan")
 
@@ -194,15 +194,15 @@ def test_zero_spend_rejection_halts_before_any_claim(tmp_path, monkeypatch):
     report = asyncio.run(recon_spiderfoot.run_spiderfoot_once(Conn()))
     state = json.loads(state_path.read_text(encoding="utf-8"))
 
-    assert report["status"] == "zero_spend_rejected"
-    assert state["halt"] is True
-    assert "zero_spend_violation" in state["halt_reason"]
+    assert report["status"] == "blocked"
+    assert state["halt"] is False
+    assert state["claims_used"] == 0
     with pytest.raises(AdmissionDenied):
         validate_zero_spend_modules(["serper"], policy=_policy)
 
 
-def test_admission_gate_caps_real_worker_on_oversized_backlog(tmp_path, monkeypatch):
-    policy, state_path = _test_policy(tmp_path, monkeypatch)
+def test_worker_processes_backlog_without_admission_cohort_cap(tmp_path, monkeypatch):
+    _policy, state_path = _test_policy(tmp_path, monkeypatch)
 
     class Tx:
         async def __aenter__(self):
@@ -232,16 +232,12 @@ def test_admission_gate_caps_real_worker_on_oversized_backlog(tmp_path, monkeypa
 
         async def fetchrow(self, sql, *args):
             if "FOR UPDATE SKIP LOCKED" in sql:
-                approved_sources = args[2]
-                allowed_types = args[1]
                 row = next((r for r in self.rows if r["status"] == "pending"
-                            and r["source"] in approved_sources
-                            and r["target_type"] in allowed_types), None)
+                            and r["target_type"] in args[0]), None)
                 return dict(row) if row else None
-            if "scope_json = scope_json || jsonb_build_object" in sql:
+            if "SET status = 'in_progress'" in sql:
                 row = next(r for r in self.rows if r["id"] == args[0] and r["status"] == "pending")
                 row["status"] = "in_progress"
-                row["scope_json"].update({"admission_policy_id": args[1], "admission_cohort_limit": args[2]})
                 return dict(row)
             raise AssertionError(f"unexpected fetchrow: {sql}")
 
@@ -264,13 +260,12 @@ def test_admission_gate_caps_real_worker_on_oversized_backlog(tmp_path, monkeypa
     reports = [asyncio.run(recon_spiderfoot.run_spiderfoot_once(conn)) for _ in range(6)]
     state = json.loads(state_path.read_text(encoding="utf-8"))
 
-    assert [report["status"] for report in reports[:5]] == ["completed"] * 5
-    assert reports[5]["status"] == "admission_halted"
-    assert sum(row["status"] == "completed" for row in conn.rows) == 5
-    assert sum(row["status"] == "pending" for row in conn.rows) == 295
-    assert len(conn.persisted) == 5
-    assert state["claims_used"] == 5
-    assert len(state["claims"]) == 5
+    assert [report["status"] for report in reports] == ["completed"] * 6
+    assert sum(row["status"] == "completed" for row in conn.rows) == 6
+    assert sum(row["status"] == "pending" for row in conn.rows) == 294
+    assert len(conn.persisted) == 6
+    assert state["claims_used"] == 0
+    assert state.get("claims", []) == []
 
 
 def test_admission_gate_counts_fp_refresh_sibling_allowance(tmp_path, monkeypatch):
@@ -287,52 +282,15 @@ def test_admission_gate_counts_fp_refresh_sibling_allowance(tmp_path, monkeypatc
     assert state["sibling_claims"]["maigret_fp_refresh"] == 2
 
 
-def test_admission_gate_refuses_unapproved_source_and_account_identities(tmp_path, monkeypatch):
-    _policy, state_path = _test_policy(tmp_path, monkeypatch)
-
-    class Tx:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_args):
-            return False
-
+def test_worker_claim_query_has_no_admission_source_or_account_filter():
     class Conn:
-        def __init__(self):
-            self.rows = [
-                {"id": "00000000-0000-0000-0000-000000000011", "target_type": "domain",
-                 "target_value": "manual.example.com", "source": "manual", "priority": 1,
-                 "scope_json": {}, "status": "pending"},
-                {"id": "00000000-0000-0000-0000-000000000012", "target_type": "domain",
-                 "target_value": "account.example.com", "source": "collector:website_targets", "priority": 1,
-                 "scope_json": {"account_id": "not-approved"}, "status": "pending"},
-            ]
+        async def fetchrow(self, sql, *_args):
+            assert "source = ANY" not in sql
+            assert "account_id" not in sql
+            return {"id": "id", "source": "manual", "scope_json": {}}
 
-        def transaction(self):
-            return Tx()
-
-        async def fetchrow(self, sql, *args):
-            if "FOR UPDATE SKIP LOCKED" in sql:
-                assert "source = ANY($3::text[])" in sql
-                assert "= ANY($4::text[])" in sql
-                for row in self.rows:
-                    if row["status"] != "pending" or row["source"] not in args[2]:
-                        continue
-                    account = row["scope_json"].get("account_id")
-                    if account and account not in args[3]:
-                        continue
-                    return dict(row)
-                return None
-            raise AssertionError(f"unexpected fetchrow query: {sql}")
-
-        async def execute(self, *_args):
-            return "UPDATE 1"
-
-    monkeypatch.setattr(recon_spiderfoot, "network_policy_installed", lambda: True)
-    report = asyncio.run(recon_spiderfoot.run_spiderfoot_once(Conn()))
-    state = json.loads(state_path.read_text(encoding="utf-8"))
-    assert report["status"] == "idle"
-    assert state["claims_used"] == 0
+    row = asyncio.run(recon_spiderfoot._claim_target(Conn()))
+    assert row["source"] == "manual"
 
 
 def test_admission_gate_serializes_concurrent_workers_at_cohort_limit(tmp_path, monkeypatch):

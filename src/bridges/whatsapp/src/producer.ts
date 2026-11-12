@@ -18,6 +18,10 @@ export class BrokerProducer {
     private connected = false;
     private reconnecting = false;
 
+    isDeliverable(): boolean {
+        return this.connected && Boolean(this.channel);
+    }
+
     constructor() {
         // Bridge reads WHATSAPP_RABBITMQ_URL first (matches the Python collector's
         // env), then falls back to RABBITMQ_URL.

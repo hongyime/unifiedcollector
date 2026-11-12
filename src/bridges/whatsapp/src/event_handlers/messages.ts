@@ -5,6 +5,7 @@
 import { WASocket } from '@whiskeysockets/baileys';
 import { producer } from '../producer';
 import { normalizeMessage } from '../utils/normalize';
+import { rememberMedia } from '../media_cache';
 import pino from 'pino';
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
@@ -88,6 +89,7 @@ export function registerMessagesHandler(sock: WASocket): void {
                 const norm = normalizeMessage(msg);
                 if (!norm) continue;
                 if (norm.message_type === 'unknown') continue;
+                if (norm.has_media) rememberMedia(msg);
                 await producer.publish(norm.routing_key, {
                     ...norm,
                     session_name: process.env.SESSION_NAME || 'default',

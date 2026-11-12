@@ -17,9 +17,9 @@ Each bridge publishes message events; this collector consumes them in two modes:
      `{bridge_url}/messages/recent?limit=N`. Auth via
      `Authorization: Bearer <WHATSAPP_MEDIA_BRIDGE_SECRET>`.
 
-Encrypted media is decrypted by the bridge's `/media/decrypt` endpoint
-(POST {messageId, mediaKey, directPath}). HMAC-SHA256 signed using
-`WHATSAPP_MEDIA_BRIDGE_SECRET` and timestamp header.
+Encrypted media is decrypted by the paired bridge's `/media/decrypt` endpoint
+using only the source-local message ID. Session-bound locators never leave the
+bridge process. HMAC-SHA256 uses `WHATSAPP_MEDIA_BRIDGE_SECRET` and a timestamp.
 
 Public entry points
 -------------------
@@ -75,6 +75,13 @@ from src.core.vault import (
 )
 
 logger = logging.getLogger(__name__)
+
+_PRIVATE_MEDIA_LOCATOR_KEYS = frozenset({"mediaKey", "directPath", "media_url", "url"})
+
+
+def _message_event_for_storage(event: dict) -> dict:
+    """Keep message data, never session-bound media locators or keys."""
+    return {key: value for key, value in event.items() if key not in _PRIVATE_MEDIA_LOCATOR_KEYS}
 
 def _is_whatsapp_profile_photo_url(url: str) -> bool:
     return approved_profile_image_url(url, ("whatsapp.net",))
@@ -1361,12 +1368,14 @@ class WhatsappCollector(BaseCollector):
         if not msg_id or not chat_jid:
             return
 
+        stored_event = _message_event_for_storage(event)
+
         if targets and "*" not in targets and "all" not in targets and not any(t.lower() in chat_jid.lower() for t in targets):
             return
 
         await self._archive_raw_event(
             artifact_id=f"messages/{chat_jid}/{msg_id}",
-            payload=event,
+            payload=stored_event,
             target_tables=["whatsapp_messages"],
             metadata={
                 "platform_message_id": msg_id,
@@ -1393,7 +1402,7 @@ class WhatsappCollector(BaseCollector):
         has_media = media_type in ("imageMessage", "videoMessage", "audioMessage", "documentMessage", "stickerMessage")
         classified = (
             self._classify_bridge_media(media_type, event)
-            if (has_media or event.get("media_url") or event.get("directPath"))
+            if has_media
             else None
         )
         media_required = classified is not None
@@ -1409,7 +1418,7 @@ class WhatsappCollector(BaseCollector):
         # media work item, and the broker delivery stays unacked.
         async with self.pool.acquire() as conn:
             async with conn.transaction():
-                await self._upsert_message(event, chat_jid, sender_uuid, conn=conn)
+                await self._upsert_message(stored_event, chat_jid, sender_uuid, conn=conn)
                 account_wid = event.get("account_wid")
                 if account_wid:
                     from src.core.backfill_lanes import mirror_backfill_lane
@@ -1451,35 +1460,10 @@ class WhatsappCollector(BaseCollector):
         # non-terminal outcome leaves the pending work item in place and
         # raises so the consumer nacks/requeues the delivery.
         ext, content_type = classified
-        media_key = event.get("mediaKey")
-        direct_path = event.get("directPath")
-        media_url = event.get("media_url", "")
-
-        # History events without a bridge locator or direct URL cannot ever
-        # yield media; retain the message and record the terminal gap.
-        if not media_url and not (media_key and direct_path):
-            await self._mark_media_unavailable(
-                msg_id=msg_id, session=session, status_code=0,
-                code="missing_media_locator",
-                reason="WhatsApp event has no media locator for archival",
-            )
-            await self._fail_media_work_item(msg_id, "media locator unavailable")
-            await self._mark_dedupe_complete(msg_id, chat_jid)
-            return
-
         try:
-            if media_key and direct_path and session:
-                data = await self._download_via_bridge(
-                    session,
-                    msg_id,
-                    media_key,
-                    direct_path,
-                    mimetype=event.get("mimetype") or event.get("mime_type"),
-                )
-            else:
-                data = await self._download_direct(
-                    media_url, msg_id=msg_id, session=session,
-                ) if media_url else None
+            data = await self._download_via_bridge(
+                session, msg_id, mimetype=event.get("mimetype") or event.get("mime_type"),
+            ) if session else None
         except _MediaUnavailable:
             # The unavailability is durably recorded on the message row;
             # close the work item and treat the message as complete.
@@ -1489,7 +1473,7 @@ class WhatsappCollector(BaseCollector):
 
         if data:
             saved = await self._save_media(
-                data, cid, chat_jid, chat_name, content_type, ext, event,
+                data, cid, chat_jid, chat_name, content_type, ext, stored_event,
                 dlq_on_error=False,
             )
             if saved:
@@ -1673,6 +1657,7 @@ class WhatsappCollector(BaseCollector):
 
     async def _upsert_message(self, event: dict, chat_jid: str, sender_uuid: str | None,
                               conn=None):
+        event = _message_event_for_storage(event)
         msg_id = event.get("message_id") or event.get("key", {}).get("id", "")
         text = event.get("body") or event.get("text") or event.get("caption") or event.get("question")
         timestamp = event.get("timestamp")
@@ -2139,7 +2124,10 @@ class WhatsappCollector(BaseCollector):
                         # NOT {"status":"connected"}. Accept either the ready flag or
                         # a connected/ok status so the HTTP-poll fallback isn't skipped
                         # forever on a correctly-running bridge.
-                        if not health.get("whatsapp_ready") and health.get("status") not in ("connected", "ok"):
+                        if (
+                            not health.get("whatsapp_ready")
+                            and health.get("status") not in ("connected", "ok")
+                        ) or health.get("rabbitmq_deliverable") is False:
                             status = str(health.get("status") or "not_ready").lower()
                             if status in {"awaiting_scan", "refreshing_qr", "requesting_fresh_qr", "waiting_for_fresh_qr"} or health.get("qr_available"):
                                 waiting_sessions.append(session_name)
@@ -2167,6 +2155,9 @@ class WhatsappCollector(BaseCollector):
                             continue
 
                         messages = resp.json()
+                        # A paired, broker-deliverable bridge plus an authenticated
+                        # recent-message response is an eligible quiet-source check.
+                        self.record_upstream_check()
                         for msg in messages:
                             if self._stop.is_set():
                                 break
@@ -2584,44 +2575,8 @@ class WhatsappCollector(BaseCollector):
             logger.debug("discover_links db failure: %s", e)
 
     async def _media_archival_loop(self):
-        """Periodic re-download for messages where media archival has not yet
-        completed. Mirrors media_archival/worker semantics: pull pending items,
-        decrypt via bridge, persist."""
+        """Keep the legacy task idle: private locators are never retried from DB."""
         while not self._stop.is_set():
-            try:
-                if self._session_bridges and not await self._any_media_bridge_ready():
-                    logger.debug("WhatsApp media archival deferred; no paired bridge is ready")
-                    await asyncio.sleep(max(self._media_poll, self._bridge_ready_ttl))
-                    continue
-                if self.pool:
-                    async with self.pool.acquire() as conn:
-                        rows = await conn.fetch(
-                            """
-                            SELECT platform_message_id, metadata
-                            FROM whatsapp_messages
-                            WHERE media_url IS NULL
-                              AND metadata ? 'mediaKey'
-                              AND metadata ? 'directPath'
-                              AND NULLIF(metadata->>'mediaKey', '') IS NOT NULL
-                              AND NULLIF(metadata->>'directPath', '') IS NOT NULL
-                              AND COALESCE(metadata->>'media_archival_status', '') NOT IN ('unavailable', 'unsupported')
-                            ORDER BY collected_at DESC
-                            LIMIT $1
-                            """,
-                            self._media_batch,
-                        )
-                    for row in rows or []:
-                        if self._stop.is_set():
-                            break
-                        meta = row["metadata"]
-                        if isinstance(meta, str):
-                            try:
-                                meta = json.loads(meta)
-                            except Exception:
-                                continue
-                        await self._handle_message_event(meta, [])
-            except Exception as e:
-                logger.debug("media archival loop iteration failed: %s", e)
             await asyncio.sleep(self._media_poll)
 
     async def _any_media_bridge_ready(self) -> bool:
@@ -2666,11 +2621,15 @@ class WhatsappCollector(BaseCollector):
             async with self.pool.acquire() as conn:
                 await conn.execute(
                     """
-                    INSERT INTO source_health (source, status, last_success_at, last_error, updated_at)
-                    VALUES ($1, 'running', NOW(), NULL, NOW())
+                    INSERT INTO source_health (source, status, last_success_at, last_checked_at,
+                                               freshness_state, blocker, last_error, updated_at)
+                    VALUES ($1, 'running', NOW(), NOW(), 'checked', NULL, NULL, NOW())
                     ON CONFLICT (source) DO UPDATE SET
                       status='running',
                       last_success_at=NOW(),
+                      last_checked_at=NOW(),
+                      freshness_state='checked',
+                      blocker=NULL,
                       last_error=NULL,
                       updated_at=NOW()
                     """,
@@ -2704,7 +2663,6 @@ class WhatsappCollector(BaseCollector):
         return ready
 
     async def _download_via_bridge(self, session: str, msg_id: str,
-                                    media_key: str, direct_path: str,
                                     mimetype: str | None = None) -> bytes | None:
         bridge_url = self._session_bridges.get(session)
         if not bridge_url:
@@ -2726,12 +2684,7 @@ class WhatsappCollector(BaseCollector):
                 async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
                     resp = await client.post(
                         f"{bridge_url}/media/decrypt",
-                        json={
-                            "messageId": msg_id,
-                            "mediaKey": media_key,
-                            "directPath": direct_path,
-                            "mimetype": mimetype,
-                        },
+                        json={"messageId": msg_id, "mimetype": mimetype},
                         headers={
                             **self._bridge_headers(),
                             "X-Timestamp": timestamp,
@@ -2747,7 +2700,7 @@ class WhatsappCollector(BaseCollector):
                     if (
                         retryable is False
                         or resp.status_code in {410, 422}
-                        or error_code in {"media_unavailable", "media_decrypt_failed", "bridge_unpaired"}
+                        or error_code in {"media_unavailable", "media_decrypt_failed", "bridge_unpaired", "media_too_large"}
                     ):
                         await self._mark_media_unavailable(
                             msg_id=msg_id,
@@ -2844,33 +2797,6 @@ class WhatsappCollector(BaseCollector):
                 )
         except Exception:
             logger.debug("wa media-unavailable marker failed for %s", msg_id, exc_info=True)
-
-    async def _download_direct(
-        self, url: str, *, msg_id: str | None = None, session: str | None = None,
-    ) -> bytes | None:
-        try:
-            async with self._sem:
-                async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
-                    resp = await client.get(url)
-                    if resp.status_code in {404, 410} and msg_id:
-                        await self._mark_media_unavailable(
-                            msg_id=msg_id, session=session, status_code=resp.status_code,
-                            code=f"http_{resp.status_code}",
-                            reason=f"WhatsApp direct media HTTP {resp.status_code}",
-                        )
-                        raise _MediaUnavailable(f"WhatsApp media unavailable {msg_id}: HTTP {resp.status_code}")
-                    resp.raise_for_status()
-                    return resp.content
-        except Exception as e:
-            logger.error("Direct download failed: %s", e)
-            await self._record_http_exception(
-                e,
-                session_name="direct",
-                scope="direct_media",
-                reason_prefix="WhatsApp direct media download failed",
-                metadata={"url": url},
-            )
-        return None
 
     def _bridge_headers(self) -> dict[str, str]:
         return {

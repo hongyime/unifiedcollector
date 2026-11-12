@@ -2190,7 +2190,7 @@ def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: 
     browser_health_status = str(source_row.get("browser_health_status") or "")
     browser_health_reason = str(source_row.get("browser_health_reason") or "")
     fresh_browser_content = (_p("_source_matrix_has_fresh_browser_content") or _source_matrix_has_fresh_browser_content)(source_row)
-    if source == "x" and (_p("_source_matrix_is_x_session_shell") or _source_matrix_is_x_session_shell)(
+    if source == "x" and not fresh_browser_content and (_p("_source_matrix_is_x_session_shell") or _source_matrix_is_x_session_shell)(
         browser_url,
         browser_health_status,
         browser_health_reason,
@@ -2838,7 +2838,14 @@ def _source_matrix_row(source_row: dict, current_content: dict | None, current_r
         "source_health_status": source_row.get("source_health_status"),
         "source_health_error": source_row.get("source_health_error"),
         "source_health_last_success_at": source_row.get("source_health_last_success_at"),
+        "last_checked_at": source_row.get("last_checked_at"),
+        "last_content_at": source_row.get("last_content_at"),
+        "freshness_state": source_row.get("freshness_state"),
+        "source_health_blocker": source_row.get("source_health_blocker"),
+        "source_check_age_seconds": source_row.get("source_check_age_seconds"),
+        "source_content_age_seconds": source_row.get("source_content_age_seconds"),
         "source_health_updated_at": source_row.get("source_health_updated_at"),
+        "operational_status": source_row.get("operational_status"),
         "browser_url": source_row.get("browser_url"),
         "bridge_status": source_row.get("bridge_status"),
         "bridge_detail": source_row.get("bridge_detail"),

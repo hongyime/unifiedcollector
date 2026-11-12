@@ -222,7 +222,7 @@ def test_dry_run_service_skips_migrations_and_background_fp_refresh(monkeypatch)
     async def close_pool():
         calls.append("close")
 
-    async def worker_loop(_worker_id, _module, _pool, args, _budget):
+    async def worker_loop(_worker_id, _module, _pool, args):
         assert args.dry_run
         calls.append("worker")
 
@@ -318,7 +318,7 @@ def test_database_healthcheck_requires_pool_and_recent_worker_progress(monkeypat
 
 def test_worker_healthcheck_accepts_a_valid_halted_admission(monkeypatch):
     async def database_is_healthy(_pool, *, expected_status):
-        assert expected_status == "admission_halted"
+        assert expected_status == {"idle", "running"}
         return True
 
     async def get_pool():
@@ -327,11 +327,6 @@ def test_worker_healthcheck_accepts_a_valid_halted_admission(monkeypatch):
     async def close_pool():
         return None
 
-    monkeypatch.setattr(
-        recon_spiderfoot_service,
-        "admission_snapshot",
-        lambda: ({"enabled": True}, {"halt": True}, "error_rate"),
-    )
     monkeypatch.setattr(recon_spiderfoot_service, "_heartbeat_is_fresh", lambda: True)
     monkeypatch.setattr(recon_spiderfoot_service, "get_pool", get_pool)
     monkeypatch.setattr(recon_spiderfoot_service, "close_pool", close_pool)

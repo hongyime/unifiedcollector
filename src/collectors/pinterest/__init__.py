@@ -479,6 +479,72 @@ class PinterestCollector(ProfileOnlyCollector):
     SOURCE_NAME = "pinterest"
     PROFILE_TABLE = "pinterest_profiles"
 
+    async def _collect_authenticated_feed(self, surface: str, url: str) -> int:
+        """Capture the signed-in Following or For You card set once per cycle."""
+        storage_state = _load_pinterest_storage_state()
+        if not storage_state or self.pool is None:
+            return 0
+        from playwright.async_api import async_playwright
+
+        playwright = await async_playwright().start()
+        browser = context = None
+        try:
+            browser = await playwright.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+            context = await browser.new_context(locale="en-US", storage_state=storage_state, service_workers="block")
+            page = await context.new_page()
+            response = await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+            if response is None or response.status >= 400 or "/login" in page.url.lower():
+                raise RuntimeError("feed_auth_required")
+            self.record_upstream_check()
+            cards = await page.eval_on_selector_all(
+                '[data-test-id="pin"], [data-test-id*="pinWrapper" i], [data-pin-id], [data-pinid]',
+                """nodes => nodes.slice(0, 200).map(node => {
+                    const card = node.closest('[data-test-id="pin"], [data-test-id*="pinWrapper" i]') || node;
+                    const pin = card.matches('[data-pin-id], [data-pinid]') ? card : card.querySelector('[data-pin-id], [data-pinid]');
+                    const id = pin?.getAttribute('data-pin-id') || pin?.getAttribute('data-pinid');
+                    const links = Array.from(card.querySelectorAll('a[href]')).map(a => a.href);
+                    const href = links.find(h => {
+                      const parts = new URL(h).pathname.split('/').filter(Boolean);
+                      return parts[0] === 'pin' && /^[0-9]+$/.test(parts[1] || '');
+                    });
+                    const image = card.querySelector('img');
+                    return {id, href, title: image?.alt || card.innerText || null, image_url: image?.currentSrc || image?.src || null};
+                }).filter(card => card.id && /^\\d+$/.test(card.id))""",
+            )
+            async with self.pool.acquire() as conn:
+                inserted = 0
+                async with conn.transaction():
+                    for card in cards:
+                        status = await conn.execute(
+                            """INSERT INTO pinterest_pins
+                                  (pin_id,title,image_url,pin_url,collected_at,metadata)
+                               VALUES ($1,$2,$3,$4,NOW(),$5::jsonb)
+                               ON CONFLICT (pin_id) DO UPDATE SET
+                                  title=COALESCE(EXCLUDED.title,pinterest_pins.title),
+                                  image_url=COALESCE(EXCLUDED.image_url,pinterest_pins.image_url),
+                                  pin_url=EXCLUDED.pin_url,collected_at=NOW(),
+                                  metadata=COALESCE(pinterest_pins.metadata,'{}'::jsonb)||EXCLUDED.metadata""",
+                            str(card["id"]), str(card.get("title") or "")[:500] or None,
+                            str(card.get("image_url") or "")[:2000] or None,
+                            str(card.get("href") or f"https://www.pinterest.com/pin/{card['id']}/")[:2000],
+                            json.dumps({"collector": "authenticated_feed", "surface": surface}),
+                        )
+                        inserted += int(status.endswith(" 1"))
+                    await conn.execute(
+                        """INSERT INTO collector_feed_cursors (source,surface,cursor,checked_at)
+                           VALUES ('pinterest',$1,$2,NOW())
+                           ON CONFLICT (source,surface) DO UPDATE SET cursor=EXCLUDED.cursor,checked_at=NOW()""",
+                        surface, str(cards[-1]["id"]) if cards else None,
+                    )
+            self._progress_count += inserted
+            return inserted
+        finally:
+            if context is not None:
+                await context.close()
+            if browser is not None:
+                await browser.close()
+            await playwright.stop()
+
     async def _read_own_following_roster(
         self,
         storage_state: dict[str, Any],
@@ -1488,6 +1554,15 @@ class PinterestCollector(ProfileOnlyCollector):
             return summary
 
         summary["followed_handles"] = await self._refresh_own_following_edges()
+        for surface, url in (
+            ("following", "https://www.pinterest.com/_following/"),
+            ("for_you", "https://www.pinterest.com/"),
+        ):
+            try:
+                summary[f"{surface}_feed"] = await self._collect_authenticated_feed(surface, url)
+            except Exception as exc:
+                summary[f"{surface}_feed_error"] = _pinterest_native_error_code(exc)
+                logger.warning("Pinterest %s feed deferred: %s", surface, summary[f"{surface}_feed_error"])
         await seed_native_targets(self.pool, self.SOURCE_NAME)
         target = await claim_native_target(self.pool, self.SOURCE_NAME)
         if target is None:

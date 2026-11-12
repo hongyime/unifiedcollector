@@ -1213,10 +1213,10 @@ def write_atomic_artifact_from_path(
                 try:
                     src.replace(blob_path)
                 except OSError:
-                    shutil.copy2(src, blob_path)
+                    shutil.copyfile(src, blob_path)
                     src.unlink(missing_ok=True)
             else:
-                shutil.copy2(src, blob_path)
+                shutil.copyfile(src, blob_path)
             blob_written = True
 
         if blob_path.stat().st_size != size or _sha256_path(blob_path) != digest:

@@ -1223,7 +1223,7 @@ async def test_backfill_chat_falls_back_to_first_bridge(
     assert out is not None
 
 
-# ── _download_via_bridge / _download_direct ───────────────────────────────
+# ── _download_via_bridge ──────────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
@@ -1231,7 +1231,7 @@ async def test_download_via_bridge_returns_none_for_unknown_session(
     configured_collector,
 ):
     out = await configured_collector._download_via_bridge(
-        "no-such-session", "m1", "key", "/path",
+        "no-such-session", "m1",
     )
     assert out is None
 
@@ -1246,12 +1246,12 @@ async def test_download_via_bridge_signs_request_and_returns_bytes(
         monkeypatch, post_response=resp, response=resp,
     )
     out = await configured_collector._download_via_bridge(
-        "sess1", "m1", "media-key", "/v/t/abc", mimetype="application/pdf",
+        "sess1", "m1", mimetype="application/pdf",
     )
     assert out == b"binary-blob"
     client.post.assert_awaited_once()
     body = client.post.await_args.kwargs["json"]
-    assert body["mimetype"] == "application/pdf"
+    assert body == {"messageId": "m1", "mimetype": "application/pdf"}
     headers = client.post.await_args.kwargs["headers"]
     assert "X-Timestamp" in headers
     assert "X-Signature" in headers
@@ -1267,7 +1267,7 @@ async def test_download_via_bridge_returns_none_on_non_200(
     _patch_async_client(monkeypatch, post_response=resp, response=resp)
     with caplog.at_level("WARNING", logger="src.collectors.whatsapp"):
         out = await configured_collector._download_via_bridge(
-            "sess1", "m1", "key", "/path",
+            "sess1", "m1",
         )
     assert out is None
     assert any("Bridge decrypt failed m1: 403" in r.getMessage() for r in caplog.records)
@@ -1299,7 +1299,7 @@ async def test_download_via_bridge_logs_retryable_503_at_info(
 
     with caplog.at_level("INFO", logger="src.collectors.whatsapp"):
         out = await configured_collector._download_via_bridge(
-            "sess1", "m-transient", "key", "/path",
+            "sess1", "m-transient",
         )
 
     assert out is None
@@ -1325,7 +1325,7 @@ async def test_download_via_bridge_marks_non_retryable_media_unavailable(
 
     with pytest.raises(wa_mod._MediaUnavailable):
         await configured_collector._download_via_bridge(
-            "sess1", "m-expired", "key", "/path",
+            "sess1", "m-expired",
         )
 
     calls = _rate_limit_calls(configured_collector._test_conn)
@@ -1358,40 +1358,7 @@ async def test_download_via_bridge_marks_unpaired_session_media_unavailable(
     _patch_async_client(monkeypatch, response=health, post_response=resp)
 
     with pytest.raises(wa_mod._MediaUnavailable):
-        await configured_collector._download_via_bridge("sess1", "m-unpaired", "key", "/path")
-
-
-@pytest.mark.asyncio
-async def test_download_direct_returns_bytes(collector, monkeypatch):
-    resp = MagicMock(status_code=200, content=b"hello",
-                       raise_for_status=MagicMock())
-    _patch_async_client(monkeypatch, response=resp)
-    out = await collector._download_direct("https://cdn/x.jpg")
-    assert out == b"hello"
-
-
-@pytest.mark.asyncio
-async def test_download_direct_returns_none_on_error(collector, monkeypatch):
-    _patch_async_client(monkeypatch, raises=RuntimeError("dns fail"))
-    out = await collector._download_direct("https://cdn/x.jpg")
-    assert out is None
-
-
-@pytest.mark.asyncio
-async def test_download_direct_records_http_status_error(collector, monkeypatch):
-    _patch_async_client(monkeypatch, raises=_http_error(429, "too many"))
-    out = await collector._download_direct("https://cdn/x.jpg")
-    assert out is None
-    calls = _rate_limit_calls(collector._test_conn)
-    assert len(calls) == 1
-    assert calls[0][1:7] == (
-        "whatsapp",
-        "direct",
-        "direct_media",
-        429,
-        collector._session_cooldown,
-        "WhatsApp direct media download failed: HTTP 429",
-    )
+        await configured_collector._download_via_bridge("sess1", "m-unpaired")
 
 
 # ── dedupe-after-persistence / nack-on-failure (GAP-4) ────────────────────
@@ -1507,26 +1474,10 @@ async def test_media_download_none_raises_pending_and_keeps_work_item(collector)
 
 
 @pytest.mark.asyncio
-async def test_media_without_retrievable_locator_terminalizes(collector):
+async def test_media_event_storage_redacts_private_locator_fields(collector):
     event = _media_event("m-no-locator")
-    event.pop("mediaKey")
-    event.pop("directPath")
-    redis_mock = _redis_mock()
-    _mock_pipeline(collector, redis_mock)
-    collector._mark_media_unavailable = AsyncMock()
-    collector._fail_media_work_item = AsyncMock()
-
-    await collector._handle_message_event(event, [])
-
-    collector._mark_media_unavailable.assert_awaited_once_with(
-        msg_id="m-no-locator", session="sess1", status_code=0,
-        code="missing_media_locator",
-        reason="WhatsApp event has no media locator for archival",
-    )
-    collector._fail_media_work_item.assert_awaited_once_with(
-        "m-no-locator", "media locator unavailable",
-    )
-    redis_mock.set.assert_awaited_once()
+    assert "mediaKey" not in wa_mod._message_event_for_storage(event)
+    assert "directPath" not in wa_mod._message_event_for_storage(event)
 
 
 @pytest.mark.asyncio

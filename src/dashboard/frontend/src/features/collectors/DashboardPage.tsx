@@ -168,12 +168,14 @@ const sourceMatrixColumns: ColumnDef<SourceCollectionMatrixRow, unknown>[] = [
           </div>
           {row.source_health_status && (
             <div className="text-[10px] uppercase tracking-wide text-text-muted truncate max-w-[260px]">
-              worker {row.source_health_status}
+              worker {row.operational_status ?? row.source_health_status}
               {row.source_health_last_success_at
                 ? ` · progress ${relativeTime(row.source_health_last_success_at)}`
                 : row.source_health_updated_at
                   ? ` · updated ${relativeTime(row.source_health_updated_at)}`
                   : ""}
+              {row.last_checked_at ? ` · checked ${relativeTime(row.last_checked_at)}` : ""}
+              {row.last_content_at ? ` · content ${relativeTime(row.last_content_at)}` : ""}
             </div>
           )}
           {row.history_throughput && (

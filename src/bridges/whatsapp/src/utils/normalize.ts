@@ -5,7 +5,7 @@
 //   message_id, chat_jid, chat_name, pushName, session_name
 //   messageType  -> RAW baileys type (e.g. 'imageMessage') used for has_media check
 //   media_type   -> alias of messageType (consumer reads either)
-//   body/text/caption, mediaKey (base64), directPath, media_url, mimetype
+//   body/text/caption, mimetype
 //   timestamp, sender_jid, chat_type, fromMe/from_me, is_forwarded, quote/forward hints
 //
 // routing_key uses the 'messages.*' namespace so it matches the consumer's
@@ -34,9 +34,6 @@ export interface NormalizedMessage {
     text: string;
     caption: string;
     has_media: boolean;
-    mediaKey: string | null;
-    directPath: string | null;
-    media_url: string | null;
     mimetype: string | null;
     file_length: number | null;
     is_forwarded: boolean;
@@ -220,9 +217,6 @@ export function normalizeMessage(msg: WAMessage): NormalizedMessage | null {
         text: body,
         caption: content?.caption || '',
         has_media: hasMedia,
-        mediaKey: content?.mediaKey ? Buffer.from(content.mediaKey).toString('base64') : null,
-        directPath: content?.directPath || null,
-        media_url: content?.url || null,
         mimetype: content?.mimetype || null,
         file_length: content?.fileLength ? Number(content.fileLength) : null,
         is_forwarded: contextInfo?.isForwarded || false,

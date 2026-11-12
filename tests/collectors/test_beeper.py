@@ -594,6 +594,45 @@ async def test_collector_full_cycle_smoke(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_collect_readiness_timeout_degrades_without_crashing(monkeypatch, tmp_path):
+    monkeypatch.setenv("BEEPER_DESKTOP_API_TOKEN", "x")
+    monkeypatch.setenv("COLLECTOR_DRIVE_PATH", str(tmp_path))
+
+    pool, conn = _mock_pool()
+    client = MagicMock(spec=BeeperClient)
+    client.readiness_probe = AsyncMock(side_effect=TimeoutError())
+    coll = BeeperCollector(client=client)
+    coll.set_pool(pool)
+
+    stats = await coll.collect([])
+
+    assert stats["transient"] == 1
+    assert coll.intentional_idle_reason is None
+    assert any("source_health" in call.args[0] for call in conn.execute.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_post_readiness_transient_does_not_mark_desktop_api_unavailable(monkeypatch, tmp_path):
+    monkeypatch.setenv("BEEPER_DESKTOP_API_TOKEN", "x")
+    monkeypatch.setenv("COLLECTOR_DRIVE_PATH", str(tmp_path))
+    monkeypatch.setenv("BEEPER_MESSAGES_FIRST", "1")
+
+    client = MagicMock(spec=BeeperClient)
+    client.readiness_probe = AsyncMock(return_value={})
+    pool, conn = _mock_pool()
+    coll = BeeperCollector(client=client)
+    coll.set_pool(pool)
+    coll._sync_messages = AsyncMock(side_effect=BeeperTransientError("temporary network failure"))
+    coll._sync_accounts = AsyncMock(return_value=0)
+    coll._sync_chats = AsyncMock(return_value=0)
+
+    stats = await coll.collect([])
+
+    assert stats["transient"] == 1
+    assert not any("source_health" in call.args[0] for call in conn.execute.await_args_list)
+
+
+@pytest.mark.asyncio
 async def test_collect_marks_reachable_zero_message_cycle_as_intentional_idle(monkeypatch, tmp_path):
     monkeypatch.setenv("BEEPER_DESKTOP_API_TOKEN", "x")
     monkeypatch.setenv("COLLECTOR_DRIVE_PATH", str(tmp_path))

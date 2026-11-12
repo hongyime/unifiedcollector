@@ -20,7 +20,8 @@ _ELIGIBLE = (
     "unifiedcollector_collector_github", "unifiedcollector_collector_lemon8",
     "unifiedcollector_collector_instagram", "unifiedcollector_collector_tiktok",
     "unifiedcollector_collector_youtube", "unifiedcollector_collector_bluesky",
-    "unifiedcollector_collector_strava",
+    "unifiedcollector_collector_strava", "unifiedcollector_collector_facebook",
+    "unifiedcollector_collector_x", "unifiedcollector_collector_threads",
 )
 
 

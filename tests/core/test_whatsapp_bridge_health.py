@@ -122,3 +122,13 @@ def test_whatsapp_bridge_summary_does_not_call_livez_fallback_unreachable():
 
     assert summary["status"] == "degraded"
     assert summary["reachable_count"] == 1
+
+
+def test_whatsapp_bridge_requires_broker_deliverability_when_reported():
+    summary = summarize_whatsapp_bridge_health([
+        {"bridge": "1", "ok": True, "status": "ready", "whatsapp_ready": True, "rabbitmq_deliverable": False},
+        {"bridge": "2", "ok": True, "status": "ready", "whatsapp_ready": True, "rabbitmq_deliverable": False},
+    ])
+
+    assert summary["status"] == "degraded"
+    assert summary["ready_count"] == 0

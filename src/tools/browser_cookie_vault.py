@@ -142,14 +142,21 @@ SOCIAL_COOKIE_DOMAINS: tuple[str, ...] = (
     "fbcdn.net",
     "tiktokcdn.com",
     "ttwstatic.com",
+    "bsky.app",
+    "youtube.com",
 )
 
 # Auth markers are deliberately names only. Values are never logged or exposed.
 AUTH_COOKIE_MARKERS: dict[str, tuple[str, ...]] = {
     "instagram": ("sessionid",),
+    "threads": ("sessionid",),
     "facebook": ("c_user", "xs"),
     "x": ("auth_token", "ct0"),
     "strava": ("_strava4_session",),
+    "pinterest": ("_pinterest_sess",),
+    "snapchat": ("__Host-sc-a-auth-session",),
+    "airbnb": ("_aat",),
+    "youtube": ("SID",),
     # `ttwid` is useful device state but can exist on logged-out/challenge pages.
     # Require a session-bearing marker too so weak TikTok snapshots do not replace
     # a restore point that can actually pass the login wall.
@@ -158,9 +165,14 @@ AUTH_COOKIE_MARKERS: dict[str, tuple[str, ...]] = {
 
 AUTH_COOKIE_DOMAIN_ROOTS: dict[str, tuple[str, ...]] = {
     "instagram": ("instagram.com",),
+    "threads": ("threads.com", "threads.net"),
     "facebook": ("facebook.com",),
     "x": ("x.com", "twitter.com"),
     "strava": ("strava.com",),
+    "pinterest": ("pinterest.com",),
+    "snapchat": ("snapchat.com",),
+    "airbnb": ("airbnb.com", "airbnb.com.sg"),
+    "youtube": ("youtube.com",),
     "tiktok": ("tiktok.com",),
 }
 
@@ -235,6 +247,19 @@ def _auth_quality_score(payload: dict[str, Any]) -> int:
             complete_platforms += 1
     cookie_count = int(payload.get("cookie_count") or len(payload.get("cookies") or []))
     return complete_platforms * 1000 + marker_count * 10 + min(cookie_count, 999)
+
+
+def _auth_marker_pairs(payload: dict[str, Any]) -> set[tuple[str, str]]:
+    """Return safe platform/marker pairs from a snapshot, never cookie values."""
+    summary = payload.get("auth_summary")
+    if not isinstance(summary, dict):
+        summary = summarize_auth_markers(payload.get("cookies") or [])
+    return {
+        (str(platform), str(marker))
+        for platform, markers in summary.items()
+        if isinstance(markers, list)
+        for marker in markers
+    }
 
 
 def _sanitize_for_set(cookie: dict[str, Any]) -> dict[str, Any]:
@@ -461,13 +486,12 @@ class CookieVault:
         payload["quality_score"] = _auth_quality_score(payload)
 
         self._atomic_write(self.backup_dir / _snapshot_name(ts), payload)
-        latest_preserved = self._should_preserve_latest(payload)
+        preservation_reason = self._preservation_reason(payload)
+        latest_preserved = preservation_reason is not None
         if latest_preserved:
             logger.warning(
-                "cookie backup: preserved existing latest snapshot because new auth quality is lower "
-                "(new_score=%s auth=%s)",
-                payload["quality_score"],
-                auth_summary,
+                "cookie backup: preserved existing latest snapshot (%s; new_score=%s auth=%s)",
+                preservation_reason, payload["quality_score"], auth_summary,
             )
         else:
             self._atomic_write(self.latest_path(), payload)
@@ -480,7 +504,7 @@ class CookieVault:
         self.last_auth_summary = auth_summary
         self.last_quality_score = int(payload["quality_score"])
         self.last_latest_preserved = latest_preserved
-        self.last_preservation_reason = "new_snapshot_lower_auth_quality" if latest_preserved else None
+        self.last_preservation_reason = preservation_reason
 
         # Per-domain summary keeps ops visibility high without dumping raw values.
         summary = self._summarize_by_domain(social)
@@ -494,20 +518,22 @@ class CookieVault:
         )
         return payload
 
-    def _should_preserve_latest(self, candidate: dict[str, Any]) -> bool:
+    def _preservation_reason(self, candidate: dict[str, Any]) -> str | None:
         """Keep a better logged-in latest.json when Chrome reports a weaker jar."""
         latest = self.latest_path()
         if not latest.is_file():
-            return False
+            return None
         try:
             existing = json.loads(latest.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
-            return False
+            return None
+        if _auth_marker_pairs(existing) - _auth_marker_pairs(candidate):
+            return "new_snapshot_loses_auth_marker"
         existing_score = _auth_quality_score(existing)
         candidate_score = _auth_quality_score(candidate)
         if existing_score <= 0:
-            return False
-        return candidate_score < existing_score
+            return None
+        return "new_snapshot_lower_auth_quality" if candidate_score < existing_score else None
 
     def latest_snapshot_status(self) -> dict[str, Any]:
         """Return safe metadata for the effective restore snapshot."""

@@ -78,6 +78,11 @@ pwsh scripts/start-scraper-chrome-cdp.ps1
 
 # Supply the existing restricted Telegram account allowlist from the private host environment.
 # Compose refuses to start if TELEGRAM_SPIDER_ACCOUNTS is unset or empty.
+# On a brand-new production host, create the externally managed data volumes once
+# before the first startup. Existing hosts already have these volumes.
+for volume in unifiedcollector_pgdata unifiedcollector_rabbitmq_data unifiedcollector_redis_data unifiedcollector_sessions_data; do
+  docker volume create "$volume"
+done
 # Bring up the stack
 docker compose -f docker/docker-compose.yml up -d
 

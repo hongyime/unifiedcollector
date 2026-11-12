@@ -18,12 +18,15 @@ logger = logging.getLogger(__name__)
 ALLOWED_SERVICES = frozenset({
     "unifiedcollector_collector_airbnb", "unifiedcollector_collector_beeper",
     "unifiedcollector_collector_bluesky", "unifiedcollector_collector_exposure",
+    "unifiedcollector_collector_facebook",
     "unifiedcollector_collector_github", "unifiedcollector_collector_instagram",
     "unifiedcollector_collector_lemon8",
     "unifiedcollector_collector_pinterest", "unifiedcollector_collector_search",
     "unifiedcollector_collector_snapchat", "unifiedcollector_collector_strava",
     "unifiedcollector_collector_telegram", "unifiedcollector_collector_tiktok",
+    "unifiedcollector_collector_threads",
     "unifiedcollector_collector_whatsapp", "unifiedcollector_collector_website",
+    "unifiedcollector_collector_x",
     "unifiedcollector_collector_youtube",
 })
 

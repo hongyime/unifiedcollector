@@ -656,7 +656,7 @@ class WorkerService:
             f"Credentials working again — collection resumed."
         )
 
-    async def _mark_source_healthy(self, source: str):
+    async def _mark_source_healthy(self, source: str, verified: bool = True, content: bool = False, **kwargs):
         """Heartbeat a successful cycle into source_health.
 
         Without this, last_success_at was NEVER written (only auth-pause/dead/
@@ -669,15 +669,38 @@ class WorkerService:
             async with self.pool.acquire() as conn:
                 await conn.execute(
                     "INSERT INTO source_health "
-                    "  (source, status, last_error, last_success_at, crash_count, updated_at) "
-                    "VALUES ($1, 'running', NULL, NOW(), 0, NOW()) "
+                    "  (source, status, last_error, last_success_at, last_checked_at, last_content_at, "
+                    "   freshness_state, blocker, crash_count, updated_at) "
+                    "VALUES ($1, $2, NULL, CASE WHEN $3 THEN NOW() ELSE NULL END, "
+                    " CASE WHEN $3 THEN NOW() ELSE NULL END, CASE WHEN $4 THEN NOW() ELSE NULL END, "
+                    " CASE WHEN $3 THEN 'checked' ELSE 'unknown' END, NULL, 0, NOW()) "
                     "ON CONFLICT (source) DO UPDATE "
-                    "SET status='running', last_error=NULL, last_success_at=NOW(), "
-                    "    crash_count=0, updated_at=NOW()",
-                    source,
+                    "SET status=CASE WHEN $3 THEN 'running' ELSE source_health.status END, "
+                    "    last_error=CASE WHEN $3 THEN NULL ELSE source_health.last_error END, "
+                    "    last_success_at=CASE WHEN $3 THEN NOW() ELSE source_health.last_success_at END, "
+                    "    last_checked_at=CASE WHEN $3 THEN NOW() ELSE source_health.last_checked_at END, "
+                    "    last_content_at=CASE WHEN $4 THEN NOW() ELSE source_health.last_content_at END, "
+                    "    freshness_state=CASE WHEN $3 THEN 'checked' ELSE source_health.freshness_state END, "
+                    "    blocker=CASE WHEN $3 THEN NULL ELSE source_health.blocker END, "
+                    "    crash_count=CASE WHEN $3 THEN 0 ELSE source_health.crash_count END, updated_at=NOW()",
+                    source, "running" if verified else "idle", verified, content,
                 )
         except Exception:
             logger.debug("Failed to heartbeat source_health for %s", source, exc_info=True)
+
+    async def _mark_source_degraded(self, source: str, error: str) -> None:
+        """Persist an actionable failed-check state without stopping the worker."""
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    "INSERT INTO source_health (source, status, last_error, freshness_state, blocker, updated_at) "
+                    "VALUES ($1, 'degraded', $2, 'degraded', $2, NOW()) "
+                    "ON CONFLICT (source) DO UPDATE SET status='degraded', last_error=$2, "
+                    "freshness_state='degraded', blocker=$2, updated_at=NOW()",
+                    source, error[:2000],
+                )
+        except Exception:
+            logger.debug("Failed to mark source degraded for %s", source, exc_info=True)
 
     async def _manual_pause_reason(self, source: str) -> str | None:
         """A PAUSED/disabled row is an operator decision, never an automatic cooldown."""
@@ -1004,6 +1027,7 @@ class WorkerService:
                     # Reset the streak so we never escalate a healthy idle source.
                     self._zero_progress_streak[source] = 0
                     self._progress_baseline[source] = collector.progress_count
+                    await self._mark_source_healthy(source, verified=False)
                     try:
                         await asyncio.wait_for(self._stop.wait(), timeout=60)
                     except asyncio.TimeoutError:
@@ -1033,8 +1057,9 @@ class WorkerService:
                 self._hang_counts[source] = 0  # successful cycle clears hang budget
                 advanced = collector.progress_count - before
                 idle_reason = getattr(collector, "intentional_idle_reason", None)
-                if not is_realtime or advanced > 0 or idle_reason:
-                    await self._mark_source_healthy(source)  # writes last_success_at
+                verified = advanced > 0 or bool(getattr(collector, "upstream_check_succeeded", False))
+                if verified:
+                    await self._mark_source_healthy(source, content=advanced > 0)
                 if self._auth_paused.get(source):
                     await self._clear_auth_pause(source)
 
@@ -1060,6 +1085,11 @@ class WorkerService:
                         "persisted 0)", source, streak, self.zero_progress_limit,
                         len(targets),
                     )
+                    if streak >= self.zero_progress_limit:
+                        await self._mark_source_degraded(
+                            source,
+                            f"{streak} consecutive target cycles completed without an eligible upstream check",
+                        )
 
                 sleep_for = self._cycle_sleep(source)
                 if idle_reason and "shared scrape mutex is busy" in str(idle_reason):
@@ -1248,7 +1278,7 @@ class WorkerService:
                     _pc = getattr(_lc, "progress_count", None)
                     if _pc is not None and _pc > self._last_success_progress.get(source, -1):
                         self._last_success_progress[source] = _pc
-                        await self._mark_source_healthy(source)
+                        await self._mark_source_healthy(source, content=True)
                 if task.done():
                     crashes = self._crash_counts.get(source, 0)
                     if crashes >= self.max_restarts:

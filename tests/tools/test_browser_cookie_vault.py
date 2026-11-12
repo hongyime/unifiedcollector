@@ -225,6 +225,24 @@ def test_auth_marker_summary_and_quality_never_need_values():
     )
 
 
+def test_auth_marker_summary_covers_source_owned_downloader_sessions():
+    summary = summarize_auth_markers([
+        _mk_cookie("sessionid", ".threads.com"),
+        _mk_cookie("_pinterest_sess", ".pinterest.com"),
+        _mk_cookie("__Host-sc-a-auth-session", ".snapchat.com"),
+        _mk_cookie("_aat", ".airbnb.com.sg"),
+        _mk_cookie("SID", ".youtube.com"),
+    ])
+
+    assert summary == {
+        "airbnb": ["_aat"],
+        "pinterest": ["_pinterest_sess"],
+        "snapchat": ["__Host-sc-a-auth-session"],
+        "threads": ["sessionid"],
+        "youtube": ["SID"],
+    }
+
+
 # ─── Backup / restore round-trip via fake Chrome ────────────────────────────
 
 
@@ -296,13 +314,37 @@ async def test_backup_preserves_better_latest_when_new_snapshot_loses_auth(tmp_p
     assert preserved["ts"] == old_snapshot["ts"]
     assert new_payload["quality_score"] < old_snapshot["quality_score"]
     assert vault.last_latest_preserved is True
-    assert vault.last_preservation_reason == "new_snapshot_lower_auth_quality"
+    assert vault.last_preservation_reason == "new_snapshot_loses_auth_marker"
     latest_status = vault.latest_snapshot_status()
     assert latest_status["restorable"] is True
     assert latest_status["quality_score"] == old_snapshot["quality_score"]
     assert latest_status["auth_summary"] == old_snapshot["auth_summary"]
     snapshots = list(tmp_path.glob("snapshot_*.json"))
     assert len(snapshots) == 1
+
+
+async def test_backup_preserves_latest_when_candidate_loses_any_auth_marker(tmp_path: Path):
+    old_snapshot = {
+        "cookies": [_mk_cookie("sessionid", ".instagram.com")],
+    }
+    old_snapshot["auth_summary"] = summarize_auth_markers(old_snapshot["cookies"])
+    (tmp_path / "latest.json").write_text(json.dumps(old_snapshot), encoding="utf-8")
+
+    fake = FakeChrome([
+        _mk_cookie("SID", ".youtube.com"),
+        _mk_cookie("_aat", ".airbnb.com"),
+    ])
+    cdp_url = await fake.start()
+    try:
+        vault = CookieVault(cdp_url=cdp_url, backup_dir=tmp_path, keep_snapshots=10)
+        async with aiohttp.ClientSession() as session:
+            await vault.backup(session)
+    finally:
+        await fake.stop()
+
+    preserved = json.loads((tmp_path / "latest.json").read_text(encoding="utf-8"))
+    assert preserved["auth_summary"] == {"instagram": ["sessionid"]}
+    assert vault.last_preservation_reason == "new_snapshot_loses_auth_marker"
 
 
 def test_latest_snapshot_status_reports_unusable_latest(tmp_path: Path):

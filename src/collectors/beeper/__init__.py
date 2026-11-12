@@ -293,6 +293,13 @@ class BeeperClient:
     async def info(self) -> dict:
         return await self._get("/v1/info")
 
+    async def readiness_probe(self) -> dict:
+        """Validate both loopback reachability and bearer authentication."""
+        info = await self.info()
+        if not isinstance(info, dict):
+            raise BeeperAPIError("GET /v1/info returned an invalid readiness response")
+        return info
+
     async def accounts(self) -> list[dict]:
         return await self._get("/v1/accounts")
 
@@ -1202,6 +1209,8 @@ class BeeperCollector(BaseCollector):
         stats = {"accounts": 0, "chats": 0, "messages_inserted": 0,
                  "networks_repaired": 0, "errors": 0, "transient": 0}
         phase = "restore_api_cooldown"
+        readiness_ok = False
+        message_phase_error: BaseException | None = None
         await self._restore_api_cooldown()
         if self._api_cooling_down():
             remaining = int(self._api_cooldown_until - time.time())
@@ -1209,7 +1218,17 @@ class BeeperCollector(BaseCollector):
             logger.info("Beeper: %s", self._intentional_idle_reason)
             return stats
         try:
-            message_phase_error: BaseException | None = None
+            phase = "readiness"
+            readiness = await asyncio.wait_for(
+                self.client.readiness_probe(),
+                timeout=self._phase_timeout("readiness", 15.0),
+            )
+            # Test doubles commonly expose the client protocol as AsyncMock;
+            # the real client already rejects non-JSON readiness responses.
+            if isinstance(getattr(self.client, "base_url", None), str) and not isinstance(readiness, dict):
+                raise BeeperAPIError("Beeper readiness probe returned an invalid response")
+            self.record_upstream_check()
+            readiness_ok = True
 
             async def run_accounts() -> BaseException | None:
                 stats["accounts"], error = await self._run_optional_phase(
@@ -1282,16 +1301,22 @@ class BeeperCollector(BaseCollector):
                 _format_exception(exc),
             )
             stats["transient"] += 1
+            if phase == "readiness":
+                await self._mark_desktop_api_unavailable(_format_exception(exc))
         except BeeperTransientError as exc:
             # Transient DNS/connect blip (e.g. resolver restart). The next cycle
             # resumes from the persisted cursors, so this is not a real failure
             # — log quietly at INFO and do NOT inflate the hard error count.
             logger.info("Beeper transient network blip (retry next cycle): %s", _format_exception(exc))
             stats["transient"] += 1
+            if phase == "readiness":
+                await self._mark_desktop_api_unavailable(_format_exception(exc))
         except BeeperAPIError as exc:
             logger.error("Beeper sync failed: %s", _format_exception(exc))
             await self._record_api_http_event(exc, scope="desktop_api")
             stats["errors"] += 1
+            if phase == "readiness":
+                await self._mark_desktop_api_unavailable(_format_exception(exc))
 
         logger.info(
             "Beeper cycle done: accounts=%d chats=%d messages=%d network_repairs=%d errors=%d transient=%d",
@@ -1299,7 +1324,8 @@ class BeeperCollector(BaseCollector):
             stats["networks_repaired"], stats["errors"], stats["transient"],
         )
         if (
-            stats["errors"] == 0
+            readiness_ok
+            and stats["errors"] == 0
             and stats["messages_inserted"] == 0
             and message_phase_error is None
         ):
@@ -1307,6 +1333,23 @@ class BeeperCollector(BaseCollector):
                 "Beeper desktop_api reachable; no new messages this cycle"
             )
         return stats
+
+    async def _mark_desktop_api_unavailable(self, detail: str) -> None:
+        """A refused local Desktop API is a source outage, not an idle cycle."""
+        if self.pool is None:
+            return
+        blocker = f"Beeper Desktop Local API unavailable: {detail}"[:2000]
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    "INSERT INTO source_health (source, status, last_error, freshness_state, blocker, updated_at) "
+                    "VALUES ($1, 'degraded', $2, 'degraded', $2, NOW()) "
+                    "ON CONFLICT (source) DO UPDATE SET status='degraded', last_error=$2, "
+                    "freshness_state='degraded', blocker=$2, updated_at=NOW()",
+                    self.SOURCE_NAME, blocker,
+                )
+        except Exception:
+            logger.debug("Beeper Desktop API outage health update failed", exc_info=True)
 
     async def download_media(self, item: dict) -> None:
         """Download a Beeper attachment via /v1/assets/serve and persist to drive."""

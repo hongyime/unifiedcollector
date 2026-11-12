@@ -1061,12 +1061,14 @@ def test_snapchat_rejects_unsafe_redirect_before_second_request(monkeypatch):
         def __exit__(self, *_args):
             return None
 
-        def get(self, url, **kwargs):
+        def stream(self, method_or_url, url=None, **kwargs):
+            if url is None:
+                url = method_or_url
             self.calls.append((url, kwargs))
             return Response()
 
     session = Session()
-    monkeypatch.setattr(snapchat_mod.requests, "Session", lambda: session)
+    monkeypatch.setattr(snapchat_mod.httpx, "Client", lambda **_kwargs: session)
 
     try:
         snapchat_mod.SnapchatCollector._fetch_public_page("https://www.snapchat.com/discover")
@@ -1076,7 +1078,6 @@ def test_snapchat_rejects_unsafe_redirect_before_second_request(monkeypatch):
         raise AssertionError("unsafe redirect was followed")
 
     assert len(session.calls) == 1
-    assert session.calls[0][1]["allow_redirects"] is False
 
 
 def test_snapchat_public_parser_reads_highlight_and_resolves_public_profile():

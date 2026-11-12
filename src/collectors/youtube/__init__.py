@@ -2647,12 +2647,20 @@ class YoutubeCollector(BaseCollector):
         per operation inside the operation's tempdir ensures writable permissions and
         isolates concurrent invocations.
         """
+        dest = Path(dest_dir) / "yt_cookies.txt"
+        try:
+            from src.core.extractor_fallback import materialize_vault_cookie_jar
+            vault_jar = materialize_vault_cookie_jar("youtube", dest)
+            if vault_jar:
+                return vault_jar
+        except Exception:
+            logger.debug("youtube: CDP-vault cookie snapshot unavailable", exc_info=True)
         src = self._usable_cookie_file()
         if not src:
             return None
         try:
-            dest = Path(dest_dir) / "yt_cookies.txt"
             shutil.copyfile(src, dest)
+            os.chmod(dest, 0o600)
             return str(dest)
         except Exception as exc:
             logger.warning(

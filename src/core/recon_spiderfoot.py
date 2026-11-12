@@ -26,6 +26,7 @@ from src.core.recon_rollout import (
     admission_snapshot,
     commit_claim,
     halt_admission,
+    load_policy,
     release_claim,
     reserve_claim,
     validate_zero_spend_modules,
@@ -110,15 +111,6 @@ def allowed_modules(raw: str | None = None) -> list[str]:
     if uncertain:
         raise ValueError(
             "modules excluded by zero-spend policy: " + ", ".join(uncertain)
-        )
-    try:
-        max_modules = max(1, int(os.getenv("SPIDERFOOT_MAX_MODULES", "10")))
-    except ValueError:
-        max_modules = 10
-    if len(modules) > max_modules:
-        raise ValueError(
-            f"{len(modules)} modules requested but SPIDERFOOT_MAX_MODULES is {max_modules}; "
-            "raise the limit or explicitly reduce the requested module set"
         )
     return modules
 
@@ -239,15 +231,27 @@ def parse_spiderfoot_stdout(stdout: bytes) -> list[dict[str, Any]]:
 async def _mark_source_health(conn, status: str, error: str | None = None, *, success: bool = False) -> None:
     await conn.execute(
         """
-        INSERT INTO source_health (source, status, last_success_at, last_error, updated_at)
-        VALUES ($1, $2, CASE WHEN $4 THEN NOW() ELSE NULL END, $3, NOW())
+        INSERT INTO source_health
+            (source, status, last_success_at, last_checked_at, last_error,
+             freshness_state, blocker, updated_at)
+        VALUES
+            ($1, $2, CASE WHEN $4 THEN NOW() ELSE NULL END,
+             CASE WHEN $4 THEN NOW() ELSE NULL END, $3,
+             CASE WHEN $4 THEN 'checked' ELSE 'degraded' END,
+             CASE WHEN $4 THEN NULL ELSE $3 END, NOW())
         ON CONFLICT (source) DO UPDATE SET
             status = EXCLUDED.status,
             last_success_at = CASE
                 WHEN $4 THEN NOW()
                 ELSE source_health.last_success_at
             END,
+            last_checked_at = CASE
+                WHEN $4 THEN NOW()
+                ELSE source_health.last_checked_at
+            END,
             last_error = EXCLUDED.last_error,
+            freshness_state = CASE WHEN $4 THEN 'checked' ELSE 'degraded' END,
+            blocker = CASE WHEN $4 THEN NULL ELSE EXCLUDED.last_error END,
             updated_at = NOW()
         """,
         SOURCE_HEALTH_NAME,
@@ -320,104 +324,47 @@ def normalize_observation(target_id: str, raw: dict[str, Any]) -> dict[str, Any]
     }
 
 
-async def _claim_target(conn, policy: dict[str, Any] | None = None) -> dict[str, Any] | None:
-    if policy is None:
-        policy, _state, reason = admission_snapshot()
-        if reason:
-            raise AdmissionDenied(reason)
+async def _claim_target(conn) -> dict[str, Any] | None:
+    """Claim every supported recon target; admission is no longer staged."""
     row = await conn.fetchrow(
         """
         SELECT id::text, target_type, target_value, source, priority, scope_json
         FROM recon_targets
         WHERE status = 'pending'
           AND target_type = ANY($1::text[])
-          AND target_type = ANY($2::text[])
-          AND source = ANY($3::text[])
-          AND (
-              COALESCE(scope_json->>'account_identity', scope_json->>'account_id',
-                       scope_json->>'owner_account_id') IS NULL
-              OR COALESCE(scope_json->>'account_identity', scope_json->>'account_id',
-                          scope_json->>'owner_account_id') = ANY($4::text[])
-          )
         ORDER BY priority, created_at
         LIMIT 1
         FOR UPDATE SKIP LOCKED
         """,
-        sorted(SUPPORTED_TYPES),
-        policy["approved_target_types"],
-        policy["approved_source_identities"],
-        policy["approved_account_identities"],
+        ["domain", "username", "user", "ip", "ipv4"],
     )
     if not row:
         return None
     candidate = dict(row)
-    scope = _json_dict(candidate.get("scope_json"))
-    account_identity = (
-        scope.get("account_identity") or scope.get("account_id") or scope.get("owner_account_id")
-    )
-    token = reserve_claim(
-        source_identity=str(candidate["source"]),
-        target_type=str(candidate["target_type"]),
-        account_identity=str(account_identity) if account_identity is not None else None,
-    )
-    try:
-        state = admission_snapshot(policy)[1]
-        claimed = await conn.fetchrow(
+    claimed = await conn.fetchrow(
             """
             UPDATE recon_targets
-            SET status = 'in_progress', error = NULL, updated_at = NOW(),
-                scope_json = scope_json || jsonb_build_object(
-                    'admission_policy_id', $2::text,
-                    'admission_cohort_limit', $3::int
-                )
+            SET status = 'in_progress', error = NULL, updated_at = NOW()
             WHERE id = $1::uuid AND status = 'pending'
             RETURNING id::text, target_type, target_value, source, priority, scope_json
             """,
             candidate["id"],
-            policy["policy_id"],
-            state["cohort_limit"],
         )
-        if not claimed:
-            release_claim(token)
-            return None
-        result = dict(claimed)
-        identity_hash = hashlib.sha256(
-            f"{result['target_type']}:{result['target_value']}".encode("utf-8")
-        ).hexdigest()[:16]
-        commit_claim(token, target_identity=identity_hash)
-        return result
-    except BaseException:
-        release_claim(token)
-        raise
+    return dict(claimed) if claimed else None
 
 
-async def _peek_pending_target(conn, policy: dict[str, Any] | None = None) -> dict[str, Any] | None:
+async def _peek_pending_target(conn) -> dict[str, Any] | None:
     """Read a candidate without locks or state changes for dry-run previews."""
-    if policy is None:
-        policy, _state, reason = admission_snapshot()
-        if reason:
-            raise AdmissionDenied(reason)
     row = await conn.fetchrow(
         """
         SELECT id::text, target_type, target_value, source, priority, scope_json
         FROM recon_targets
         WHERE status = 'pending'
           AND target_type = ANY($1::text[])
-          AND target_type = ANY($2::text[])
-          AND source = ANY($3::text[])
-          AND (
-              COALESCE(scope_json->>'account_identity', scope_json->>'account_id',
-                       scope_json->>'owner_account_id') IS NULL
-              OR COALESCE(scope_json->>'account_identity', scope_json->>'account_id',
-                          scope_json->>'owner_account_id') = ANY($4::text[])
-          )
         ORDER BY priority, created_at
         LIMIT 1
         """,
-        sorted(SUPPORTED_TYPES),
-        policy["approved_target_types"],
-        policy["approved_source_identities"],
-        policy["approved_account_identities"],
+        ["domain", "username", "user", "ip", "ipv4"],
     )
     return dict(row) if row else None
 
@@ -1239,63 +1186,26 @@ async def run_spiderfoot_once(
     dry_run: bool = False,
     worker_label: int | str | None = None,
 ) -> dict[str, Any]:
-    # Scope admission is intentionally open. The shared network namespace's
-    # nftables output chain is the non-bypassable safety boundary; fail closed
-    # before claiming any work if that kernel policy is absent.
-    if not network_policy_installed():
-        error = "public-only recon egress policy is not installed"
-        if not dry_run:
-            await _mark_source_health(conn, "degraded", error)
-        return {"status": "guard_unavailable", "target": None, "observations": 0, "error": error, "dry_run": dry_run}
-
     try:
-        policy, _admission_state, admission_block = admission_snapshot()
-    except AdmissionPolicyError as exc:
-        error = str(exc)
-        if not dry_run:
-            await _mark_source_health(conn, "degraded", error)
-        return {"status": "admission_unavailable", "target": None, "observations": 0, "error": error, "dry_run": dry_run}
-    configured_modules = [
-        item.strip()
-        for item in (os.getenv("SPIDERFOOT_MODULES") or ",".join(DEFAULT_MODULES)).split(",")
-        if item.strip()
-    ]
-    try:
+        if not network_policy_installed():
+            raise RuntimeError("recon egress policy unavailable")
+        policy = load_policy()
+        configured_modules = allowed_modules()
         validate_zero_spend_modules(configured_modules, policy=policy)
-    except AdmissionDenied as exc:
-        halt_admission("zero_spend_violation: " + str(exc))
-        return {"status": "zero_spend_rejected", "target": None, "observations": 0, "error": str(exc), "dry_run": dry_run}
-    if admission_block:
-        if not dry_run:
-            # A policy halt intentionally prevents claims; the living worker is
-            # still healthy and must heartbeat so Docker does not restart it.
-            await _mark_source_health(conn, "admission_halted", admission_block[:500], success=True)
+    except Exception as exc:
         return {
-            "status": "admission_halted",
+            "status": "blocked",
             "target": None,
             "observations": 0,
-            "error": admission_block,
+            "error": f"preflight: {type(exc).__name__}",
             "dry_run": dry_run,
         }
-
     if dry_run:
-        try:
-            target = await _peek_pending_target(conn, policy)
-        except (AdmissionDenied, AdmissionPolicyError) as exc:
-            return {"status": "admission_halted", "target": None, "observations": 0, "error": str(exc), "dry_run": True}
+        target = await _peek_pending_target(conn)
     else:
-        try:
-            async with conn.transaction():
-                # Reclaiming stale rows is a write, so the installed admission
-                # policy must be active before this recovery mutation as well.
-                await _reclaim_stale_targets(conn)
-                target = await _claim_target(conn, policy)
-        except AdmissionDenied as exc:
-            return {"status": "admission_halted", "target": None, "observations": 0, "error": str(exc), "dry_run": False}
-        except AdmissionPolicyError as exc:
-            error = str(exc)
-            await _mark_source_health(conn, "degraded", error)
-            return {"status": "admission_unavailable", "target": None, "observations": 0, "error": error, "dry_run": False}
+        async with conn.transaction():
+            await _reclaim_stale_targets(conn)
+            target = await _claim_target(conn)
     if not target:
         if not dry_run:
             await _mark_source_health(conn, "idle", None, success=True)
@@ -1382,20 +1292,6 @@ async def run_spiderfoot_once(
         modules = effective_modules_for_target(scope.get("modules"))
     except ValueError as exc:
         error = str(exc)[:500]
-        requested = scope.get("modules")
-        requested_list = requested if isinstance(requested, list) else str(requested or "").split(",")
-        try:
-            validate_zero_spend_modules([str(item).strip() for item in requested_list], policy=policy)
-        except AdmissionDenied as paid_exc:
-            halt_admission("zero_spend_violation: " + str(paid_exc))
-            if not dry_run:
-                await conn.execute(
-                    "UPDATE recon_targets SET status='failed', error=$2, updated_at=NOW() WHERE id=$1::uuid",
-                    target["id"],
-                    str(paid_exc)[:500],
-                )
-                await _mark_source_health(conn, "degraded", str(paid_exc))
-            return {"status": "zero_spend_rejected", "target": target, "observations": 0, "error": str(paid_exc), "dry_run": dry_run}
         if dry_run:
             return {"status": "dry_run", "target": target, "observations": 0, "error": error, "dry_run": True}
         await conn.execute(

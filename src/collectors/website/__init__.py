@@ -171,6 +171,39 @@ DEFAULT_URL_POLICY_FILE = (
     Path(__file__).resolve().parents[3] / "config" / "sources" / "website.url-policy.txt"
 )
 
+
+def classify_website_failure(error: BaseException | None, *, status_code: int | None = None) -> str:
+    """Map crawler failures to the durable retry classes used by operators."""
+    if status_code == 429:
+        return "429"
+    if status_code is not None and 400 <= status_code < 500:
+        return "4xx"
+    if status_code is not None and status_code >= 500:
+        return "5xx"
+    if isinstance(error, httpx.ConnectTimeout) or isinstance(error, httpx.ReadTimeout):
+        return "timeout"
+    if isinstance(error, httpx.TransportError) and "ssl" in str(error).lower():
+        return "tls"
+    if isinstance(error, httpx.ConnectError):
+        text = str(error).lower()
+        return "dns" if any(marker in text for marker in ("name or service", "getaddrinfo", "resolve")) else "connection"
+    text = str(error or "").lower()
+    if "robot" in text or "policy" in text:
+        return "robots/policy"
+    if "redirect" in text:
+        return "redirect"
+    return "connection"
+
+
+def website_retry_seconds(failure_class: str, failure_count: int) -> int:
+    """Conservative class-specific retry without resetting existing targets."""
+    base = {
+        "dns": 3600, "connection": 900, "tls": 21600, "timeout": 1800,
+        "robots/policy": 86400, "redirect": 21600, "4xx": 86400,
+        "429": 21600, "5xx": 1800, "parser-empty": 21600,
+    }.get(failure_class, 3600)
+    return min(7 * 86400, base * (2 ** min(max(failure_count - 1, 0), 4)))
+
 IMAGE_EXTS = {
     ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg", ".avif",
     ".tiff", ".tif", ".jfif",
@@ -507,19 +540,21 @@ class WebsiteCollector(BaseCollector):
         self._domain_pacing = DomainPacer(
             self.SOURCE_NAME,
             env_prefix="WEBSITE",
-            max_active_domains=4,
-            max_per_domain=2,
-            delay_seconds=1.5,
-            jitter_seconds=2.0,
+            # Website collection deliberately has no robots, per-domain, or
+            # jitter gate.  The process-wide semaphore remains the sole cap.
+            max_active_domains=self._max_concurrent,
+            max_per_domain=self._max_concurrent,
+            delay_seconds=0,
+            jitter_seconds=0,
         )
         # HTTP
         self._timeout = httpx.Timeout(float(os.getenv("WEBSITE_TIMEOUT", "30")), connect=10.0)
         self._target_timeout = float(os.getenv("WEBSITE_TARGET_TIMEOUT_SECONDS", "1500"))
-        self._target_retry_backoff = float(os.getenv("WEBSITE_TARGET_RETRY_BACKOFF_SECONDS", "21600"))
-        self._target_retry_backoff_max = float(os.getenv("WEBSITE_TARGET_RETRY_BACKOFF_MAX_SECONDS", "604800"))
+        self._target_retry_backoff = 0
+        self._target_retry_backoff_max = 0
         # Behaviour toggles
-        self._respect_robots = os.getenv("WEBSITE_RESPECT_ROBOTS", "1") == "1"
-        self._robots_policy = os.getenv("WEBSITE_ROBOTS_POLICY", "respect").strip().lower() or "respect"
+        self._respect_robots = False
+        self._robots_policy = "disabled"
         self._robots_override_domains = _csv_domains(os.getenv("WEBSITE_ROBOTS_OVERRIDE_DOMAINS"))
         self._robots_override_seen: set[str] = set()
         self._follow_external = os.getenv("WEBSITE_FOLLOW_EXTERNAL", "0") == "1"
@@ -663,15 +698,23 @@ class WebsiteCollector(BaseCollector):
                     timeout=self._target_timeout,
                 )
                 await self._mark_target_finished(url, seed, stats)
+                await self._record_target_attempt(
+                    url, stats=stats,
+                    failure_class=("successful-no-new-content" if int(stats.get("pages") or 0) else "parser-empty"),
+                )
+                if int(stats.get("pages") or 0):
+                    self.record_upstream_check()
                 await save_checkpoint(seed)
             except asyncio.TimeoutError:
                 msg = f"target exceeded {self._target_timeout:.0f}s wall-clock cap"
                 logger.info("Deferred website/%s: %s", seed, msg)
                 await self._defer_target(url, seed, msg)
+                await self._record_target_attempt(url, failure_class="timeout")
                 await save_checkpoint(seed)
             except Exception as e:
                 logger.error("Failed website/%s: %s", seed, e)
                 await self._defer_target(url, seed, str(e))
+                await self._record_target_attempt(url, failure_class=classify_website_failure(e))
                 await save_checkpoint(seed)
                 try:
                     await self.send_to_dlq(seed, seed, str(e))
@@ -679,11 +722,7 @@ class WebsiteCollector(BaseCollector):
                     pass
 
         if ordered_pairs:
-            workers = min(
-                len(ordered_pairs),
-                max(1, int(os.getenv("WEBSITE_TARGET_CONCURRENCY", str(self._domain_pacing.max_active_domains)))),
-                self._domain_pacing.max_active_domains,
-            )
+            workers = min(len(ordered_pairs), self._max_concurrent)
             if workers <= 1:
                 for url, seed in ordered_pairs:
                     await _collect_one(url, seed)
@@ -1700,6 +1739,42 @@ class WebsiteCollector(BaseCollector):
                 )
         except Exception as e:
             logger.debug("upsert_target failed for %s: %s", domain, e)
+
+    async def _record_target_attempt(
+        self, target_id: str, *, stats: dict[str, Any] | None = None,
+        failure_class: str | None = None, http_outcome: int | None = None,
+    ) -> None:
+        """Persist per-target outcome; this never bulk-resets the backlog."""
+        if not self.pool:
+            return
+        succeeded = failure_class == "successful-no-new-content"
+        page = target_id if succeeded and int((stats or {}).get("pages") or 0) else None
+        artifact = datetime.now(timezone.utc) if int((stats or {}).get("images") or 0) + int((stats or {}).get("pdfs") or 0) + int((stats or {}).get("docs") or 0) + int((stats or {}).get("videos") or 0) else None
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO website_target_attempts
+                        (target_id, last_attempt_at, failure_class, failure_count, next_retry_at,
+                         http_outcome, last_successful_page, last_artifact_at, updated_at)
+                    VALUES ($1, NOW(), $2, CASE WHEN $3 THEN 0 ELSE 1 END,
+                            CASE WHEN $3 THEN NULL ELSE NOW() + ($4 * interval '1 second') END,
+                            $5, $6, $7, NOW())
+                    ON CONFLICT (target_id) DO UPDATE SET
+                        last_attempt_at=NOW(), failure_class=EXCLUDED.failure_class,
+                        failure_count=CASE WHEN $3 THEN 0 ELSE website_target_attempts.failure_count + 1 END,
+                        next_retry_at=CASE WHEN $3 THEN NULL ELSE NOW() +
+                            ($4 * (2 ^ LEAST(website_target_attempts.failure_count, 4)) * interval '1 second') END,
+                        http_outcome=COALESCE(EXCLUDED.http_outcome, website_target_attempts.http_outcome),
+                        last_successful_page=COALESCE(EXCLUDED.last_successful_page, website_target_attempts.last_successful_page),
+                        last_artifact_at=COALESCE(EXCLUDED.last_artifact_at, website_target_attempts.last_artifact_at),
+                        updated_at=NOW()
+                    """,
+                    target_id, failure_class, succeeded,
+                    website_retry_seconds(failure_class or "connection", 1), http_outcome, page, artifact,
+                )
+        except Exception:
+            logger.debug("website target attempt write failed for %s", target_id, exc_info=True)
 
     async def _mark_target_finished(
         self,

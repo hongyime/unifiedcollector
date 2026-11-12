@@ -31,32 +31,34 @@ async def test_scheduler_seeds_domain_and_username_sources(monkeypatch):
             return default
 
     monkeypatch.setattr(recon_seed, "seed_recon_targets_from_collector", fake_seed)
-    approved_sources = ["collector:website_targets"]
-    monkeypatch.setattr(
-        recon_seed_handler,
-        "admission_snapshot",
-        lambda: ({"approved_source_identities": approved_sources}, {"cohort_limit": 5}, None),
-    )
     await ReconSeedHandler().run(Context())
 
     assert calls[0][0] == "isolated-connection"
     assert calls[0][1]["include_domains"] is True
     assert calls[0][1]["include_usernames"] is True
     assert calls[0][1]["include_urls"] is False
-    assert calls[0][1]["approved_source_identities"] == approved_sources
+    assert calls[0][1]["approved_source_identities"] is None
 
 
-async def test_scheduler_seed_producer_stops_when_admission_is_halted(monkeypatch):
-    async def fail_if_called(*_args, **_kwargs):
-        raise AssertionError("recon seed producer ran while admission was halted")
+async def test_scheduler_seed_producer_has_no_admission_gate(monkeypatch):
+    calls = []
+
+    async def seeded(_conn, **_kwargs):
+        calls.append(True)
+        return {"candidates": 0, "queued": 0, "skipped": 0}
+
+    class Acquire:
+        async def __aenter__(self): return object()
+        async def __aexit__(self, *_args): return False
 
     class Context:
-        pool = object()
+        class Pool:
+            def acquire(self): return Acquire()
+        pool = Pool()
 
-    monkeypatch.setattr(recon_seed, "seed_recon_targets_from_collector", fail_if_called)
-    monkeypatch.setattr(
-        recon_seed_handler,
-        "admission_snapshot",
-        lambda: ({}, {"cohort_limit": 5}, "awaiting explicit canary activation"),
-    )
+        @staticmethod
+        def get_env_int(_name, default, *, min_value): return default
+
+    monkeypatch.setattr(recon_seed, "seed_recon_targets_from_collector", seeded)
     await ReconSeedHandler().run(Context())
+    assert calls == [True]

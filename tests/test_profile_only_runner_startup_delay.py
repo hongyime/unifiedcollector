@@ -5,6 +5,7 @@ import asyncio
 import os
 import signal
 import time
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -36,6 +37,7 @@ class _RecordingCollector:
         self.calls: list[float] = []
         self._on_cycle = on_cycle
         self.pool = None
+        self.heartbeat_source_health = AsyncMock()
 
     def set_pool(self, pool):
         self.pool = pool
@@ -142,3 +144,4 @@ async def test_invalid_delay_does_not_stall_first_cycle(monkeypatch):
 
     assert len(collector.calls) == 1
     assert collector.calls[0] - started < 1.0
+    collector.heartbeat_source_health.assert_awaited_once()

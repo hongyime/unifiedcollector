@@ -1344,3 +1344,25 @@ async def test_reclaim_stranded_spider_queue_once(monkeypatch):
 
     await coll._reclaim_stranded_spider_queue()
     conn.execute.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_failed_cookie_preflight_restores_cycle_state(monkeypatch, tmp_path):
+    from contextlib import contextmanager
+    from src.core import extractor_fallback
+
+    _set_web_env(monkeypatch)
+    coll = StravaCollector()
+    original = (coll._cookies_file, coll._session_cookie, coll._cookie_accounts, coll._use_web)
+    jar = tmp_path / "temporary-cookies.txt"
+    jar.write_text(".strava.com\tTRUE\t/\tTRUE\t0\t_strava4_session\ttest-cookie\n", encoding="utf-8")
+
+    @contextmanager
+    def temporary_cookie_jar(_source):
+        yield str(jar)
+
+    monkeypatch.setattr(extractor_fallback, "temporary_vault_cookie_jar", temporary_cookie_jar)
+    monkeypatch.setattr(coll, "_preflight_cookie_auth", AsyncMock(return_value=False))
+    await coll.run([])
+
+    assert (coll._cookies_file, coll._session_cookie, coll._cookie_accounts, coll._use_web) == original
