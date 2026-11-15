@@ -703,7 +703,7 @@ async def _check_chrome_reachable(cdp_url: str, timeout: int = 30) -> bool:
     async with aiohttp.ClientSession() as session:
         while time.monotonic() - start < timeout:
             try:
-                headers = {"Host": "localhost:9222"}
+                headers = {"Host": _host_header(cdp_url)}
                 async with session.get(
                     f"{cdp_url}/json/version",
                     headers=headers,
@@ -747,7 +747,7 @@ async def run_daemon() -> int:
     if not await _check_chrome_reachable(vault.cdp_url, timeout=30):
         logger.error(
             "Chrome not reachable at %s after 30s. Launch with: "
-            "google-chrome --headless --remote-debugging-port=9222 "
+            "google-chrome --headless --remote-debugging-port=9223 "
             "--user-data-dir=/home/bryan/.config/chrome-collector",
             vault.cdp_url,
         )

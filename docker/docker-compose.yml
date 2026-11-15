@@ -72,12 +72,68 @@ services:
     oom_score_adj: -500
     mem_reservation: 2g
 
+  schema_init:
+    image: unifiedcollector-collector:latest
+    container_name: unifiedcollector_schema_init
+    init: true
+    command: python -m src.db.dev_init
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@unifiedcollector_postgres:5432/unifiedcollector
+    volumes:
+      - ../src:/app/src:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - ./env/common.env
+    restart: "no"
+
+  recon_egress_guard:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.spiderfoot
+    image: unifiedcollector-spiderfoot:latest
+    container_name: unifiedcollector_recon_egress_guard
+    init: true
+    command: python -m src.core.recon_egress_guard --serve --database-host unifiedcollector_postgres
+    environment:
+      RECON_MAX_EGRESS_BYTES: "${RECON_MAX_EGRESS_BYTES:-1073741824}"
+      RECON_EGRESS_GUARD_SOCKET: "/var/lib/unifiedcollector/recon-guard/status.sock"
+      RECON_EGRESS_GUARD_GID: "${RECON_GID:-1000}"
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_ADMIN
+      - CHOWN
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      postgres:
+        condition: service_healthy
+      schema_init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-m", "src.core.recon_egress_guard", "--check"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    volumes:
+      - /var/lib/unifiedcollector/recon-guard:/var/lib/unifiedcollector/recon-guard
+    restart: unless-stopped
+
   collector_spiderfoot:
     build:
       context: ..
       dockerfile: docker/Dockerfile.spiderfoot
     image: unifiedcollector-spiderfoot:latest
     container_name: unifiedcollector_spiderfoot
+    user: "${RECON_UID:-1000}:${RECON_GID:-1000}"
+    network_mode: "service:recon_egress_guard"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     init: true
     command: python -m src.recon_spiderfoot_service --poll-interval ${RECON_SPIDERFOOT_POLL_INTERVAL:-10} --workers ${RECON_SPIDERFOOT_WORKERS:-1}
     mem_limit: ${RECON_SPIDERFOOT_MEM:-2g}
@@ -99,6 +155,19 @@ services:
       SPIDERFOOT_ALLOW_INTRUSIVE: "${SPIDERFOOT_ALLOW_INTRUSIVE:-0}"
       SPIDERFOOT_TARGET_TIMEOUT_SECONDS: "${SPIDERFOOT_TARGET_TIMEOUT_SECONDS:-180}"
       SPIDERFOOT_STALE_TARGET_MINUTES: "${SPIDERFOOT_STALE_TARGET_MINUTES:-30}"
+      RECON_HEALTH_MAX_AGE_SECONDS: "${RECON_HEALTH_MAX_AGE_SECONDS:-360}"
+      RECON_MAX_TARGETS_PER_RUN: "${RECON_MAX_TARGETS_PER_RUN:-10}"
+      RECON_RUN_DEADLINE_SECONDS: "${RECON_RUN_DEADLINE_SECONDS:-1800}"
+      RECON_RUN_COOLDOWN_SECONDS: "${RECON_RUN_COOLDOWN_SECONDS:-3600}"
+      RECON_ADMISSION_POLICY_PATH: "/app/config/task-37-admission-policy.json"
+      RECON_ADMISSION_STATE_PATH: "/var/lib/unifiedcollector/recon-admission/task-37-admission-state.json"
+      RECON_ADMISSION_STATE_MODE: "0660"
+      RECON_ADMISSION_SHARED_GID: "${RECON_ADMISSION_SHARED_GID:-1000}"
+      RECON_EGRESS_GUARD_SOCKET: "/var/lib/unifiedcollector/recon-guard/status.sock"
+      RECON_EVIDENCE_ROOT: "/var/lib/unifiedcollector/recon-evidence"
+      RECON_MIN_DISK_FREE_BYTES: "${RECON_MIN_DISK_FREE_BYTES:-2147483648}"
+      RECON_MAX_EVIDENCE_BYTES: "${RECON_MAX_EVIDENCE_BYTES:-10737418240}"
+      RECON_SPIDERFOOT_HEARTBEAT_PATH: "/tmp/recon-spiderfoot-worker.heartbeat"
       SPIDERFOOT_STATE_ROOT: "${SPIDERFOOT_STATE_ROOT:-/tmp/spiderfoot-state}"
       # maigret: HTTP-only OSS account-enumeration engine (MIT), replaces the
       # DEAD sfp_accounts module for username targets.
@@ -113,7 +182,7 @@ services:
       MAIGRET_NUM_REQUESTS: "${MAIGRET_NUM_REQUESTS:-10}"
       MAIGRET_HTTP_TIMEOUT_SECONDS: "${MAIGRET_HTTP_TIMEOUT_SECONDS:-10}"
       MAIGRET_TARGET_TIMEOUT_SECONDS: "${MAIGRET_TARGET_TIMEOUT_SECONDS:-420}"
-      MAIGRET_REPORT_KEEPDIR: "${MAIGRET_REPORT_KEEPDIR:-}"
+      MAIGRET_REPORT_KEEPDIR: "${MAIGRET_REPORT_KEEPDIR:-/var/lib/unifiedcollector/recon-evidence/maigret}"
       # GHunt: email -> Google account enrichment. Isolated venv, not the system python.
       # See docker/Dockerfile.spiderfoot for the /opt/ghunt-venv install.
       # Creds.m is mounted READ-ONLY below; disable by unsetting GHUNT_CREDS.
@@ -125,23 +194,27 @@ services:
       DB_POOL_MAX_SIZE: "6"
       PYTHONUNBUFFERED: "1"
     volumes:
+      - /var/lib/unifiedcollector/recon-evidence:/var/lib/unifiedcollector/recon-evidence
+      - /var/lib/unifiedcollector/recon-admission:/var/lib/unifiedcollector/recon-admission
+      - /var/lib/unifiedcollector/recon-guard:/var/lib/unifiedcollector/recon-guard:ro
+      - ../config/task-37-admission-policy.json:/app/config/task-37-admission-policy.json:ro
       - ../src:/app/src
       # GHunt credentials: set GHUNT_CREDS_HOST to an existing private session file.
       # Read-only bind so a bug in ghunt cannot rewrite the operator's file. Path
       # inside the container is GHUNT_CREDS (default /app/.ghunt/creds.m).
       - ${GHUNT_CREDS_HOST:-${USERPROFILE:-${HOME}}/.malfrats/ghunt/creds.m}:/app/.ghunt/creds.m:ro
     depends_on:
-      postgres:
+      recon_egress_guard:
         condition: service_healthy
     env_file:
       - ./env/common.env
       - ./env/recon.env
     healthcheck:
-      test: ["CMD-SHELL", "/opt/spiderfoot-venv/bin/python /opt/spiderfoot/sf.py -V >/dev/null 2>&1"]
-      interval: 90s
-      timeout: 90s
+      test: ["CMD", "python", "-m", "src.recon_spiderfoot_service", "--healthcheck"]
+      interval: 30s
+      timeout: 10s
       retries: 3
-      start_period: 120s
+      start_period: 180s
     restart: unless-stopped
 
   # P3-1: youtube runs in its OWN process/container, isolated from the main
@@ -414,6 +487,9 @@ services:
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
       COLLECTOR_HANG_TIMEOUT_SECONDS: "7200"
+      # Strava is browser/CDP-only; retain the service as an intentional-idle
+      # compatibility shell so watchdog/source-health do not restart a crawler.
+      STRAVA_COLLECTOR_ENABLED: "false"
       STRAVA_PAGE_SCRAPE_BATCH: "20"
       STRAVA_SPIDER_ENABLED: "true"
       STRAVA_FOLLOW_SCRAPE_ENABLED: "true"
@@ -815,7 +891,8 @@ services:
       COLLECTOR_VAULT_ROOT: /vault
       BEEPER_DESKTOP_API_URL: http://127.0.0.1:23373
       # Larger pages = fewer Beeper Desktop Local API round-trips per sync.
-      BEEPER_PAGE_SIZE: "150"
+      # Raw archives are written per chat; keep this below the bounded chat-phase budget.
+      BEEPER_PAGE_SIZE: "50"
       # Stability (2026-06-21, Bryan reported recurring "beeper disconnected"):
       # the Beeper Desktop Local API (host:23373) is intermittently unresponsive,
       # so a single blip used to end the cycle -> error -> retry -> alert. Ride
@@ -828,6 +905,9 @@ services:
       # Wider room coverage + bounded history per cycle. Keep cycles completing
       # frequently so live message freshness wins over historical drain.
       BEEPER_MAX_CHATS_PER_CYCLE: "100"
+      # One chat-list page keeps durable chat/participant archiving under the
+      # optional-phase timeout on the external vault.
+      BEEPER_CHAT_PAGES_PER_CYCLE: "1"
       BEEPER_BACKFILL_PAGES_PER_CYCLE: "4"
       BEEPER_BACKFILL_CANDIDATE_MESSAGES: "1000"
       BEEPER_BACKFILL_QUERY_TIMEOUT: "30"
@@ -842,6 +922,8 @@ services:
       # cannot make Beeper look stale.
       BEEPER_NETWORK_REPAIR_LIMIT: "2000"
       BEEPER_NETWORK_REPAIR_TIMEOUT: "20"
+      # Instagram DMs are intentionally excluded from the Beeper shadow mirror.
+      BEEPER_EXCLUDED_NETWORKS: "${BEEPER_EXCLUDED_NETWORKS:-instagram}"
       # One-shot, bounded probe of old failed Beeper assets after cache/session
       # changes. Bump the marker to retry another tiny sample; same marker is
       # remembered in service_cursors and will not run every cycle.
@@ -1030,7 +1112,7 @@ services:
     volumes:
       - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}/media:/media"
       - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}:/vault"
-      - ../credentials:/app/credentials   # so /social/cookies can write live sessions
+      - ../../../unifiedcollector/credentials:/app/credentials   # share live browser sessions with the collector worktree
       - ../src:/app/src
     depends_on:
       postgres:
@@ -1045,6 +1127,8 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
     container_name: unifiedcollector_scheduler
+    group_add:
+      - "${RECON_ADMISSION_SHARED_GID:-1000}"
     command: python -m src.main scheduler
     # Dynamic (env-tunable) resource caps — enrichment ticks are light; keep the
     # scheduler bounded so seed/phone ticks never starve collectors. Live-applied
@@ -1067,6 +1151,10 @@ services:
       # the maigret HTTP-only engine automatically.
       RECON_USERNAME_MODULES: "${RECON_USERNAME_MODULES:-maigret}"
       RECON_USERNAME_ENGINE: "${RECON_USERNAME_ENGINE:-maigret}"
+      RECON_ADMISSION_POLICY_PATH: "/app/config/task-37-admission-policy.json"
+      RECON_ADMISSION_STATE_PATH: "/var/lib/unifiedcollector/recon-admission/task-37-admission-state.json"
+      RECON_ADMISSION_STATE_MODE: "0660"
+      RECON_ADMISSION_SHARED_GID: "${RECON_ADMISSION_SHARED_GID:-1000}"
       # "Base of operations" Telegram overhaul --------------------------------
       # See src/notifications/collector_bot.py. The scheduler hosts the getUpdates
       # long-poll task (single asyncio.Task; safe because the analyzer's merge_bot
@@ -1090,6 +1178,8 @@ services:
       - "${UNIFIEDCOLLECTOR_HOST_ROOT:-/media/sg-ultra/unifiedcollector}:/vault"
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
+      - ../config/task-37-admission-policy.json:/app/config/task-37-admission-policy.json:ro
+      - /var/lib/unifiedcollector/recon-admission:/var/lib/unifiedcollector/recon-admission
       # live src mount so scheduler code (e.g. identity reconciliation) applies on
       # a plain recreate — no image rebuild (vhdx must not grow). Matches the
       # collector/ig_ingest pattern; scheduler previously ran only baked-in code.
@@ -1127,7 +1217,7 @@ services:
       - ./env/telegram.env
       - ./env/telegram_onboard.env
     healthcheck:
-      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      test: ["CMD", "python", "-c", "import os, urllib.request; tokens=[os.getenv(k) for k in ('PRAWNPRODUCTIONS_BOT_TOKEN','SHOTSBYSEAH_BOT_TOKEN','BRYANSEAH_BOT_TOKEN')]; assert all(tokens); assert all(urllib.request.urlopen('https://api.telegram.org/bot'+token+'/getMe', timeout=8).status == 200 for token in tokens)"]
       interval: 60s
       timeout: 10s
       retries: 3

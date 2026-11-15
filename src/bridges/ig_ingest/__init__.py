@@ -39,6 +39,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import aiohttp
+from asyncpg.exceptions import UniqueViolationError
 from aiohttp import web
 
 from src.db.connection import get_pool, close_pool
@@ -46,6 +47,7 @@ from src.core.media_filter import inspect as inspect_media
 from src.core.priority_hints import refresh_collector_priority_hints as refresh_collector_priority_hints
 from src.core.proximity import refresh_account_proximity_cache as refresh_account_proximity_cache
 from src.core.rate_limit_events import record_rate_limit_event
+from src.core.recovery_profiles import mark_recovery_observation
 from src.core.dynamic_cooldown import record_dynamic_cooldown
 from src.core.strava_route_queue import fetch_strava_route_capture_queue as fetch_strava_route_capture_queue
 from src.core.vault import (
@@ -540,8 +542,7 @@ from .strava import (  # noqa: E402,F401
 )
 
 
-# Cookies + telemetry moved to .cookies / .telemetry per split step 9.
-from .cookies import cookies_handler  # noqa: E402,F401
+# Telemetry moved to .telemetry per split step 9.
 from .telemetry import browser_heartbeat_handler, sw_crash_handler  # noqa: E402,F401
 
 # Cooldown moved to .cooldown per split step 10.
@@ -1608,29 +1609,33 @@ async def _download_and_save(pool, session, platform, username, item, reject_sta
             await _record_vault_pause("artifact sidecar state incomplete")
             return _reject("artifact_write_failed", "artifact sidecar state incomplete")
         async with pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO media_items
-                  (source, entity_id, entity_name, content_type, content_id,
-                   filename, file_path, file_size, sha256, source_url, metadata, kind,
-                   ingest_path, collection_surface)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12,'extension',$13)
-                ON CONFLICT (source, content_id) DO UPDATE SET
-                   file_path = EXCLUDED.file_path,
-                   file_size = EXCLUDED.file_size,
-                   sha256 = EXCLUDED.sha256,
-                   source_url = EXCLUDED.source_url,
-                   metadata = EXCLUDED.metadata,
-                   kind = EXCLUDED.kind,
-                   ingest_path = 'extension',
-                   collection_surface = CASE WHEN EXCLUDED.collection_surface = 'unknown'
-                                              THEN media_items.collection_surface
-                                              ELSE EXCLUDED.collection_surface END
-                """,
-                platform, safe_user, item.get("entity_name") or username, ctype, store_cid,
-                dest.name, str(stored_path), len(data), sha, url, meta_json, media_kind,
-                collection_surface,
-            )
+            try:
+                await conn.execute(
+                    """
+                    INSERT INTO media_items
+                      (source, entity_id, entity_name, content_type, content_id,
+                       filename, file_path, file_size, sha256, source_url, metadata, kind,
+                       ingest_path, collection_surface)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12,'extension',$13)
+                    ON CONFLICT (source, content_id) DO UPDATE SET
+                       file_path = EXCLUDED.file_path,
+                       file_size = EXCLUDED.file_size,
+                       sha256 = EXCLUDED.sha256,
+                       source_url = EXCLUDED.source_url,
+                       metadata = EXCLUDED.metadata,
+                       kind = EXCLUDED.kind,
+                       ingest_path = 'extension',
+                       collection_surface = CASE WHEN EXCLUDED.collection_surface = 'unknown'
+                                                  THEN media_items.collection_surface
+                                                  ELSE EXCLUDED.collection_surface END
+                    """,
+                    platform, safe_user, item.get("entity_name") or username, ctype, store_cid,
+                    dest.name, str(stored_path), len(data), sha, url, meta_json, media_kind,
+                    collection_surface,
+                )
+            except UniqueViolationError:
+                # A concurrent same-bytes insert won after the advisory hash check.
+                return _reject("duplicate_sha256")
             if artifact.partial or not artifact.ok:
                 await conn.execute(
                     """
@@ -2045,6 +2050,11 @@ async def _ingest(app, platform, body):
             outcome="empty",
             metadata=meta or None,
         )
+        if (
+            platform == "instagram"
+            and body.get("probe_reason") == "restricted_following_feed_dom_observation"
+        ):
+            await mark_recovery_observation(app["pool"], "instagram", account=username)
     # Outcome states: queued = drain task scheduled below; stored is always 0
     # here because _drain persists after this response is already sent.
     return {

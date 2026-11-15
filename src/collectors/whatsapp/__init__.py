@@ -1162,6 +1162,55 @@ class WhatsappCollector(BaseCollector):
                     """, chat_jid, name, participant_count, description)
             except Exception as fallback_exc:
                 logger.debug("group metadata fallback upsert failed: %s", fallback_exc)
+                return
+
+        await self._upsert_group_members(chat_jid, event)
+
+    async def _upsert_group_members(self, chat_jid: str, event: dict) -> None:
+        """Persist membership changes emitted by the connected WhatsApp account."""
+        participants = event.get("participants")
+        if not self.pool or not isinstance(participants, list):
+            return
+        action = str(event.get("action") or "snapshot").strip().lower()
+        members: list[tuple[str, str]] = []
+        for item in participants:
+            if isinstance(item, str):
+                jid, role = item, "member"
+            elif isinstance(item, dict):
+                jid = str(item.get("id") or item.get("jid") or "")
+                admin = str(item.get("admin") or "").lower()
+                role = "admin" if admin in {"admin", "superadmin"} else "member"
+            else:
+                continue
+            if jid:
+                members.append((jid, role))
+        if not members:
+            return
+        try:
+            async with self.pool.acquire() as conn:
+                if action == "remove":
+                    await conn.execute(
+                        "UPDATE whatsapp_group_members SET is_active=FALSE, removed_at=NOW(), last_seen_at=NOW() "
+                        "WHERE platform_chat_id=$1 AND participant_jid = ANY($2::text[])",
+                        chat_jid, [jid for jid, _role in members],
+                    )
+                    return
+                for jid, role in members:
+                    await conn.execute(
+                        "INSERT INTO whatsapp_group_members (platform_chat_id, participant_jid, role, is_active, removed_at) "
+                        "VALUES ($1, $2, $3, TRUE, NULL) "
+                        "ON CONFLICT (platform_chat_id, participant_jid) DO UPDATE SET "
+                        "role=EXCLUDED.role, is_active=TRUE, removed_at=NULL, last_seen_at=NOW()",
+                        chat_jid, jid, role,
+                    )
+                if action == "snapshot":
+                    await conn.execute(
+                        "UPDATE whatsapp_group_members SET is_active=FALSE, removed_at=NOW(), last_seen_at=NOW() "
+                        "WHERE platform_chat_id=$1 AND is_active AND NOT (participant_jid = ANY($2::text[]))",
+                        chat_jid, [jid for jid, _role in members],
+                    )
+        except Exception as exc:
+            logger.debug("group membership upsert failed: %s", exc)
 
     async def _process_broker_delivery(self, message, targets: list[str]) -> None:
         """Decode and dispatch one broker delivery; nack/requeue on failure.

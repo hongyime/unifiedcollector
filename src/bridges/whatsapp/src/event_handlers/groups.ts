@@ -42,3 +42,24 @@ export function registerGroupsHandler(sock: WASocket): void {
         }
     });
 }
+
+export async function publishGroupSnapshot(sock: WASocket, sessionName: string): Promise<void> {
+    const groups = await sock.groupFetchAllParticipating();
+    for (const group of Object.values(groups as Record<string, any>)) {
+        if (!group?.id) continue;
+        await producer.publish('groups.update', {
+            chat_jid: group.id,
+            name: group.subject || null,
+            subject: group.subject || null,
+            description: group.desc || null,
+            desc: group.desc || null,
+            participant_count: Array.isArray(group.participants) ? group.participants.length : null,
+            participants: (group.participants || []).map((member: any) => ({
+                id: member.id,
+                admin: member.admin || null,
+            })),
+            action: 'snapshot',
+            session_name: sessionName,
+        });
+    }
+}

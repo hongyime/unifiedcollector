@@ -585,7 +585,7 @@ async def test_handle_contact_event_upserts_whatsapp_user_without_lid(collector)
 
     await collector._handle_contact_event(event)
 
-    sql, *args = collector._test_conn.execute.await_args.args
+    sql, *args = collector._test_conn.execute.await_args_list[0].args
     assert "INSERT INTO whatsapp_users" in sql
     assert "collected_at = NOW()" in sql
     assert args[:5] == [
@@ -836,6 +836,18 @@ async def test_handle_group_event_upserts_group_metadata(collector):
     assert "INSERT INTO whatsapp_chats" in sql
     assert "participant_count" in sql
     assert args == ["111-222@g.us", "Group A", 42, "Planning"]
+
+
+@pytest.mark.asyncio
+async def test_handle_group_event_persists_participant_membership(collector):
+    await collector._handle_group_event({
+        "chat_jid": "111-222@g.us",
+        "participants": [{"id": "111@s.whatsapp.net", "admin": "admin"}],
+        "action": "add",
+    })
+
+    calls = collector._test_conn.execute.await_args_list
+    assert any("whatsapp_group_members" in call.args[0] for call in calls)
 
 
 @pytest.mark.asyncio

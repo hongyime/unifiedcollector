@@ -21,17 +21,9 @@ to work.
 from aiohttp import web
 
 from .constants import SOCIAL_INGEST_CLIENT_MAX_MB
-from .cookies import cookies_handler
 from .cooldown import ig_cooldown
 from .cors import handle_options
 from .discover import discover, discover_ig
-from .dm import (
-    dm_decoded_handler,
-    dm_frame_handler,
-    dm_hook_heartbeat_handler,
-    dm_probe_handler,
-    dm_sample_handler,
-)
 from .ingest import (
     browser_media_candidates,
     ingest,
@@ -109,12 +101,6 @@ def build_app():
     app.router.add_post("/social/users", users_handler)
     app.router.add_post("/social/profile", profile_handler)
     app.router.add_post("/social/seed", seed_handler)
-    app.router.add_post("/social/cookies", cookies_handler)
-    app.router.add_post("/social/dm-frame", dm_frame_handler)
-    app.router.add_post("/social/dm-sample", dm_sample_handler)
-    app.router.add_post("/social/dm-probe", dm_probe_handler)
-    app.router.add_post("/social/dm-heartbeat", dm_hook_heartbeat_handler)
-    app.router.add_post("/social/dm-decoded", dm_decoded_handler)
     app.router.add_get("/social/x-profile-target", x_profile_target_next)
     app.router.add_post("/social/x-profile-target-result", x_profile_target_result)
     app.router.add_get("/social/browser-revisit-target", browser_revisit_target)

@@ -77,7 +77,6 @@ _WRITE_LANE_PATHS = {
     "/ig/ingest",
     "/social/browser-media-candidates",
     "/social/comments",
-    "/social/cookies",
     "/social/discover",
     "/social/dm-decoded",
     "/social/dm-frame",

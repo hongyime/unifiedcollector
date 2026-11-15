@@ -46,10 +46,10 @@ class FakeChrome:
         self.strict_host: bool = True  # emulate Chrome's DNS-rebinding guard.
 
     async def _version(self, request: web.Request) -> web.Response:
-        if self.strict_host and request.headers.get("Host", "").split(":")[0] not in (
-            "localhost",
-            "127.0.0.1",
-        ):
+        if self.strict_host and request.headers.get("Host", "") not in {
+            f"localhost:{self.port}",
+            f"127.0.0.1:{self.port}",
+        }:
             return web.Response(status=500, text="Host header validation failed")
         return web.json_response(
             {
@@ -95,6 +95,15 @@ class FakeChrome:
     async def stop(self) -> None:
         if self.runner is not None:
             await self.runner.cleanup()
+
+
+async def test_reachability_probe_uses_cdp_url_port_in_host_header():
+    fake = FakeChrome(cookies=[])
+    cdp_url = await fake.start()
+    try:
+        assert await vault_mod._check_chrome_reachable(cdp_url, timeout=1)
+    finally:
+        await fake.stop()
 
 
 # ─── Cookie fixtures ────────────────────────────────────────────────────────

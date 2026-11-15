@@ -1,3 +1,7 @@
+# Recovery worktree disposition (2026-11-15)
+
+- Compared `recovery/collector-production-recovery` with `main`: the 19 out-of-main commits are already represented in `main` except a two-line `src/core/base_collector.py` difference, and the target worktree's remaining dirty source edits are stale or superseded by newer `main` behavior. Preserved the entire dirty snapshot in a branch commit and pushed it before removing only this worktree; branch retained.
+
 # Collector production recovery resumed (2026-10-23)
 
 - 2026-11-01: The recovery plan checklist has 55 verified numbered tasks. The owner accepted shared CDP as best-effort and deferred Snapchat durable-media acceptance after its bounded probes returned no proof; neither exception is represented as successful collection. Task 54/F4 remain partial/no-go solely because Beeper's local MCP endpoint requires a user-managed credential. F1/F2/F3 pass and the final full sanitized suite passed. The `.omo` plan/evidence root is intentionally Git-ignored and private; this state record is the committed shared summary.

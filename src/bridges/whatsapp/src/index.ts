@@ -23,7 +23,7 @@ import { producer } from './producer';
 import { registerMessagesHandler } from './event_handlers/messages';
 import { getHistoryProgress, registerHistoryHandler } from './event_handlers/history';
 import { registerContactsHandler } from './event_handlers/contacts';
-import { registerGroupsHandler } from './event_handlers/groups';
+import { publishGroupSnapshot, registerGroupsHandler } from './event_handlers/groups';
 import { probeNumber } from './device_intel';
 
 process.on('uncaughtException', (err) => {
@@ -1139,6 +1139,12 @@ async function connectToWhatsApp(): Promise<void> {
             // directly and publish as contacts.update so the collector can
             // seed whatsapp_lid_map without waiting for new live events.
             setTimeout(() => emitStoredLidMappings(sessionName).catch(() => {}), 5000);
+
+            setTimeout(() => {
+                publishGroupSnapshot(sock, sessionName).catch((e: Error) => {
+                    logger.warn({ err: e?.message || String(e), sessionName }, 'group snapshot failed');
+                });
+            }, 8000);
 
             if (heartbeat) clearInterval(heartbeat);
             heartbeat = setInterval(() => {

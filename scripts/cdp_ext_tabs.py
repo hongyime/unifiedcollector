@@ -15,7 +15,7 @@ KNOWN_EXTENSION_IDS = (PRIMARY_EXTENSION_ID, "nkeimhogjdpnpccoofpliimaahmaaome")
 
 
 def cdp_base() -> str:
-    port = os.getenv("UC_CHROME_CDP_PORT", "9336").strip() or "9336"
+    port = os.getenv("UC_CHROME_CDP_PORT", "9223").strip() or "9223"
     return f"http://127.0.0.1:{port}"
 
 

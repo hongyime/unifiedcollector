@@ -5,7 +5,7 @@ import urllib.request
 
 import websocket  # type: ignore
 
-CDP = os.getenv("UC_CHROME_CDP_URL", f"http://127.0.0.1:{os.getenv('UC_CHROME_CDP_PORT', '9336')}").rstrip('/')
+CDP = os.getenv("UC_CHROME_CDP_URL", f"http://127.0.0.1:{os.getenv('UC_CHROME_CDP_PORT', '9223')}").rstrip('/')
 
 tabs = json.loads(urllib.request.urlopen(f"{CDP}/json/list").read())
 opt = next(

@@ -1350,6 +1350,27 @@ def test_ingest_records_explicit_empty_media_probe(monkeypatch):
     ]
 
 
+def test_restricted_instagram_empty_probe_persists_recovery_observation(monkeypatch):
+    pool = _FakePool()
+    observations = []
+
+    async def fake_event(*_args, **_kwargs):
+        return None
+
+    async def fake_observation(_pool, source, *, account):
+        observations.append((source, account))
+
+    monkeypatch.setattr(ig_ingest, "_record_browser_ingest_event", fake_event)
+    monkeypatch.setattr(ig_ingest, "mark_recovery_observation", fake_observation)
+
+    asyncio.run(ig_ingest._ingest({"pool": pool}, "instagram", {
+        "username": "owner", "items": [], "record_empty": True,
+        "probe_reason": "restricted_following_feed_dom_observation",
+    }))
+
+    assert observations == [("instagram", "owner")]
+
+
 def test_empty_media_probe_marks_browser_content_progress():
     assert ig_ingest._browser_event_marks_source_success(
         "facebook",

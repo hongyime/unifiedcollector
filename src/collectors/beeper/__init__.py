@@ -85,6 +85,15 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _network_is_excluded(network: object) -> bool:
+    excluded = {
+        value.strip().lower()
+        for value in os.getenv("BEEPER_EXCLUDED_NETWORKS", "").split(",")
+        if value.strip()
+    }
+    return str(network or "").strip().lower() in excluded
+
+
 def _beeper_backfill_candidate_limit(batch_size: int) -> int:
     raw = os.getenv("BEEPER_BACKFILL_CANDIDATE_MESSAGES")
     if raw:
@@ -1547,8 +1556,10 @@ class BeeperCollector(BaseCollector):
         if w is None:
             return 0
         for acc in accounts:
+            if _network_is_excluded(acc.get("network")):
+                continue
             await w.upsert_account(acc)
-        return len(accounts)
+        return sum(not _network_is_excluded(acc.get("network")) for acc in accounts)
 
     async def _sync_chats(self) -> int:
         w = self.writer
@@ -1560,6 +1571,8 @@ class BeeperCollector(BaseCollector):
             page_size=_BEEPER_PAGE_SIZE,
             max_pages=max_pages,
         ):
+            if _network_is_excluded(chat.get("network")):
+                continue
             await w.upsert_chat(chat)
             count += 1
             if self._stop.is_set():
@@ -1595,6 +1608,7 @@ class BeeperCollector(BaseCollector):
                     COALESCE(s.error_count, 0) >= 3
                     AND COALESCE(s.last_error, '') LIKE '%NOT_FOUND%'
                 )
+                  AND lower(trim(COALESCE(c.network, ''))) <> ALL($2::text[])
                 ORDER BY
                     CASE WHEN c.last_message_ts >= now() - interval '7 days' THEN 0 ELSE 1 END ASC,
                     CASE
@@ -1609,6 +1623,11 @@ class BeeperCollector(BaseCollector):
                 LIMIT $1
                 """,
                 max_chats,
+                sorted({
+                    value.strip().lower()
+                    for value in os.getenv("BEEPER_EXCLUDED_NETWORKS", "").split(",")
+                    if value.strip()
+                }),
             )
 
         inserted_total = 0
@@ -1717,6 +1736,8 @@ class BeeperCollector(BaseCollector):
             except (json.JSONDecodeError, TypeError):
                 continue
             network = row["network"]
+            if _network_is_excluded(network):
+                continue
             chat_id = row["chat_id"]
             message_id = row["message_id"]
             for att in (atts or []):
