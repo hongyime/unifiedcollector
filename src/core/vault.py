@@ -623,6 +623,20 @@ def _finalize_write(tmp: Path, path: Path) -> None:
         raise
     tmp.unlink(missing_ok=True)
 
+
+def _copyfile_atomic(source: Path, path: Path) -> None:
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    tmp = Path(tmp_name)
+    try:
+        os.close(fd)
+        shutil.copyfile(source, tmp)
+        with tmp.open("rb") as handle:
+            os.fsync(handle.fileno())
+        _finalize_write(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 def _atomic_write_text(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
@@ -1213,10 +1227,10 @@ def write_atomic_artifact_from_path(
                 try:
                     src.replace(blob_path)
                 except OSError:
-                    shutil.copyfile(src, blob_path)
+                    _copyfile_atomic(src, blob_path)
                     src.unlink(missing_ok=True)
             else:
-                shutil.copyfile(src, blob_path)
+                _copyfile_atomic(src, blob_path)
             blob_written = True
 
         if blob_path.stat().st_size != size or _sha256_path(blob_path) != digest:

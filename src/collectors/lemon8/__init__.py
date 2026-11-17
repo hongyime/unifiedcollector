@@ -90,6 +90,7 @@ from src.collectors.lemon8.parse import (
 )
 from src.core.human_rate_limiter import OperationType
 from src.core.file_naming import sanitize_name
+from src.core.legacy_spider_queue import maintain_legacy_spider_lease
 from src.core.rate_limit_events import record_rate_limit_event
 from src.core.dynamic_cooldown import get_dynamic_cooldown, record_dynamic_cooldown
 from src.core.scrape_pacing import sleep_rate_limit
@@ -515,8 +516,9 @@ class Lemon8Collector(BaseCollector):
         try:
             async with self.pool.acquire() as conn:
                 result = await conn.execute(
-                    "UPDATE lemon8_spider_queue SET status = 'pending' "
-                    "WHERE status = 'processing'"
+                    "UPDATE lemon8_spider_queue SET status = 'pending', "
+                    "claim_token = NULL, claimed_at = NULL, lease_expires_at = NULL "
+                    "WHERE status = 'processing' AND lease_expires_at <= NOW()"
                 )
             count = int(result.rsplit(" ", 1)[-1]) if isinstance(result, str) else 0
             if count:
@@ -540,22 +542,33 @@ class Lemon8Collector(BaseCollector):
                 async with self.pool.acquire() as conn:
                     row = await conn.fetchrow("""
                         UPDATE lemon8_spider_queue
-                        SET status = 'processing'
+                        SET status = 'processing', claim_token = $1, claimed_at = NOW(),
+                            lease_expires_at = NOW() + INTERVAL '30 minutes'
                         WHERE id = (
                             SELECT id FROM lemon8_spider_queue
                             WHERE status = 'pending'
+                               OR (status = 'processing' AND lease_expires_at <= NOW())
                             ORDER BY priority ASC, collected_at ASC
                             LIMIT 1
+                            FOR UPDATE SKIP LOCKED
                         )
-                        RETURNING platform_user_id
-                    """)
+                        RETURNING id, platform_user_id, claim_token
+                    """, uuid4())
                 if not row: break
                 try:
-                    await self._collect_user(client, row['platform_user_id'])
+                    async with maintain_legacy_spider_lease(
+                        self.pool, "lemon8_spider_queue", row["id"], row["claim_token"],
+                    ):
+                        await self._collect_user(client, row['platform_user_id'])
                     processed += 1
                     await self.heartbeat_source_health()
                     async with self.pool.acquire() as conn:
-                        await conn.execute("UPDATE lemon8_spider_queue SET status = 'completed' WHERE platform_user_id = $1", row['platform_user_id'])
+                        await conn.execute(
+                            "UPDATE lemon8_spider_queue SET status = 'completed', claim_token = NULL, "
+                            "claimed_at = NULL, lease_expires_at = NULL "
+                            "WHERE id = $1 AND status = 'processing' AND claim_token = $2",
+                            row['id'], row['claim_token'],
+                        )
                 except Exception as e:
                     await self._record_http_status_event(
                         e,
@@ -564,7 +577,12 @@ class Lemon8Collector(BaseCollector):
                         url=USER_URL_PATTERN.format(str(row['platform_user_id']).lstrip("@")),
                     )
                     async with self.pool.acquire() as conn:
-                        await conn.execute("UPDATE lemon8_spider_queue SET status = 'failed' WHERE platform_user_id = $1", row['platform_user_id'])
+                        await conn.execute(
+                            "UPDATE lemon8_spider_queue SET status = 'failed', claim_token = NULL, "
+                            "claimed_at = NULL, lease_expires_at = NULL "
+                            "WHERE id = $1 AND status = 'processing' AND claim_token = $2",
+                            row['id'], row['claim_token'],
+                        )
 
     async def _enqueue_spider_user(
         self,

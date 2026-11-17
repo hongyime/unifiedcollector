@@ -1039,7 +1039,9 @@ async def test_reclaim_stranded_spider_queue_once(monkeypatch):
     # Both rows are now visible to the drain loop's status='pending' claim.
     assert table == {"stranded": "pending", "queued": "pending"}
     conn.execute.assert_awaited_once()
-    assert "github_spider_queue" in conn.execute.await_args.args[0]
+    sql = conn.execute.await_args.args[0]
+    assert "github_spider_queue" in sql
+    assert "lease_expires_at <= NOW()" in sql
 
     # Second call in the same process is a no-op.
     await coll._reclaim_stranded_spider_queue()

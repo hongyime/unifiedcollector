@@ -33,6 +33,7 @@ def _realtime_delivery_ledger_status(*args, **kwargs):
     return fn(*args, **kwargs)
 
 logger = logging.getLogger(__name__)
+MAX_THUMBNAIL_PIXELS = 40_000_000
 
 
 def _lookup(name: str):
@@ -292,12 +293,20 @@ async def media_thumbnail(media_id: str, _user: dict = Depends(require_role("vie
 
     try:
         from PIL import Image
-        img = Image.open(file_path)
-        img.thumbnail((300, 300))
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=80)
+    except Exception:
+        return FileResponse(str(file_path))
+
+    try:
+        with Image.open(file_path) as img:
+            if img.width * img.height > MAX_THUMBNAIL_PIXELS:
+                return dashboard_api._thumbnail_placeholder("image", "preview too large")
+            img.thumbnail((300, 300))
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=80)
         buf.seek(0)
         return StreamingResponse(buf, media_type="image/jpeg")
+    except Image.DecompressionBombError:
+        return dashboard_api._thumbnail_placeholder("image", "preview too large")
     except Exception:
         return FileResponse(str(file_path))
 

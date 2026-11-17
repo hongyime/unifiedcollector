@@ -1500,7 +1500,10 @@ async def _download_and_save(pool, session, platform, username, item, reject_sta
             ct_header = item.get("mime_type") or item.get("content_type_header")
         elif data_b64:
             try:
-                data = await asyncio.to_thread(base64.b64decode, str(data_b64), validate=True)
+                encoded = str(data_b64)
+                if len(encoded) > 4 * ((BRIDGE_MEDIA_MAX_BYTES + 2) // 3):
+                    return _reject("media_too_large", f">{BRIDGE_MEDIA_MAX_BYTES} bytes")
+                data = await asyncio.to_thread(base64.b64decode, encoded, validate=True)
             except Exception as exc:
                 return _reject("bad_uploaded_media", exc.__class__.__name__)
             ct_header = item.get("mime_type") or item.get("content_type_header")
@@ -1533,6 +1536,9 @@ async def _download_and_save(pool, session, platform, username, item, reject_sta
                         return _reject("media_too_large", f">{limit} bytes")
                     chunks.append(chunk)
                 data = b"".join(chunks)
+
+        if len(data) > BRIDGE_MEDIA_MAX_BYTES:
+            return _reject("media_too_large", f">{BRIDGE_MEDIA_MAX_BYTES} bytes")
 
         # GATE: keep only real PDF/image/video/audio above min size — drop
         # favicons, thumbnails, tracking pixels, sprite sheets, HTML error pages.

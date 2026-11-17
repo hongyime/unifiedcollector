@@ -33,6 +33,7 @@ import asyncio
 import logging
 import os
 import pickle
+import re
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -61,6 +62,8 @@ WARMUP_URL = "https://www.instagram.com/accounts/edit/?__a=1&__d=dis"
 USER_INFO_URL = "https://i.instagram.com/api/v1/users/{uid}/info/"
 
 DEFAULT_MIN_WARMUP_INTERVAL_S = 600.0  # 10 min
+_ACCOUNT_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
+_LOGIN_STATUSES = {LOGGED_IN, LOGGED_OUT, CHALLENGE_REQUIRED}
 
 
 # ---------- protocol -------------------------------------------------------
@@ -84,14 +87,18 @@ class SessionCapsule(Protocol):
 
 def default_cookie_path(account_name: str, root: str | os.PathLike = "data/instagram") -> Path:
     """Canonical pickle path for an IG account's cookies."""
+    if not _ACCOUNT_NAME_RE.fullmatch(account_name):
+        raise ValueError("account_name must be a single safe path component")
     return Path(root) / account_name / "cookies.pkl"
 
 
 def _atomic_pickle_write(path: Path, payload: Any) -> None:
     """Write pickle atomically: tmp file in same dir, then os.replace."""
     path.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(path.parent, 0o700)
     fd, tmp = tempfile.mkstemp(prefix=".cookies-", suffix=".tmp", dir=str(path.parent))
     try:
+        os.fchmod(fd, 0o600)
         with os.fdopen(fd, "wb") as f:
             pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
         os.replace(tmp, path)
@@ -188,14 +195,22 @@ class IgSession:
             return False
 
         if isinstance(data, dict) and "cookies" in data:
-            self.cookies = dict(data.get("cookies") or {})
-            self.user_agent = data.get("user_agent") or self.user_agent
-            self.login_status = data.get("login_status") or LOGGED_IN
-            self.last_warmup_at = float(data.get("last_warmup_at") or 0.0)
-            self.user_id = data.get("user_id") or self.user_id
+            try:
+                self.cookies = _cookie_dict(data["cookies"])
+                self.user_agent = _string_value(data, "user_agent", self.user_agent)
+                self.login_status = _login_status(data.get("login_status", LOGGED_IN))
+                self.last_warmup_at = _timestamp_value(data.get("last_warmup_at", 0.0))
+                self.user_id = _optional_string_value(data, "user_id", self.user_id)
+            except ValueError as e:
+                logger.warning("Cookie pickle for %s has invalid data: %s", self.account_name, e)
+                return False
         elif isinstance(data, dict):
             # legacy: bare cookie dict
-            self.cookies = dict(data)
+            try:
+                self.cookies = _cookie_dict(data)
+            except ValueError as e:
+                logger.warning("Cookie pickle for %s has invalid data: %s", self.account_name, e)
+                return False
             self.login_status = LOGGED_IN
         else:
             logger.warning("Cookie pickle for %s has unexpected shape", self.account_name)
@@ -207,12 +222,14 @@ class IgSession:
         path = self.cookie_path
         assert path is not None
         payload = {
-            "cookies": self.cookies,
+            "cookies": _cookie_dict(self.cookies),
             "user_agent": self.user_agent,
-            "login_status": self.login_status,
-            "last_warmup_at": self.last_warmup_at,
+            "login_status": _login_status(self.login_status),
+            "last_warmup_at": _timestamp_value(self.last_warmup_at),
             "user_id": self.user_id,
         }
+        _string_value(payload, "user_agent", DEFAULT_USER_AGENT)
+        _optional_string_value(payload, "user_id", None)
         await asyncio.to_thread(_atomic_pickle_write, path, payload)
 
     # ---- network helpers --------------------------------------------------
@@ -356,9 +373,51 @@ class IgSession:
 # ---------- private helpers ------------------------------------------------
 
 
+class _CookieUnpickler(pickle.Unpickler):
+    """Permit only pickle's builtin collection/scalar opcodes."""
+
+    def find_class(self, module: str, name: str) -> Any:
+        raise pickle.UnpicklingError(f"global {module}.{name} is not permitted")
+
+
 def _read_pickle(path: Path) -> Any:
     with open(path, "rb") as f:
-        return pickle.load(f)
+        return _CookieUnpickler(f).load()
+
+
+def _cookie_dict(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict) or any(
+        not isinstance(name, str) or not isinstance(cookie, str)
+        for name, cookie in value.items()
+    ):
+        raise ValueError("cookies must be a string-to-string mapping")
+    return dict(value)
+
+
+def _string_value(payload: dict[str, Any], key: str, default: str) -> str:
+    value = payload.get(key, default)
+    if not isinstance(value, str):
+        raise ValueError(f"{key} must be a string")
+    return value
+
+
+def _optional_string_value(payload: dict[str, Any], key: str, default: str | None) -> str | None:
+    value = payload.get(key, default)
+    if value is not None and not isinstance(value, str):
+        raise ValueError(f"{key} must be a string or null")
+    return value
+
+
+def _login_status(value: Any) -> str:
+    if not isinstance(value, str) or value not in _LOGIN_STATUSES:
+        raise ValueError("login_status is invalid")
+    return value
+
+
+def _timestamp_value(value: Any) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("last_warmup_at must be numeric")
+    return float(value)
 
 
 def _safe_text(resp: httpx.Response) -> str:

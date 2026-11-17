@@ -495,6 +495,63 @@ def test_write_atomic_artifact_from_path_does_not_copy_source_metadata(tmp_path,
     assert result.path.read_bytes() == b"metadata-safe"
 
 
+def test_write_atomic_artifact_from_path_removes_failed_copy_partial(tmp_path, monkeypatch):
+    root = tmp_path / "vault"
+    root.mkdir()
+    source_path = tmp_path / "interrupted.part"
+    data = b"interrupted-copy"
+    source_path.write_bytes(data)
+    blob_path = vault.blob_path_for_sha256(hashlib.sha256(data).hexdigest(), extension="bin", root=root)
+
+    def interrupted_copy(source, destination, *_args, **_kwargs):
+        Path(destination).write_bytes(Path(source).read_bytes()[:3])
+        raise OSError("simulated interrupted copy")
+
+    monkeypatch.setattr(vault.shutil, "copyfile", interrupted_copy)
+
+    result = vault.write_atomic_artifact_from_path(
+        source="website", artifact_id="video/interrupted", artifact_kind="media_blob",
+        source_path=source_path, extension="bin", root=root, delete_source=False,
+    )
+
+    assert result.ok is False
+    assert blob_path.exists() is False
+    assert not list(blob_path.parent.glob(f".{blob_path.name}.*.tmp"))
+    assert source_path.read_bytes() == data
+
+
+def test_write_atomic_artifact_from_path_removes_failed_cross_device_copy_partial(tmp_path, monkeypatch):
+    root = tmp_path / "vault"
+    root.mkdir()
+    source_path = tmp_path / "interrupted.part"
+    data = b"interrupted-cross-device-copy"
+    source_path.write_bytes(data)
+    blob_path = vault.blob_path_for_sha256(hashlib.sha256(data).hexdigest(), extension="bin", root=root)
+    real_replace = Path.replace
+
+    def cross_device_source_move(path, target):
+        if path == source_path:
+            raise OSError("simulated cross-device move")
+        return real_replace(path, target)
+
+    def interrupted_copy(source, destination, *_args, **_kwargs):
+        Path(destination).write_bytes(Path(source).read_bytes()[:3])
+        raise OSError("simulated interrupted copy")
+
+    monkeypatch.setattr(Path, "replace", cross_device_source_move)
+    monkeypatch.setattr(vault.shutil, "copyfile", interrupted_copy)
+
+    result = vault.write_atomic_artifact_from_path(
+        source="website", artifact_id="video/cross-device", artifact_kind="media_blob",
+        source_path=source_path, extension="bin", root=root, delete_source=True,
+    )
+
+    assert result.ok is False
+    assert blob_path.exists() is False
+    assert not list(blob_path.parent.glob(f".{blob_path.name}.*.tmp"))
+    assert source_path.read_bytes() == data
+
+
 def test_write_atomic_artifact_reports_db_failure_as_partial(tmp_path):
     root = tmp_path / "vault"
     root.mkdir()

@@ -1,5 +1,6 @@
 """SSRF/size guards for extension-supplied media downloads."""
 import asyncio
+import base64
 import hashlib
 from types import SimpleNamespace
 
@@ -271,3 +272,28 @@ def test_download_rejects_oversized_body_and_writes_nothing(monkeypatch, tmp_pat
     assert stats["media_too_large"] == 1
     assert written == []
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("field", ("data_bytes", "data_b64"))
+def test_download_rejects_oversized_direct_media_before_write(monkeypatch, tmp_path, field):
+    _allowlist(monkeypatch, "*.cdninstagram.com")
+    _allow_writes(monkeypatch, tmp_path)
+    monkeypatch.setattr(ig_ingest, "BRIDGE_MEDIA_MAX_BYTES", 4096)
+    written = []
+    monkeypatch.setattr(
+        ig_ingest,
+        "_write_extension_media_artifacts_sync",
+        lambda **kwargs: written.append(kwargs) or (_ for _ in ()).throw(AssertionError("must not persist")),
+    )
+    data = b"x" * 5000
+    item = {"content_id": "abc123", "url": ALLOWED_URL, "mime_type": "image/jpeg"}
+    item[field] = data if field == "data_bytes" else base64.b64encode(data).decode("ascii")
+
+    stats = {}
+    saved = asyncio.run(
+        ig_ingest._download_and_save(_FakePool(), _RecordingSession(), "instagram", "alice", item, stats)
+    )
+
+    assert saved is False
+    assert stats["media_too_large"] == 1
+    assert written == []

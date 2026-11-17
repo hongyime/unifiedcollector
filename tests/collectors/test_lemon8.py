@@ -283,9 +283,9 @@ async def test_process_spider_queue_respects_cycle_limit(monkeypatch, collector)
     conn = collector._test_conn  # type: ignore[attr-defined]
     conn.fetchrow = AsyncMock(
         side_effect=[
-            {"platform_user_id": "alice"},
-            {"platform_user_id": "bob"},
-            {"platform_user_id": "carol"},
+            {"id": "a", "platform_user_id": "alice", "claim_token": "token-a"},
+            {"id": "b", "platform_user_id": "bob", "claim_token": "token-b"},
+            {"id": "c", "platform_user_id": "carol", "claim_token": "token-c"},
         ]
     )
 
@@ -303,6 +303,12 @@ async def test_process_spider_queue_respects_cycle_limit(monkeypatch, collector)
 
     assert collector._collect_user.await_count == 2
     assert conn.fetchrow.await_count == 2
+    claim_sql = conn.fetchrow.await_args_list[0].args[0]
+    assert "FOR UPDATE SKIP LOCKED" in claim_sql
+    assert "claim_token = $1" in claim_sql
+    completion_calls = [call for call in conn.execute.await_args_list if "status = 'completed'" in call.args[0]]
+    assert len(completion_calls) == 2
+    assert all("claim_token = $2" in call.args[0] for call in completion_calls)
 
 
 @pytest.mark.asyncio
@@ -933,7 +939,9 @@ async def test_reclaim_stranded_spider_queue_once(collector):
 
     assert table == {"stranded": "pending", "queued": "pending"}
     conn.execute.assert_awaited_once()
-    assert "lemon8_spider_queue" in conn.execute.await_args.args[0]
+    sql = conn.execute.await_args.args[0]
+    assert "lemon8_spider_queue" in sql
+    assert "lease_expires_at <= NOW()" in sql
 
     await collector._reclaim_stranded_spider_queue()
     conn.execute.assert_awaited_once()

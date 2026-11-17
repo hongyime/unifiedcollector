@@ -23,6 +23,8 @@ Coverage:
 from __future__ import annotations
 
 import time
+import os
+import pickle
 from pathlib import Path
 
 import httpx
@@ -77,6 +79,12 @@ def test_default_cookie_path():
     assert p == Path("data/instagram/alice/cookies.pkl")
 
 
+@pytest.mark.parametrize("account_name", ["../escape", "/tmp/escape", ".", "bad/name"])
+def test_default_cookie_path_rejects_path_escape(account_name, tmp_path):
+    with pytest.raises(ValueError, match="safe path component"):
+        default_cookie_path(account_name, tmp_path)
+
+
 # ---------- persistence ----------------------------------------------------
 
 
@@ -91,6 +99,8 @@ async def test_save_and_load_roundtrip(tmp_path):
 
     await s.save()
     assert p.exists(), "atomic save should produce the file"
+    assert p.stat().st_mode & 0o777 == 0o600
+    assert p.parent.stat().st_mode & 0o777 == 0o700
 
     s2 = IgSession(account_name="alice", cookie_path=p)
     ok = await s2.load()
@@ -110,16 +120,37 @@ async def test_load_missing_file_returns_false(tmp_path):
 
 @pytest.mark.asyncio
 async def test_load_legacy_bare_dict(tmp_path):
-    import pickle as _pkl
-
     p = tmp_path / "legacy.pkl"
-    p.write_bytes(_pkl.dumps({"sessionid": "old", "csrftoken": "old2"}))
+    p.write_bytes(pickle.dumps({"sessionid": "old", "csrftoken": "old2"}))
 
     s = IgSession(account_name="legacy", cookie_path=p)
     ok = await s.load()
     assert ok is True
     assert s.cookies == {"sessionid": "old", "csrftoken": "old2"}
     assert s.login_status == LOGGED_IN
+
+
+@pytest.mark.asyncio
+async def test_load_rejects_pickle_global_without_executing_it(tmp_path):
+    marker = tmp_path / "should-not-exist"
+
+    class _Malicious:
+        def __reduce__(self):
+            return (os.system, (f"touch {marker}",))
+
+    p = tmp_path / "malicious.pkl"
+    p.write_bytes(pickle.dumps(_Malicious()))
+
+    assert await IgSession(account_name="alice", cookie_path=p).load() is False
+    assert not marker.exists()
+
+
+@pytest.mark.asyncio
+async def test_load_rejects_non_string_cookie_values(tmp_path):
+    p = tmp_path / "invalid.pkl"
+    p.write_bytes(pickle.dumps({"sessionid": 1}))
+
+    assert await IgSession(account_name="alice", cookie_path=p).load() is False
 
 
 @pytest.mark.asyncio

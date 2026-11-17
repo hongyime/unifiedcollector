@@ -602,13 +602,25 @@
   var _cachedIngestBase = null;
   var _cachedControlBase = null;
   var _cacheListenerAttached = false;
+  function safeEndpointBase(value, fallback) {
+    if (typeof value !== "string" || !value.trim()) return fallback;
+    try {
+      const url = new URL(value.trim());
+      const host = url.hostname.toLowerCase();
+      const isLoopback = host === "127.0.0.1" || host === "localhost" || host === "[::1]" || host === "::1";
+      if (url.protocol !== "https:" && !(url.protocol === "http:" && isLoopback) || url.username || url.password || url.search || url.hash) return fallback;
+      return url.toString().replace(/\/$/, "");
+    } catch (_) {
+      return fallback;
+    }
+  }
   function _attachCacheListener() {
     if (_cacheListenerAttached) return;
     try {
       chrome.storage.onChanged.addListener((changes, area) => {
         if (area !== "local") return;
-        if (changes.ingestBase) _cachedIngestBase = changes.ingestBase.newValue || DEFAULT_INGEST;
-        if (changes.controlBase) _cachedControlBase = changes.controlBase.newValue || DEFAULT_CONTROL;
+        if (changes.ingestBase) _cachedIngestBase = safeEndpointBase(changes.ingestBase.newValue, DEFAULT_INGEST);
+        if (changes.controlBase) _cachedControlBase = safeEndpointBase(changes.controlBase.newValue, DEFAULT_CONTROL);
       });
       _cacheListenerAttached = true;
     } catch (e) {

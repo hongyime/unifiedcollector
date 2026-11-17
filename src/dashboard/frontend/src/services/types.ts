@@ -368,6 +368,11 @@ export interface SourceCollectionMatrix {
     issues: BrowserExtensionIssue[];
   } | null;
   errors?: Array<{ section: string; error: string }>;
+  cache?: {
+    status: "fresh" | "rebuilt" | "refreshing" | "stale" | "unavailable" | string;
+    age_seconds?: number;
+    refresh?: string;
+  };
 }
 
 export interface SourceRecoveryProfile {

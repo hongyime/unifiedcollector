@@ -7,6 +7,7 @@ import { LoadingSpinner } from "../../components/ui/LoadingSpinner";
 import { ErrorState } from "../../components/ui/ErrorState";
 import { api } from "../../services/api";
 import { formatBytes, formatDuration, formatNumber, relativeTime } from "../../utils/formatters";
+import { sourceMatrixCacheNotice } from "./sourceMatrixCache";
 import { Archive, Database, HardDrive, Activity, AlertCircle, Clock3, ShieldAlert, Puzzle, Send } from "lucide-react";
 import type { ColumnDef } from "@tanstack/react-table";
 import type {
@@ -530,6 +531,7 @@ export function DashboardPage() {
   const currentHourRows = hourly?.filter((r) => r.hour === newestHour) ?? [];
   const currentSummary = sourceMatrix?.summary?.current_hour;
   const previousSummary = sourceMatrix?.summary?.last_complete_hour;
+  const sourceMatrixNotice = sourceMatrixCacheNotice(sourceMatrix?.cache);
   const currentRows = currentSummary?.records ?? currentHourRows.reduce((s, r) => s + r.records, 0);
   const currentMessages = currentSummary?.messages ?? currentHourRows.reduce((s, r) => s + r.messages, 0);
   const currentFiles = currentSummary?.media_items ?? currentHourRows.reduce((s, r) => s + r.media_items, 0);
@@ -1019,6 +1021,14 @@ export function DashboardPage() {
             <p className="text-xs text-text-muted mt-1">
               Current hour started {formatClock(sourceMatrix?.current_hour_started_at)}; previous hour is the last full 60-minute window.
             </p>
+            {sourceMatrixNotice && (
+              <p className="text-xs text-warning mt-1" role="status">
+                {sourceMatrixNotice}
+                {sourceMatrix?.cache?.age_seconds != null
+                  ? ` · ${formatDuration(sourceMatrix.cache.age_seconds)} old`
+                  : ""}
+              </p>
+            )}
           </div>
         </div>
         <DataTable data={sourceMatrix?.sources ?? []} columns={sourceMatrixColumns} />

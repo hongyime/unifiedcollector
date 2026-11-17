@@ -92,8 +92,18 @@ def test_rotator_scrape_config_uses_the_dashboard_control_plane():
     source = (ROOT / "extension/src/background.ts").read_text(encoding="utf-8")
 
     assert 'const control = await controlBase();' in source
-    assert 'fetch(control + "/social/scrape-config"' in source
+    assert 'fetch(control + "/social/scrape-config", { signal: ctrl.signal })' in source
     assert 'platformScrapeDisabled(platform, base)' not in source
+
+
+def test_extension_endpoints_reject_remote_http_before_sending_the_bridge_secret():
+    source = (ROOT / "extension/src/shared/ingest_client.ts").read_text(encoding="utf-8")
+
+    assert 'export function safeEndpointBase(value: unknown, fallback: string): string' in source
+    assert 'url.protocol !== "https:" && !(url.protocol === "http:" && isLoopback)' in source
+    assert 'host === "127.0.0.1" || host === "localhost"' in source
+    assert 'safeEndpointBase(ingestBase, DEFAULT_INGEST)' in source
+    assert 'safeEndpointBase(controlBase, DEFAULT_CONTROL)' in source
 
 
 def test_browser_pacing_uses_control_plane_source_rest_windows():

@@ -6,6 +6,7 @@ import os
 import random
 import re
 import time
+from uuid import uuid4
 from html import unescape
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
@@ -20,6 +21,7 @@ from src.collectors.strava.parse import (
 )
 from src.core.profile_photo_tracker import ProfilePhotoTracker
 from src.core.file_naming import sanitize_name
+from src.core.legacy_spider_queue import maintain_legacy_spider_lease
 from src.core.proximity import refresh_account_proximity_cache
 from src.core.raw_archive import report_raw_archive_result
 from src.core.rate_limit_events import record_rate_limit_event
@@ -1110,8 +1112,9 @@ class StravaCollector(BaseCollector):
         try:
             async with self.pool.acquire() as conn:
                 result = await conn.execute(
-                    "UPDATE strava_spider_queue SET status = 'pending' "
-                    "WHERE status = 'processing'"
+                    "UPDATE strava_spider_queue SET status = 'pending', "
+                    "claim_token = NULL, claimed_at = NULL, lease_expires_at = NULL "
+                    "WHERE status = 'processing' AND lease_expires_at <= NOW()"
                 )
             count = int(result.rsplit(" ", 1)[-1]) if isinstance(result, str) else 0
             if count:
@@ -1144,7 +1147,8 @@ class StravaCollector(BaseCollector):
             async with self.pool.acquire() as conn:
                 row = await conn.fetchrow("""
                     UPDATE strava_spider_queue
-                    SET status = 'processing'
+                    SET status = 'processing', claim_token = $1, claimed_at = NOW(),
+                        lease_expires_at = NOW() + INTERVAL '30 minutes'
                     WHERE id = (
                         SELECT q.id
                         FROM strava_spider_queue q
@@ -1154,7 +1158,8 @@ class StravaCollector(BaseCollector):
                             WHERE ap.platform = 'strava'
                               AND ap.account_id = q.platform_athlete_id::text
                         ) prox ON TRUE
-                        WHERE q.status = 'pending'
+                        WHERE (q.status = 'pending'
+                               OR (q.status = 'processing' AND q.lease_expires_at <= NOW()))
                         ORDER BY
                             CASE
                                 WHEN prox.proximity_tier IN (1, 2) THEN 2
@@ -1164,21 +1169,35 @@ class StravaCollector(BaseCollector):
                             q.priority ASC,
                             q.collected_at ASC
                         LIMIT 1
+                        FOR UPDATE SKIP LOCKED
                     )
-                    RETURNING platform_athlete_id
-                """)
+                    RETURNING id, platform_athlete_id, claim_token
+                """, uuid4())
             if not row: break
             try:
-                if self._use_api: await self._collect_athlete(str(row['platform_athlete_id']))
-                elif self._use_web:
-                    await self._collect_athlete_web(str(row['platform_athlete_id']))
-                    await self._backfill_athlete_history(str(row['platform_athlete_id']))
+                async with maintain_legacy_spider_lease(
+                    self.pool, "strava_spider_queue", row["id"], row["claim_token"],
+                ):
+                    if self._use_api: await self._collect_athlete(str(row['platform_athlete_id']))
+                    elif self._use_web:
+                        await self._collect_athlete_web(str(row['platform_athlete_id']))
+                        await self._backfill_athlete_history(str(row['platform_athlete_id']))
                 async with self.pool.acquire() as conn:
-                    await conn.execute("UPDATE strava_spider_queue SET status = 'completed' WHERE platform_athlete_id = $1", row['platform_athlete_id'])
+                    await conn.execute(
+                        "UPDATE strava_spider_queue SET status = 'completed', claim_token = NULL, "
+                        "claimed_at = NULL, lease_expires_at = NULL "
+                        "WHERE id = $1 AND status = 'processing' AND claim_token = $2",
+                        row['id'], row['claim_token'],
+                    )
                 processed += 1
             except Exception:
                 async with self.pool.acquire() as conn:
-                    await conn.execute("UPDATE strava_spider_queue SET status = 'failed' WHERE platform_athlete_id = $1", row['platform_athlete_id'])
+                    await conn.execute(
+                        "UPDATE strava_spider_queue SET status = 'failed', claim_token = NULL, "
+                        "claimed_at = NULL, lease_expires_at = NULL "
+                        "WHERE id = $1 AND status = 'processing' AND claim_token = $2",
+                        row['id'], row['claim_token'],
+                    )
                 processed += 1
         if processed > 0:
             logger.info("strava spider: processed %d athletes this cycle (%d remaining)",

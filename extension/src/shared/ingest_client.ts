@@ -24,13 +24,29 @@ let _cachedIngestBase: string | null = null;
 let _cachedControlBase: string | null = null;
 let _cacheListenerAttached = false;
 
+export function safeEndpointBase(value: unknown, fallback: string): string {
+  if (typeof value !== "string" || !value.trim()) return fallback;
+  try {
+    const url = new URL(value.trim());
+    const host = url.hostname.toLowerCase();
+    const isLoopback = host === "127.0.0.1" || host === "localhost" || host === "[::1]" || host === "::1";
+    if (
+      (url.protocol !== "https:" && !(url.protocol === "http:" && isLoopback)) ||
+      url.username || url.password || url.search || url.hash
+    ) return fallback;
+    return url.toString().replace(/\/$/, "");
+  } catch (_) {
+    return fallback;
+  }
+}
+
 function _attachCacheListener(): void {
   if (_cacheListenerAttached) return;
   try {
     chrome.storage.onChanged.addListener((changes: Record<string, { newValue?: string }>, area: string) => {
       if (area !== "local") return;
-      if (changes.ingestBase) _cachedIngestBase = changes.ingestBase.newValue || DEFAULT_INGEST;
-      if (changes.controlBase) _cachedControlBase = changes.controlBase.newValue || DEFAULT_CONTROL;
+      if (changes.ingestBase) _cachedIngestBase = safeEndpointBase(changes.ingestBase.newValue, DEFAULT_INGEST);
+      if (changes.controlBase) _cachedControlBase = safeEndpointBase(changes.controlBase.newValue, DEFAULT_CONTROL);
     });
     _cacheListenerAttached = true;
   } catch (e) { /* addListener may be unavailable in some contexts */ }
@@ -42,7 +58,7 @@ export async function ingestBase(): Promise<string> {
   if (_cachedIngestBase) return _cachedIngestBase;
   try {
     const { ingestBase } = await chrome.storage.local.get("ingestBase");
-    _cachedIngestBase = ingestBase || DEFAULT_INGEST;
+    _cachedIngestBase = safeEndpointBase(ingestBase, DEFAULT_INGEST);
   } catch (e) {
     _cachedIngestBase = DEFAULT_INGEST;
   }
@@ -53,7 +69,7 @@ export async function controlBase(): Promise<string> {
   if (_cachedControlBase) return _cachedControlBase;
   try {
     const { controlBase } = await chrome.storage.local.get("controlBase");
-    _cachedControlBase = controlBase || DEFAULT_CONTROL;
+    _cachedControlBase = safeEndpointBase(controlBase, DEFAULT_CONTROL);
   } catch (e) {
     _cachedControlBase = DEFAULT_CONTROL;
   }

@@ -94,7 +94,7 @@ import time
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from uuid import UUID
+from uuid import UUID, uuid4
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import quote, urlparse
@@ -112,6 +112,7 @@ from src.collectors.github.parse import (
 )
 from src.core.dedupe_hash import sha256_bytes as _sha256_bytes
 from src.core.file_naming import sanitize_name as sanitize_name
+from src.core.legacy_spider_queue import maintain_legacy_spider_lease
 from src.core.proximity import refresh_account_proximity_cache
 from src.core.profile_photo_tracker import ProfilePhotoTracker
 from src.core.spider_discover import (
@@ -1603,8 +1604,9 @@ class GithubCollector(BaseCollector):
         try:
             async with self.pool.acquire() as conn:
                 result = await conn.execute(
-                    "UPDATE github_spider_queue SET status = 'pending' "
-                    "WHERE status = 'processing'"
+                    "UPDATE github_spider_queue SET status = 'pending', "
+                    "claim_token = NULL, claimed_at = NULL, lease_expires_at = NULL "
+                    "WHERE status = 'processing' AND lease_expires_at <= NOW()"
                 )
             count = int(result.rsplit(" ", 1)[-1]) if isinstance(result, str) else 0
             if count:
@@ -1644,7 +1646,8 @@ class GithubCollector(BaseCollector):
                     row = await conn.fetchrow(
                         """
                         UPDATE github_spider_queue
-                        SET status = 'processing'
+                        SET status = 'processing', claim_token = $2, claimed_at = NOW(),
+                            lease_expires_at = NOW() + INTERVAL '30 minutes'
                         WHERE id = (
                             SELECT q.id
                             FROM github_spider_queue q
@@ -1655,7 +1658,9 @@ class GithubCollector(BaseCollector):
                                   AND q.target_type = 'user'
                                   AND ap.account_id = lower(q.target_identifier)
                             ) prox ON TRUE
-                            WHERE q.status = 'pending' AND q.priority <= $1
+                            WHERE (q.status = 'pending'
+                                   OR (q.status = 'processing' AND q.lease_expires_at <= NOW()))
+                              AND q.priority <= $1
                             ORDER BY
                                 CASE
                                     WHEN prox.proximity_tier IN (1, 2) THEN 2
@@ -1667,9 +1672,10 @@ class GithubCollector(BaseCollector):
                             FOR UPDATE SKIP LOCKED
                             LIMIT 1
                         )
-                        RETURNING id, target_type, target_identifier, priority
+                        RETURNING id, target_type, target_identifier, priority, claim_token
                         """,
                         self._spider_depth,
+                        uuid4(),
                     )
                 if not row:
                     logger.info(
@@ -1689,16 +1695,21 @@ class GithubCollector(BaseCollector):
                     slot, batch_limit,
                 )
                 try:
-                    if ttype == "user":
-                        await self._collect_user(client, tid)
-                        if depth < self._spider_depth:
-                            await self._enqueue_neighbors(client, tid, depth + 1)
-                    else:
-                        await self._collect_repo(client, tid)
+                    async with maintain_legacy_spider_lease(
+                        self.pool, "github_spider_queue", qid, row["claim_token"],
+                    ):
+                        if ttype == "user":
+                            await self._collect_user(client, tid)
+                            if depth < self._spider_depth:
+                                await self._enqueue_neighbors(client, tid, depth + 1)
+                        else:
+                            await self._collect_repo(client, tid)
                     async with self.pool.acquire() as conn:
                         await conn.execute(
-                            "UPDATE github_spider_queue SET status='done' WHERE id=$1",
-                            qid,
+                            "UPDATE github_spider_queue SET status='done', claim_token=NULL, "
+                            "claimed_at=NULL, lease_expires_at=NULL "
+                            "WHERE id = $1 AND status = 'processing' AND claim_token = $2",
+                            qid, row["claim_token"],
                         )
                 except Exception as e:
                     # GitHub returns 403 (rate limit), 404/410 (gone), 409 (empty
@@ -1720,8 +1731,10 @@ class GithubCollector(BaseCollector):
                         )
                     async with self.pool.acquire() as conn:
                         await conn.execute(
-                            "UPDATE github_spider_queue SET status='failed' WHERE id=$1",
-                            qid,
+                            "UPDATE github_spider_queue SET status='failed', claim_token=NULL, "
+                            "claimed_at=NULL, lease_expires_at=NULL "
+                            "WHERE id = $1 AND status = 'processing' AND claim_token = $2",
+                            qid, row["claim_token"],
                         )
                 await asyncio.sleep(self._spider_user_delay)
 

@@ -65,3 +65,36 @@ async def test_media_thumbnail_returns_jpeg_bytes_from_a_synthetic_local_image(m
     assert response.status_code == 200 and response.media_type == "image/jpeg"
     body = b"".join([chunk async for chunk in response.body_iterator])
     assert body.startswith(b"\xff\xd8")
+
+
+@pytest.mark.asyncio
+async def test_media_thumbnail_uses_placeholder_when_pixel_limit_is_exceeded(monkeypatch, tmp_path):
+    path = tmp_path / "fixture.png"
+    Image.new("RGB", (8, 8), (15, 30, 45)).save(path)
+    conn = SimpleNamespace(fetchrow=AsyncMock(return_value={"file_path": str(path), "content_type": "photo"}))
+    monkeypatch.setattr(media, "get_pool", AsyncMock(return_value=Pool(conn)))
+    monkeypatch.setattr(api, "_resolve_media_path", lambda value: path)
+    monkeypatch.setattr(media, "MAX_THUMBNAIL_PIXELS", 1)
+
+    response = await media.media_thumbnail("00000000-0000-4000-8000-000000000001", _user={})
+
+    assert response.status_code == 200
+    assert response.media_type == "image/svg+xml"
+
+
+@pytest.mark.asyncio
+async def test_media_thumbnail_uses_placeholder_for_decoder_pixel_bomb(monkeypatch, tmp_path):
+    path = tmp_path / "fixture.png"
+    Image.new("RGB", (8, 8), (15, 30, 45)).save(path)
+    conn = SimpleNamespace(fetchrow=AsyncMock(return_value={"file_path": str(path), "content_type": "photo"}))
+    monkeypatch.setattr(media, "get_pool", AsyncMock(return_value=Pool(conn)))
+    monkeypatch.setattr(api, "_resolve_media_path", lambda value: path)
+
+    def pixel_bomb(_):
+        raise Image.DecompressionBombError("fixture")
+
+    monkeypatch.setattr(Image, "open", pixel_bomb)
+    response = await media.media_thumbnail("00000000-0000-4000-8000-000000000001", _user={})
+
+    assert response.status_code == 200
+    assert response.media_type == "image/svg+xml"

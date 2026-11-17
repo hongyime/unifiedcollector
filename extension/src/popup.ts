@@ -4,7 +4,7 @@
 // initial rollout per docs/plans/extension-bundler.md step 15.
 
 import { clearLog, readLog } from "./shared/log.js";
-import { DEFAULT_INGEST, ingestBase } from "./shared/ingest_client.js";
+import { DEFAULT_INGEST, ingestBase, safeEndpointBase } from "./shared/ingest_client.js";
 
 
 const $ = (id) => document.getElementById(id);
@@ -89,7 +89,7 @@ async function load() {
 }
 
 $("save").addEventListener("click", async () => {
-  const ingestBase = $("ingest").value.trim() || DEFAULT_INGEST;
+  const ingestBase = safeEndpointBase($("ingest").value, DEFAULT_INGEST);
   const uc_bridge_secret = $("bridgeSecret").value.trim();
   await chrome.storage.local.set({ ingestBase, uc_bridge_secret });
   refresh();

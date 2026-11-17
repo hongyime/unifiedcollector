@@ -23,13 +23,25 @@
   var _cachedIngestBase = null;
   var _cachedControlBase = null;
   var _cacheListenerAttached = false;
+  function safeEndpointBase(value, fallback) {
+    if (typeof value !== "string" || !value.trim()) return fallback;
+    try {
+      const url = new URL(value.trim());
+      const host = url.hostname.toLowerCase();
+      const isLoopback = host === "127.0.0.1" || host === "localhost" || host === "[::1]" || host === "::1";
+      if (url.protocol !== "https:" && !(url.protocol === "http:" && isLoopback) || url.username || url.password || url.search || url.hash) return fallback;
+      return url.toString().replace(/\/$/, "");
+    } catch (_) {
+      return fallback;
+    }
+  }
   function _attachCacheListener() {
     if (_cacheListenerAttached) return;
     try {
       chrome.storage.onChanged.addListener((changes, area) => {
         if (area !== "local") return;
-        if (changes.ingestBase) _cachedIngestBase = changes.ingestBase.newValue || DEFAULT_INGEST;
-        if (changes.controlBase) _cachedControlBase = changes.controlBase.newValue || DEFAULT_CONTROL;
+        if (changes.ingestBase) _cachedIngestBase = safeEndpointBase(changes.ingestBase.newValue, DEFAULT_INGEST);
+        if (changes.controlBase) _cachedControlBase = safeEndpointBase(changes.controlBase.newValue, DEFAULT_CONTROL);
       });
       _cacheListenerAttached = true;
     } catch (e) {
@@ -40,7 +52,7 @@
     if (_cachedIngestBase) return _cachedIngestBase;
     try {
       const { ingestBase: ingestBase2 } = await chrome.storage.local.get("ingestBase");
-      _cachedIngestBase = ingestBase2 || DEFAULT_INGEST;
+      _cachedIngestBase = safeEndpointBase(ingestBase2, DEFAULT_INGEST);
     } catch (e) {
       _cachedIngestBase = DEFAULT_INGEST;
     }
@@ -117,7 +129,7 @@
     await refresh();
   }
   $("save").addEventListener("click", async () => {
-    const ingestBase2 = $("ingest").value.trim() || DEFAULT_INGEST;
+    const ingestBase2 = safeEndpointBase($("ingest").value, DEFAULT_INGEST);
     const uc_bridge_secret = $("bridgeSecret").value.trim();
     await chrome.storage.local.set({ ingestBase: ingestBase2, uc_bridge_secret });
     refresh();

@@ -306,7 +306,7 @@ async function refreshScrapeConfig() {
     let r;
     try {
       const control = await controlBase();
-      r = await fetch(control + "/social/scrape-config", { signal: ctrl.signal, headers: await bridgeHeaders() });
+      r = await fetch(control + "/social/scrape-config", { signal: ctrl.signal });
     } finally {
       clearTimeout(timer);
     }

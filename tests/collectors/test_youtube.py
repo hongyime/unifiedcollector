@@ -1942,7 +1942,9 @@ async def test_reclaim_stranded_spider_queue_once(monkeypatch):
 
     assert table == {"stranded": "pending", "queued": "pending"}
     conn.execute.assert_awaited_once()
-    assert "youtube_spider_queue" in conn.execute.await_args.args[0]
+    sql = conn.execute.await_args.args[0]
+    assert "youtube_spider_queue" in sql
+    assert "lease_expires_at <= NOW()" in sql
 
     await coll._reclaim_stranded_spider_queue()
     conn.execute.assert_awaited_once()

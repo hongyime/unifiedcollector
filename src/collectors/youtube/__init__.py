@@ -59,6 +59,7 @@ import subprocess
 import shutil
 import tempfile
 import time
+from uuid import uuid4
 from pathlib import Path
 from datetime import date, datetime, timedelta, timezone
 from urllib.parse import urlparse
@@ -74,6 +75,7 @@ from src.collectors.youtube.parse import (
 )
 from src.core.discovered_links import persist_discovered_links
 from src.core.link_extractor import extract_all_links
+from src.core.legacy_spider_queue import maintain_legacy_spider_lease
 from src.core.file_naming import sanitize_name
 from src.core.vault import VAULT_ROOT, write_atomic_artifact, write_atomic_artifact_from_path
 from src.core.subprocess_downloader import check_tool
@@ -105,6 +107,62 @@ _YOUTUBE_PROGRESSIVE_FORMAT = (
     "best[ext=webm][vcodec!=none][acodec!=none]/"
     "best[vcodec!=none][acodec!=none]/best"
 )
+
+
+def _write_private_oauth_json(path: Path, content: str) -> None:
+    """Atomically persist OAuth material with owner-only permissions."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_name, path)
+    except Exception:
+        try:
+            os.unlink(temporary_name)
+        except OSError:
+            pass
+        raise
+
+
+def _load_legacy_oauth_pickle(path: Path):
+    """Load only the concrete classes emitted by google Credentials pickles."""
+    import io
+    import pickle
+    from datetime import datetime as _datetime, timedelta as _timedelta, timezone as _timezone
+    from google.oauth2.credentials import Credentials
+
+    allowed = {
+        ("google.oauth2.credentials", "Credentials"): Credentials,
+        ("datetime", "datetime"): _datetime,
+        ("datetime", "timedelta"): _timedelta,
+        ("datetime", "timezone"): _timezone,
+    }
+    regional_module = "google.auth._regional_access_boundary_utils"
+    regional_classes = {
+        "_RegionalAccessBoundaryData",
+        "_RegionalAccessBoundaryManager",
+        "_RegionalAccessBoundaryRefreshManager",
+    }
+
+    class _SafeUnpickler(pickle.Unpickler):
+        def find_class(self, module, name):
+            if module == regional_module and name in regional_classes:
+                from importlib import import_module
+
+                return getattr(import_module(regional_module), name)
+            try:
+                return allowed[module, name]
+            except KeyError as exc:
+                raise pickle.UnpicklingError(
+                    f"Refusing to load {module}.{name} from legacy pickle"
+                ) from exc
+
+    with open(path, "rb") as handle:
+        return _SafeUnpickler(io.BytesIO(handle.read())).load()
 
 
 def _youtube_extractor_args(*options: str) -> list[str]:
@@ -359,25 +417,9 @@ class YoutubeCollector(BaseCollector):
                 self._oauth_pickle, json_path,
             )
             try:
-                # Restricted unpickler — only the google credential class is
-                # whitelisted. Anything else raises and the file is quarantined.
-                import pickle as _pickle
-                import io as _io
-
-                class _SafeUnpickler(_pickle.Unpickler):
-                    def find_class(self, module, name):
-                        if module == "google.oauth2.credentials" and name == "Credentials":
-                            from google.oauth2.credentials import Credentials as _C
-                            return _C
-                        raise _pickle.UnpicklingError(
-                            f"Refusing to load {module}.{name} from legacy pickle"
-                        )
-
-                with open(self._oauth_pickle, "rb") as f:
-                    creds = _SafeUnpickler(_io.BytesIO(f.read())).load()
+                creds = _load_legacy_oauth_pickle(self._oauth_pickle)
                 # Persist as JSON.
-                with open(json_path, "w", encoding="utf-8") as f:
-                    f.write(creds.to_json())
+                _write_private_oauth_json(json_path, creds.to_json())
                 # Quarantine the pickle so it can't be re-loaded later.
                 quarantine = self._oauth_pickle.with_suffix(".pickle.migrated")
                 try:
@@ -396,8 +438,7 @@ class YoutubeCollector(BaseCollector):
             from google.auth.transport.requests import Request
             if getattr(creds, "expired", False) and getattr(creds, "refresh_token", None):
                 creds.refresh(Request())
-                with open(json_path, "w", encoding="utf-8") as f:
-                    f.write(creds.to_json())
+                _write_private_oauth_json(json_path, creds.to_json())
                 logger.info("YouTube OAuth token refreshed")
         except Exception as e:
             logger.warning("YouTube OAuth refresh failed: %s", e)
@@ -500,8 +541,9 @@ class YoutubeCollector(BaseCollector):
         try:
             async with self.pool.acquire() as conn:
                 result = await conn.execute(
-                    "UPDATE youtube_spider_queue SET status = 'pending' "
-                    "WHERE status = 'processing'"
+                    "UPDATE youtube_spider_queue SET status = 'pending', "
+                    "claim_token = NULL, claimed_at = NULL, lease_expires_at = NULL "
+                    "WHERE status = 'processing' AND lease_expires_at <= NOW()"
                 )
             count = int(result.rsplit(" ", 1)[-1]) if isinstance(result, str) else 0
             if count:
@@ -521,38 +563,45 @@ class YoutubeCollector(BaseCollector):
             async with self.pool.acquire() as conn:
                 row = await conn.fetchrow("""
                     UPDATE youtube_spider_queue
-                    SET status = 'processing'
+                    SET status = 'processing', claim_token = $1, claimed_at = NOW(),
+                        lease_expires_at = NOW() + INTERVAL '30 minutes'
                     WHERE id = (
                         SELECT id FROM youtube_spider_queue
                         WHERE status = 'pending'
+                           OR (status = 'processing' AND lease_expires_at <= NOW())
                         ORDER BY priority ASC, collected_at ASC
                         LIMIT 1
                         FOR UPDATE SKIP LOCKED
                     )
-                    RETURNING platform_channel_id
-                """)
+                    RETURNING id, platform_channel_id, claim_token
+                """, uuid4())
             if not row: break
             processed += 1
             try:
-                await self._collect_channel(row['platform_channel_id'])
+                async with maintain_legacy_spider_lease(
+                    self.pool, "youtube_spider_queue", row["id"], row["claim_token"],
+                ):
+                    await self._collect_channel(row['platform_channel_id'])
                 async with self.pool.acquire() as conn:
                     await conn.execute(
                         """
                         UPDATE youtube_spider_queue
-                        SET status = 'completed', collected_at = NOW()
-                        WHERE platform_channel_id = $1
+                        SET status = 'completed', collected_at = NOW(),
+                            claim_token = NULL, claimed_at = NULL, lease_expires_at = NULL
+                        WHERE id = $1 AND status = 'processing' AND claim_token = $2
                         """,
-                        row['platform_channel_id'],
+                        row['id'], row['claim_token'],
                     )
             except Exception as exc:
                 async with self.pool.acquire() as conn:
                     await conn.execute(
                         """
                         UPDATE youtube_spider_queue
-                        SET status = 'failed', collected_at = NOW()
-                        WHERE platform_channel_id = $1
+                        SET status = 'failed', collected_at = NOW(),
+                            claim_token = NULL, claimed_at = NULL, lease_expires_at = NULL
+                        WHERE id = $1 AND status = 'processing' AND claim_token = $2
                         """,
-                        row['platform_channel_id'],
+                        row['id'], row['claim_token'],
                     )
                 logger.debug("youtube spider queue failed for %s: %s", row["platform_channel_id"], exc)
         return processed
