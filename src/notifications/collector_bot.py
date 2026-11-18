@@ -57,7 +57,7 @@ async def create_watchdog_card(db, source: str, containers: list[str], age_secon
                                threshold_seconds: int, grace_seconds: int) -> str:
     """Persist a watchdog card before Telegram receives a button bearing its token."""
     token = secrets.token_urlsafe(18)
-    payload = json.dumps({"source": source, "containers": containers, "age_seconds": age_seconds,
+    payload = json.dumps({"source": source, "containers": containers, "age_seconds": float(age_seconds),
                           "threshold_seconds": threshold_seconds})
     await db.execute(
         """INSERT INTO control_bot_cards(token, kind, payload, chat_id, expires_at)

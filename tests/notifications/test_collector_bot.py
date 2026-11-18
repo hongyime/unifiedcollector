@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from decimal import Decimal
+
 import pytest
 
 from src import control_executor
@@ -34,6 +37,27 @@ class _Pool:
 
     def acquire(self):
         return _Acquire(self.db)
+
+
+class _CardPool:
+    def __init__(self):
+        self.executed = []
+
+    async def execute(self, query, *args):
+        self.executed.append((query, args))
+
+
+@pytest.mark.asyncio
+async def test_create_watchdog_card_serializes_database_numeric_age(monkeypatch):
+    monkeypatch.setenv("CONTROL_TELEGRAM_CHAT_ID", "123")
+    pool = _CardPool()
+
+    await collector_bot.create_watchdog_card(
+        pool, "tiktok", ["unifiedcollector_collector_tiktok"], Decimal("379765.5"), 172800, 600,
+    )
+
+    payload = json.loads(pool.executed[0][1][1])
+    assert payload["age_seconds"] == 379765.5
 
 
 @pytest.mark.asyncio

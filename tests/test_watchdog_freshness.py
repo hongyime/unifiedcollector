@@ -117,6 +117,31 @@ async def test_watchdog_skips_stale_restart_during_active_429_cooldown(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_watchdog_recognizes_a_scoped_dynamic_cooldown(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgres://collector:collector@localhost/unifiedcollector")
+    import src.watchdog.freshness as freshness
+
+    freshness = importlib.reload(freshness)
+
+    class FakeDB:
+        async def fetchrow(self, query: str, *args):
+            assert "LIKE" in query
+            assert args == ("tiktok_rate_limit", "tiktok_ratelimit")
+            return {
+                "service": "tiktok_rate_limit:profile_metadata:fixture",
+                "last_processed_id": "2000:3",
+            }
+
+    cooldown = await freshness._active_source_cooldown(FakeDB(), "tiktok", 1000.0)
+
+    assert cooldown == {
+        "seconds_remaining": 1000,
+        "streak": 3,
+        "basis": "tiktok_rate_limit:profile_metadata:fixture",
+    }
+
+
+@pytest.mark.asyncio
 async def test_watchdog_bypasses_cooldown_and_restarts_realtime_source(monkeypatch):
     """Realtime sources (telegram/whatsapp/beeper) must restart when stale even
     if a per-account FloodWait cooldown is active — the cooldown reflects a

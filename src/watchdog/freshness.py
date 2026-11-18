@@ -588,7 +588,8 @@ async def _active_source_cooldown(db: asyncpg.Connection, source: str, now: floa
             SELECT service, last_processed_id
             FROM service_cursors
             WHERE status = 'blocked'
-              AND service IN ($1, $2)
+              AND (service = $1 OR service LIKE $1 || ':%'
+                   OR service = $2 OR service LIKE $2 || ':%')
             ORDER BY last_processed_at DESC NULLS LAST
             LIMIT 1
             """,
