@@ -2486,6 +2486,20 @@ async def test_download_message_media_id_resolution_get_messages_failure(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_download_message_media_uses_explicit_fetch_entity(monkeypatch):
+    coll = _make_collector(monkeypatch)
+    worker = _make_worker(coll)
+    worker.client.get_messages = AsyncMock(return_value=None)
+
+    out = await coll.download_message_media(
+        123, worker=worker, chat_id="1626494792", fetch_entity="@skzmemoriess",
+    )
+
+    assert out is None
+    worker.client.get_messages.assert_awaited_once_with("@skzmemoriess", ids=123)
+
+
+@pytest.mark.asyncio
 async def test_download_message_media_id_without_chat_id_returns_none(monkeypatch, caplog):
     coll = _make_collector(monkeypatch)
     worker = _make_worker(coll)

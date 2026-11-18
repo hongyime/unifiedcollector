@@ -782,6 +782,18 @@ class WorkerService:
         collector = self._collectors.get("telegram")
         if collector is None or not hasattr(collector, "download_message_media"):
             return False
+        chat_ref = chat_id
+        if self.pool is not None:
+            try:
+                async with self.pool.acquire() as conn:
+                    username = await conn.fetchval(
+                        "SELECT username FROM telegram_chats WHERE platform_chat_id=$1",
+                        chat_id,
+                    )
+                if username:
+                    chat_ref = f"@{str(username).lstrip('@')}"
+            except Exception:  # noqa: BLE001 - numeric fallback remains valid for cached peers.
+                logger.debug("telegram DLQ chat lookup failed for %s", chat_id, exc_info=True)
         timeout = float(os.getenv("TELEGRAM_DLQ_MEDIA_RETRY_TIMEOUT_SECONDS", "120"))
         workers = list(getattr(collector, "_workers", []) or [])
         if not workers:
@@ -789,22 +801,30 @@ class WorkerService:
             # be in its deliberate session-bootstrap settle window.
             raise DeferredError("telegram workers are not ready", delay_seconds=60)
         scheduler = getattr(collector, "_history_scheduler", None)
-        if scheduler and any(
-            scheduler.snapshot(worker.account.name).get("active_claims")
-            for worker in workers
-        ):
-            # Exact-media retry can otherwise probe every account while the
-            # bounded history window is using them. Preserve realtime/history
-            # capacity and retry without consuming the DLQ retry budget.
-            raise DeferredError("telegram history claims are active", delay_seconds=300)
+        if scheduler:
+            workers_with_capacity = []
+            for worker in workers:
+                state = scheduler.snapshot(worker.account.name)
+                active_claims = int(state.get("active_claims") or 0)
+                claim_budget = max(1, int(state.get("claim_budget") or 1))
+                if active_claims < claim_budget:
+                    workers_with_capacity.append(worker)
+            if workers_with_capacity:
+                workers = workers_with_capacity
+            else:
+                # Keep one bounded retry lane below the adaptive history
+                # budget; defer only when every account is fully occupied.
+                raise DeferredError("telegram history claims are active", delay_seconds=300)
         last_error: BaseException | None = None
         for worker in workers:
             try:
+                download_kwargs = {"worker": worker, "chat_id": chat_id}
+                if chat_ref != chat_id:
+                    download_kwargs["fetch_entity"] = chat_ref
                 ok = await asyncio.wait_for(
                     collector.download_message_media(
                         message_id,
-                        worker=worker,
-                        chat_id=chat_id,
+                        **download_kwargs,
                     ),
                     timeout=timeout,
                 )

@@ -931,7 +931,10 @@ async def _dlq_tick(db: asyncpg.Connection) -> None:
         rows = await db.fetch(
             "SELECT source, count(*) AS n, "
             "       extract(epoch FROM now()-min(created_at)) AS oldest "
-            "FROM dead_letter_queue WHERE status='pending' GROUP BY source"
+            "FROM dead_letter_queue "
+            "WHERE status='pending' "
+            "AND (source <> 'telegram' OR COALESCE(error_message, '') <> 'telegram history claims are active') "
+            "GROUP BY source"
         )
     except Exception as e:
         log.error("DLQ query failed: %s", e)
@@ -964,6 +967,7 @@ async def _dlq_tick(db: asyncpg.Connection) -> None:
                   SELECT DISTINCT source
                   FROM dead_letter_queue
                   WHERE status='pending'
+                    AND (source <> 'telegram' OR COALESCE(error_message, '') <> 'telegram history claims are active')
               )
             """
         )

@@ -95,7 +95,7 @@ async def test_telegram_dlq_handler_defers_while_history_claims_are_active():
 
     worker = types.SimpleNamespace(account=types.SimpleNamespace(name="acct1"))
     scheduler = types.SimpleNamespace(
-        snapshot=lambda _account: {"active_claims": 1},
+        snapshot=lambda _account: {"active_claims": 1, "claim_budget": 1},
     )
     svc = WorkerService()
     download = AsyncMock()
@@ -115,6 +115,77 @@ async def test_telegram_dlq_handler_defers_while_history_claims_are_active():
 
     assert exc_info.value.delay_seconds == 300
     download.assert_not_awaited()
+
+
+async def test_telegram_dlq_handler_uses_worker_with_spare_history_capacity():
+    from src.worker import WorkerService
+
+    saturated = types.SimpleNamespace(account=types.SimpleNamespace(name="saturated"))
+    available = types.SimpleNamespace(account=types.SimpleNamespace(name="available"))
+    scheduler = types.SimpleNamespace(
+        snapshot=lambda account: (
+            {"active_claims": 1, "claim_budget": 1}
+            if account == "saturated"
+            else {"active_claims": 1, "claim_budget": 2}
+        ),
+    )
+    download = AsyncMock(return_value=True)
+    svc = WorkerService()
+    svc._collectors = {
+        "telegram": types.SimpleNamespace(
+            _workers=[saturated, available],
+            _history_scheduler=scheduler,
+            download_message_media=download,
+        ),
+    }
+
+    await svc._retry_telegram_media_dlq({
+        "entity_id": "-100123",
+        "content_id": "-100123_456",
+    })
+
+    download.assert_awaited_once_with(456, worker=available, chat_id="-100123")
+
+
+async def test_telegram_dlq_handler_uses_known_public_chat_username():
+    from src.worker import WorkerService
+
+    class Conn:
+        async def fetchval(self, query, chat_id):
+            assert "FROM telegram_chats" in query
+            assert chat_id == "1626494792"
+            return "skzmemoriess"
+
+    class Acquire:
+        async def __aenter__(self):
+            return Conn()
+
+        async def __aexit__(self, *_args):
+            return False
+
+    worker = types.SimpleNamespace(account=types.SimpleNamespace(name="available"))
+    scheduler = types.SimpleNamespace(
+        snapshot=lambda _account: {"active_claims": 0, "claim_budget": 1},
+    )
+    download = AsyncMock(return_value=True)
+    svc = WorkerService()
+    svc.pool = types.SimpleNamespace(acquire=Acquire)
+    svc._collectors = {
+        "telegram": types.SimpleNamespace(
+            _workers=[worker],
+            _history_scheduler=scheduler,
+            download_message_media=download,
+        ),
+    }
+
+    await svc._retry_telegram_media_dlq({
+        "entity_id": "1626494792",
+        "content_id": "1626494792_1442",
+    })
+
+    download.assert_awaited_once_with(
+        1442, worker=worker, chat_id="1626494792", fetch_entity="@skzmemoriess",
+    )
 
 
 async def test_telegram_storage_deferred_media_does_not_spend_retry(monkeypatch):

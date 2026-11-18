@@ -26,6 +26,7 @@ class MediaMixin:
         message_or_id,
         worker: "TelegramWorker | None" = None,
         chat_id=None,
+        fetch_entity=None,
     ):
         """Download the media attached to a Telethon message.
 
@@ -53,7 +54,8 @@ class MediaMixin:
                 logger.error("download_message_media: chat_id required when given an ID")
                 return None
             try:
-                msgs = await client.get_messages(int(chat_id), ids=int(message_or_id))
+                entity = fetch_entity if fetch_entity is not None else int(chat_id)
+                msgs = await client.get_messages(entity, ids=int(message_or_id))
                 message = msgs if hasattr(msgs, "media") else (msgs[0] if msgs else None)
             except Exception as exc:
                 logger.warning(
