@@ -1,9 +1,18 @@
+# Live extension recovery and fleet acceptance (2026-11-18)
+
+- Restored the stopped existing PostgreSQL container without replacing its data volume; it is Docker-healthy and all 19 standard UC collector containers plus browser-ingest, dashboard, scheduler, Redis, RabbitMQ, and both WhatsApp bridges are Docker-healthy.
+- Terminalized, without deleting, the 3,659 unreplayable historical Facebook/Threads/X browser-vault DLQ rows after the exact ACL repair; their original errors remain preserved in the row audit text. Current Telegram/WhatsApp DLQ work was untouched.
+- Rebuilt and reloaded the active unpacked extension (`1.23.126`) only through Chrome CDP. A shared browser-media-revisit storage-quota failure now safely defers the revisit instead of aborting Threads/X/Instagram/Facebook/Lemon8 collection. Live Threads evidence after the reload: `1 targets, 2 media candidate(s), 11 discovered`; browser-ingest accepted posts/users. Facebook also has 12 fresh rows in the prior 15-minute readback.
+- Instagram is signed in (rendered feed and fresh browser-ingest user/post receipts), though its source-health row awaits the watchdog's next eligible update. X is authenticated enough to load `/home` but currently returns its own blank/`try_again_empty_state` shell; extension recovery/backoff is active. Operator should open X in the UC Chrome profile and only re-authenticate if X prompts. The normal deterministic two-source browser rotation was restored (current slot Lemon8 + Strava).
+- Pending local verification: full Python suite is running under nohup at `/tmp/tmp.lyCz6bG2U8`; preserve the two user-owned generated YouTube JSON edits.
+
 # Fleet collector rollout and acceptance audit (2026-11-18)
 
 - `6de9dcd4` is pushed to `main`; the fresh collector image is `sha256:5adea049f780aa1f56a7e4a689d510b445f108c4980f293c319c286783f21904`. Browser-ingest and all 19 standard collectors were recreated in two batches and are Docker-healthy on that image. PostgreSQL, RabbitMQ, Redis, dashboard, and both WhatsApp bridges stayed online.
 - Fixed the shared forward-persistence blocker with non-recursive ACLs only for `/media/sg-ultra/unifiedcollector` and its `media` child, granting container UID 1001 write access. Browser-ingest, YouTube, GitHub, Strava, and Lemon8 now pass in-container write probes; no permission-denied/vault-unavailable log occurred after the change.
 - The stale root-owned `/var/lib/unifiedcollector/cutover.pause` was moved recoverably to `cutover.pause.disabled-20261118`, re-enabling the watchdog's restart actions.
 - Current non-runtime collection blockers: TikTok is in a provider challenge cooldown through 2026-11-18T14:04:04Z; Instagram/X browser capture is stale; Lemon8 has 123 unresolved current media candidates; Facebook/Threads retain 499/3,086 historical pending vault-permission DLQ rows. Those historic browser payloads must not be blindly replayed because source media may no longer be available. Preserve the two user-owned generated YouTube JSON edits.
+- New `polish-repo` Phase 1 baseline: dashboard production build/10 Vitest tests, extension build, and WhatsApp TypeScript build/8 Node tests pass. The full Python suite has two reproducible failures: an empty HS256 test JWT key in `test_source_controls_route`, and the intended Compose edit no longer matching `test_compose_storage_root_hash`'s frozen digest. No new code/runtime change was made; choose a focused Phase 2 candidate from `docs/user-stories.md` before fixing.
 
 # Polish-repo complete locally — final verification recorded (2026-11-17)
 
