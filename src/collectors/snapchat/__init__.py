@@ -66,7 +66,7 @@ def _decode_json_str(s: str) -> str:
 
 
 def _allowed_public_page(url: str) -> bool:
-    parsed = urlparse(url)
+    parsed = urlparse(str(url))
     host = (parsed.hostname or "").lower().rstrip(".")
     return (
         parsed.scheme == "https"
@@ -569,6 +569,7 @@ class SnapchatCollector(ProfileOnlyCollector):
                 current_url = target_url
                 for redirect_count in range(_MAX_PUBLIC_REDIRECTS + 1):
                     with session.stream(
+                        "GET",
                         current_url,
                         headers=headers,
                     ) as response:

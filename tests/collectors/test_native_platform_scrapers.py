@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
+import httpx
 import pytest
 
 from src.collectors.pinterest import (
@@ -986,6 +987,7 @@ def test_snapchat_allowlist_limits_requests_to_public_pages():
     assert _allowed_public_page("https://www.snapchat.com/@alice")
     assert _allowed_public_page("https://www.snapchat.com/add/alice")
     assert _allowed_public_page("https://story.snapchat.com/@alice")
+    assert _allowed_public_page(httpx.URL("https://www.snapchat.com/discover"))
     assert not _allowed_public_page("https://www.snapchat.com/chat/alice")
     assert not _allowed_public_page("http://www.snapchat.com/discover")
     assert not _allowed_public_page("https://evil.example/discover")
@@ -1061,10 +1063,8 @@ def test_snapchat_rejects_unsafe_redirect_before_second_request(monkeypatch):
         def __exit__(self, *_args):
             return None
 
-        def stream(self, method_or_url, url=None, **kwargs):
-            if url is None:
-                url = method_or_url
-            self.calls.append((url, kwargs))
+        def stream(self, method, url, **kwargs):
+            self.calls.append((method, url, kwargs))
             return Response()
 
     session = Session()
@@ -1077,7 +1077,16 @@ def test_snapchat_rejects_unsafe_redirect_before_second_request(monkeypatch):
     else:
         raise AssertionError("unsafe redirect was followed")
 
-    assert len(session.calls) == 1
+    assert session.calls == [
+        ("GET", "https://www.snapchat.com/discover", {
+            "headers": {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml",
+                "Accept-Language": "en-US,en;q=0.9",
+            },
+        }),
+    ]
 
 
 def test_snapchat_public_parser_reads_highlight_and_resolves_public_profile():

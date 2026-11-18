@@ -1,3 +1,10 @@
+# Snapchat/Pinterest native-queue rollout (2026-11-18)
+
+- The extension is healthy but deliberately returns `target: null` for Pinterest/Snapchat/Airbnb: their isolated native collectors own those queues. Its `0 targets` cycles are therefore not an ingest outage.
+- Recreated only `collector_pinterest`, `collector_snapchat`, `browser_ingest`, and dashboard from the rebuilt current images; all four are Docker-healthy. PostgreSQL, Redis, RabbitMQ, and WhatsApp bridges were left online. Pinterest/Snapchat now enable public-discovery admission only at source scope; global discovery and Airbnb remain disabled.
+- Fixed two Snapchat public-page runtime defects: `httpx.Client.stream` needs `GET`, and the public-URL allowlist must normalize `httpx.URL`. Focused Snapchat tests pass. Requeued exactly the eight rows failed by the first defect and the one row failed by the second; no deletes or volume changes. Snapchat authenticated feed writes are current; an empty public page is retained as a normal backoff outcome.
+- Next: rebuild/tag the collector image with this final source change, recreate only Snapchat, verify the image digest and push the scoped commit. Preserve the two user-owned generated YouTube JSON edits.
+
 # Polish-repo complete locally — final verification recorded (2026-11-17)
 
 - Live rollout completed at commit `a27a1dfb` (pushed to `origin/main` after fast-forwarding the configuration-only upstream commit). The additive legacy-spider lease migration is recorded before new worker code; YouTube, GitHub, Strava, Lemon8, browser-ingest, and dashboard were then recreated and are Docker-healthy. Dashboard and browser-ingest health endpoints pass.
