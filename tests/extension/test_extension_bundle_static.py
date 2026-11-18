@@ -802,6 +802,17 @@ def test_browser_revisit_checks_instagram_budget_before_claim_and_uses_page_url_
     assert "result_pending" in revisit_block
 
 
+def test_browser_revisit_storage_failure_defers_without_aborting_the_scrape_cycle():
+    content = _read("extension/content.js")
+    revisit_block = content.split("function browserMediaRevisitKey", 1)[1].split(
+        "const tiktok =", 1,
+    )[0]
+
+    assert "browser_storage_unavailable" in revisit_block
+    assert "if (!lsSet(browserMediaRevisitKey(platform), JSON.stringify(state)))" in revisit_block
+    assert "localStorage.setItem(browserMediaRevisitKey(platform)" not in revisit_block
+
+
 def test_browser_revisit_owner_recovers_closed_or_stalled_tab():
     content = _read("extension/content.js")
     background = _read("extension/background.js")

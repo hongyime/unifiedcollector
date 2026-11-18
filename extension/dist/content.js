@@ -2418,7 +2418,7 @@
         if (!active || !active.content_id || active.platform !== platform) return null;
         return active;
       } catch (e) {
-        localStorage.removeItem(browserMediaRevisitKey(platform));
+        lsRemove(browserMediaRevisitKey(platform));
         return null;
       }
     }
@@ -2486,10 +2486,10 @@
       };
       const response = await send(payload, { retries: 2, timeoutMs: 12e3 }).catch(() => null);
       if (response && response.ok) {
-        localStorage.removeItem(browserMediaRevisitKey(platform));
+        lsRemove(browserMediaRevisitKey(platform));
         return true;
       }
-      localStorage.setItem(browserMediaRevisitKey(platform), JSON.stringify({
+      lsSet(browserMediaRevisitKey(platform), JSON.stringify({
         ...active,
         platform,
         result_pending: payload
@@ -2556,7 +2556,18 @@
           active.tab_id = tabId2;
         }
         active.owner_heartbeat_at = Date.now();
-        localStorage.setItem(browserMediaRevisitKey(platform), JSON.stringify(active));
+        if (!lsSet(browserMediaRevisitKey(platform), JSON.stringify(active))) {
+          await sendBrowserMediaRevisitResult(platform, active, {
+            type: "browserMediaRevisitResult",
+            platform,
+            content_id: active.content_id,
+            claim_attempt: active.attempts ?? null,
+            status: "deferred",
+            reason: "browser_storage_unavailable",
+            username: active.username || owner || null
+          });
+          return null;
+        }
         await armBrowserRevisitWatchdog("browser", platform, active);
         if (!browserMediaRevisitPageMatches(platform, location.href, activeUrl) && Date.now() - Number(active.navigation_started_at || active.claimed_at || Date.now()) > BROWSER_REVISIT_NAVIGATION_TIMEOUT_MS) {
           await sendBrowserMediaRevisitResult(platform, active, {
@@ -2622,7 +2633,18 @@
         navigation_started_at: now,
         owner_heartbeat_at: now
       };
-      localStorage.setItem(browserMediaRevisitKey(platform), JSON.stringify(state));
+      if (!lsSet(browserMediaRevisitKey(platform), JSON.stringify(state))) {
+        await sendBrowserMediaRevisitResult(platform, claim, {
+          type: "browserMediaRevisitResult",
+          platform,
+          content_id: target.content_id,
+          claim_attempt: target.attempts ?? null,
+          status: "deferred",
+          reason: "browser_storage_unavailable",
+          username: target.username || owner || null
+        });
+        return null;
+      }
       await armBrowserRevisitWatchdog("browser", platform, state);
       if (location.href !== url) {
         clog("info", `${platform.toUpperCase()} detail revisit queued for ${target.content_id}`, platform);
