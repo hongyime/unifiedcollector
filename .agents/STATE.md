@@ -4,7 +4,7 @@
 - Terminalized, without deleting, the 3,659 unreplayable historical Facebook/Threads/X browser-vault DLQ rows after the exact ACL repair; their original errors remain preserved in the row audit text. Current Telegram/WhatsApp DLQ work was untouched.
 - Rebuilt and reloaded the active unpacked extension (`1.23.126`) only through Chrome CDP. A shared browser-media-revisit storage-quota failure now safely defers the revisit instead of aborting Threads/X/Instagram/Facebook/Lemon8 collection. Live Threads evidence after the reload: `1 targets, 2 media candidate(s), 11 discovered`; browser-ingest accepted posts/users. Facebook also has 12 fresh rows in the prior 15-minute readback.
 - Instagram is signed in (rendered feed and fresh browser-ingest user/post receipts), though its source-health row awaits the watchdog's next eligible update. X is authenticated enough to load `/home` but currently returns its own blank/`try_again_empty_state` shell; extension recovery/backoff is active. Operator should open X in the UC Chrome profile and only re-authenticate if X prompts. The normal deterministic two-source browser rotation was restored (current slot Lemon8 + Strava).
-- Pending local verification: full Python suite is running under nohup at `/tmp/tmp.lyCz6bG2U8`; preserve the two user-owned generated YouTube JSON edits.
+- Safe verification: extension build and 61 focused static/dashboard/Compose tests pass. The unrestricted Python suite was stopped safely when it invoked `docker stop unifiedcollector_postgres` against the live Docker daemon; PostgreSQL stayed healthy. Run that suite only against an isolated Docker daemon. Preserve the two user-owned generated YouTube JSON edits.
 
 # Fleet collector rollout and acceptance audit (2026-11-18)
 
