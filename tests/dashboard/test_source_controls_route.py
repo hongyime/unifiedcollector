@@ -15,6 +15,7 @@ os.environ.setdefault("DASHBOARD_ADMIN_PASSWORD", "x")
 os.environ.pop("DASHBOARD_AUTH_DISABLED", None)
 
 import jwt  # noqa: E402
+import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from src.dashboard.api import app  # noqa: E402
@@ -67,6 +68,12 @@ def _viewer_token() -> str:
         dashboard_auth.JWT_SECRET,
         algorithm="HS256",
     )
+
+
+@pytest.fixture(autouse=True)
+def _test_jwt_secret(monkeypatch):
+    """Keep this route fixture independent of earlier auth-module imports."""
+    monkeypatch.setattr(dashboard_auth, "JWT_SECRET", "test-secret-only-for-pytest-do-not-use")
 
 
 def test_route_is_mounted():
