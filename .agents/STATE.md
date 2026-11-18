@@ -1,9 +1,9 @@
-# Snapchat/Pinterest native-queue rollout (2026-11-18)
+# Fleet collector rollout and acceptance audit (2026-11-18)
 
-- The extension is healthy but deliberately returns `target: null` for Pinterest/Snapchat/Airbnb: their isolated native collectors own those queues. Its `0 targets` cycles are therefore not an ingest outage.
-- Recreated only `collector_pinterest`, `collector_snapchat`, `browser_ingest`, and dashboard from the rebuilt current images; all four are Docker-healthy. PostgreSQL, Redis, RabbitMQ, and WhatsApp bridges were left online. Pinterest/Snapchat now enable public-discovery admission only at source scope; global discovery and Airbnb remain disabled.
-- Fixed two Snapchat public-page runtime defects: `httpx.Client.stream` needs `GET`, and the public-URL allowlist must normalize `httpx.URL`. Focused Snapchat tests pass. Requeued exactly the eight rows failed by the first defect and the one row failed by the second; no deletes or volume changes. Snapchat authenticated feed writes are current; an empty public page is retained as a normal backoff outcome.
-- Next: rebuild/tag the collector image with this final source change, recreate only Snapchat, verify the image digest and push the scoped commit. Preserve the two user-owned generated YouTube JSON edits.
+- `6de9dcd4` is pushed to `main`; the fresh collector image is `sha256:5adea049f780aa1f56a7e4a689d510b445f108c4980f293c319c286783f21904`. Browser-ingest and all 19 standard collectors were recreated in two batches and are Docker-healthy on that image. PostgreSQL, RabbitMQ, Redis, dashboard, and both WhatsApp bridges stayed online.
+- Fixed the shared forward-persistence blocker with non-recursive ACLs only for `/media/sg-ultra/unifiedcollector` and its `media` child, granting container UID 1001 write access. Browser-ingest, YouTube, GitHub, Strava, and Lemon8 now pass in-container write probes; no permission-denied/vault-unavailable log occurred after the change.
+- The stale root-owned `/var/lib/unifiedcollector/cutover.pause` was moved recoverably to `cutover.pause.disabled-20261118`, re-enabling the watchdog's restart actions.
+- Current non-runtime collection blockers: TikTok is in a provider challenge cooldown through 2026-11-18T14:04:04Z; Instagram/X browser capture is stale; Lemon8 has 123 unresolved current media candidates; Facebook/Threads retain 499/3,086 historical pending vault-permission DLQ rows. Those historic browser payloads must not be blindly replayed because source media may no longer be available. Preserve the two user-owned generated YouTube JSON edits.
 
 # Polish-repo complete locally — final verification recorded (2026-11-17)
 
