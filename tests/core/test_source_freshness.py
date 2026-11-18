@@ -257,6 +257,41 @@ async def test_stale_eligible_check_degrades_even_when_content_is_recent(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_rotator_paused_browser_source_is_scheduled_not_degraded(monkeypatch):
+    from src.core import source_freshness
+
+    class RotatorPausedConn:
+        async def fetch(self, query: str, *args, **kwargs):
+            if "FROM source_health" in query:
+                now = datetime.now(timezone.utc)
+                return [{
+                    "source": "x", "status": "running", "last_error": None,
+                    "last_success_at": now - timedelta(hours=2),
+                    "last_checked_at": now - timedelta(hours=2),
+                    "updated_at": now,
+                }]
+            if "FROM collection_schedules" in query:
+                return [{"source": "x"}]
+            if "FROM browser_ingest_events" in query:
+                return []
+            raise AssertionError(query)
+
+        async def fetchval(self, query: str, **kwargs):
+            if "x_posts" in query:
+                return 7200
+            return False
+
+    monkeypatch.setattr(source_freshness, "FRESHNESS", [("x", "SELECT x_posts", 172800)])
+
+    row, = await source_freshness.compute_liveness(RotatorPausedConn())
+
+    assert row["status"] == "live"
+    assert row["operational_status"] == "scheduled"
+    assert row["browser_rotator_paused"] is True
+    assert "inactive in the current rotation" in row["detail"]
+
+
+@pytest.mark.asyncio
 async def test_strava_liveness_counts_route_and_media_progress(monkeypatch):
     from src.core import source_freshness
 

@@ -456,6 +456,19 @@ async def _recent_bluesky_stream_receipt(conn, timeout: float) -> bool:
         return False
 
 
+async def _rotator_paused_sources(conn) -> set[str]:
+    """Return browser sources intentionally inactive in the current rotation."""
+    try:
+        rows = await conn.fetch(
+            "SELECT source FROM collection_schedules "
+            "WHERE enabled = false AND source = ANY($1::text[])",
+            list(_BROWSER_HEARTBEAT_SOURCES),
+        )
+        return {str(row["source"]) for row in rows}
+    except Exception:
+        return set()
+
+
 async def compute_liveness(conn) -> list[dict]:
     """Return per-source liveness using an open asyncpg connection.
 
@@ -486,6 +499,7 @@ async def compute_liveness(conn) -> list[dict]:
             }
     except Exception:
         pass
+    paused_browser_sources = await _rotator_paused_sources(conn)
 
     try:
         total_budget = max(2.0, float(os.getenv("SOURCE_LIVENESS_TOTAL_BUDGET_SECONDS", "12")))
@@ -556,6 +570,7 @@ async def compute_liveness(conn) -> list[dict]:
         h = health.get(name) or {}
         hs = h.get("status")
         h_error = h.get("last_error")
+        rotator_paused = name in paused_browser_sources
         health_age = _age_seconds(h.get("last_success_at"), now_utc)
         check_age = _age_seconds(h.get("last_checked_at"), now_utc)
         content_check_age = _age_seconds(h.get("last_content_at"), now_utc)
@@ -696,6 +711,21 @@ async def compute_liveness(conn) -> list[dict]:
         ):
             browser_health_status = "external_auth_or_page_shell"
             browser_health_reason = browser_health_reason or "x_external_auth_or_page_shell"
+        pause_masks_stale = (
+            rotator_paused
+            and status in {"stale", "degraded"}
+            and (
+                hs in {None, "running", "idle"}
+                or (
+                    hs == "degraded"
+                    and _watchdog_marker(h_error)
+                    and "cooldown" not in str(h_error or "").lower()
+                )
+            )
+        )
+        if pause_masks_stale:
+            status = "live"
+            detail = "browser schedule is inactive in the current rotation; freshness is checked when its slot is active"
         if name == "x" and _env_bool("X_SOURCE_MANUAL_MODE", False):
             status = "live"
             detail = (
@@ -731,13 +761,14 @@ async def compute_liveness(conn) -> list[dict]:
             "source_content_age_seconds": content_check_age,
             "source_health_updated_at": h.get("updated_at"),
             "operational_status": (
-                "idle"
+                "scheduled" if pause_masks_stale else "idle"
                 if status == "live" and data_age is not None and data_age > thresh
                 and health_age is not None and health_age <= thresh
                 and hs in {"running", "idle"}
                 else ("running" if status == "live" else status)
             ),
             "browser_heartbeat_at": browser_heartbeat.get("last_seen_at") if browser_heartbeat else None,
+            "browser_rotator_paused": rotator_paused,
             "browser_heartbeat_age_seconds": browser_age,
             "browser_heartbeat_stale_after_seconds": (
                 browser_stale_after if name in _BROWSER_HEARTBEAT_SOURCES else None
