@@ -133,8 +133,9 @@ CHECKS = {
 # Opt-out with WATCHDOG_HEADLESS_ENABLED=0.
 if os.getenv("WATCHDOG_HEADLESS_ENABLED", "1") == "1":
     _D = 86400  # 1 day, the generous baseline
-    CHECKS.update({
-        "instagram": (
+    _instagram_stale_threshold = int(os.getenv("WATCHDOG_STALE_INSTAGRAM", str(_D * 2)))
+    if _instagram_stale_threshold:
+        CHECKS["instagram"] = (
             """
             SELECT extract(epoch FROM now()-max(ts))
             FROM (
@@ -143,9 +144,10 @@ if os.getenv("WATCHDOG_HEADLESS_ENABLED", "1") == "1":
                 SELECT max(collected_at) AS ts FROM media_items WHERE source='instagram'
             ) progress
             """,
-            int(os.getenv("WATCHDOG_STALE_INSTAGRAM", str(_D * 2))),   # 48h
+            _instagram_stale_threshold,
             ["unifiedcollector_collector_instagram"],
-        ),
+        )
+    CHECKS.update({
         "tiktok": (
             "SELECT extract(epoch FROM now()-max(collected_at)) FROM media_items WHERE source='tiktok'",
             int(os.getenv("WATCHDOG_STALE_TIKTOK", str(_D * 2))),      # 48h
@@ -933,7 +935,8 @@ async def _dlq_tick(db: asyncpg.Connection) -> None:
             "       extract(epoch FROM now()-min(created_at)) AS oldest "
             "FROM dead_letter_queue "
             "WHERE status='pending' "
-            "AND (source <> 'telegram' OR COALESCE(error_message, '') <> 'telegram history claims are active') "
+            "AND (source <> 'telegram' OR COALESCE(error_message, '') NOT IN "
+            "('telegram history claims are active', 'telegram workers are not ready')) "
             "GROUP BY source"
         )
     except Exception as e:
@@ -967,7 +970,8 @@ async def _dlq_tick(db: asyncpg.Connection) -> None:
                   SELECT DISTINCT source
                   FROM dead_letter_queue
                   WHERE status='pending'
-                    AND (source <> 'telegram' OR COALESCE(error_message, '') <> 'telegram history claims are active')
+                    AND (source <> 'telegram' OR COALESCE(error_message, '') NOT IN
+                        ('telegram history claims are active', 'telegram workers are not ready'))
               )
             """
         )

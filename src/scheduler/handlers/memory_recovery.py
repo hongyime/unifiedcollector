@@ -84,9 +84,9 @@ class MemoryRecoveryHandler:
                 token = await collector_bot.create_memory_recovery_card(db, target, action, metrics, grace)
                 row = await db.fetchrow(
                     """INSERT INTO memory_recovery_actions(target,action,status,reason,metrics,card_token,expires_at)
-                       VALUES($1,$2,'awaiting_cancel',$3,$4::jsonb,$5,now()+$6::interval) RETURNING id""",
+                       VALUES($1,$2,'awaiting_cancel',$3,$4::jsonb,$5,now()+make_interval(secs => $6::int)) RETURNING id""",
                     target, action, "sustained memory pressure" if action == "pause" else "sustained memory recovery",
-                    json.dumps(metrics), token, f"{grace * 2} seconds",
+                    json.dumps(metrics), token, grace * 2,
                 )
                 asyncio.create_task(self._announce(ctx.pool, token, target, action, metrics))
                 logger.warning("memory recovery action %s awaiting cancel for %s id=%s", action, target, row["id"])
@@ -108,7 +108,7 @@ class MemoryRecoveryHandler:
                 now = __import__('datetime').datetime.now(__import__('datetime').timezone.utc)
                 if ignored or row["expires_at"] <= now:
                     await db.execute("UPDATE memory_recovery_actions SET status='cancelled',completed_at=now() WHERE card_token=$1", row["card_token"])
-                    await db.execute("UPDATE memory_recovery_state SET circuit_open_until=now()+$1::interval,updated_at=now() WHERE singleton=true", f"{circuit} seconds")
+                    await db.execute("UPDATE memory_recovery_state SET circuit_open_until=now()+make_interval(secs => $1::int),updated_at=now() WHERE singleton=true", circuit)
                     continue
                 if now - row["created_at"] < timedelta(seconds=grace):
                     continue
@@ -132,11 +132,11 @@ class MemoryRecoveryHandler:
                 ok = operation["status"] == "succeeded"
                 await db.execute("UPDATE memory_recovery_actions SET status=$2,completed_at=now() WHERE operation_id=$1", row["operation_id"], "succeeded" if ok else "failed")
                 if ok and row["action"] == "pause":
-                    await db.execute("UPDATE memory_recovery_state SET paused_target=$1,cooldown_until=now()+$2::interval,updated_at=now() WHERE singleton=true", row["target"], f"{cooldown} seconds")
+                    await db.execute("UPDATE memory_recovery_state SET paused_target=$1,cooldown_until=now()+make_interval(secs => $2::int),updated_at=now() WHERE singleton=true", row["target"], cooldown)
                 elif ok:
-                    await db.execute("UPDATE memory_recovery_state SET paused_target=NULL,cooldown_until=now()+$1::interval,updated_at=now() WHERE singleton=true", f"{cooldown} seconds")
+                    await db.execute("UPDATE memory_recovery_state SET paused_target=NULL,cooldown_until=now()+make_interval(secs => $1::int),updated_at=now() WHERE singleton=true", cooldown)
                 else:
-                    await db.execute("UPDATE memory_recovery_state SET circuit_open_until=now()+$1::interval,updated_at=now() WHERE singleton=true", f"{circuit} seconds")
+                    await db.execute("UPDATE memory_recovery_state SET circuit_open_until=now()+make_interval(secs => $1::int),updated_at=now() WHERE singleton=true", circuit)
 
     async def _announce(self, pool, token: str, target: str, action: str, metrics: dict) -> None:
         from src.notifications import telegram

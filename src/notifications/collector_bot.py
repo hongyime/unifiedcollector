@@ -61,8 +61,8 @@ async def create_watchdog_card(db, source: str, containers: list[str], age_secon
                           "threshold_seconds": threshold_seconds})
     await db.execute(
         """INSERT INTO control_bot_cards(token, kind, payload, chat_id, expires_at)
-           VALUES($1, 'watchdog_restart', $2::jsonb, $3, now() + $4::interval)""",
-        token, payload, int(_control_chat_id()), f"{max(grace_seconds * 2, 60)} seconds",
+           VALUES($1, 'watchdog_restart', $2::jsonb, $3, now() + make_interval(secs => $4::int))""",
+        token, payload, int(_control_chat_id()), max(grace_seconds * 2, 60),
     )
     await db.execute(
         "INSERT INTO control_bot_audit(event, card_token, detail) VALUES('card_created', $1, $2::jsonb)",
@@ -76,9 +76,9 @@ async def create_memory_recovery_card(db, target: str, action: str, metrics: dic
     token = secrets.token_urlsafe(18)
     await db.execute(
         """INSERT INTO control_bot_cards(token, kind, payload, chat_id, expires_at)
-           VALUES($1, 'memory_recovery', $2::jsonb, $3, now() + $4::interval)""",
+           VALUES($1, 'memory_recovery', $2::jsonb, $3, now() + make_interval(secs => $4::int))""",
         token, json.dumps({"source": target, "containers": [target], "action": action, "metrics": metrics}),
-        int(_control_chat_id()), f"{max(expires_seconds, 60)} seconds",
+        int(_control_chat_id()), max(expires_seconds, 60),
     )
     await db.execute(
         "INSERT INTO control_bot_audit(event, card_token, detail) VALUES('memory_recovery_card_created',$1,$2::jsonb)",

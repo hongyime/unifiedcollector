@@ -1937,11 +1937,12 @@ async def _write_browser_ingest_event(
             await conn.execute(
                 """
                 INSERT INTO source_health
-                  (source, status, last_success_at, last_error, updated_at)
-                VALUES ($1, 'running', NOW(), NULL, NOW())
+                  (source, status, last_success_at, last_checked_at, last_error, updated_at)
+                VALUES ($1, 'running', NOW(), NOW(), NULL, NOW())
                 ON CONFLICT (source) DO UPDATE SET
                   status = 'running',
                   last_success_at = NOW(),
+                  last_checked_at = NOW(),
                   last_error = NULL,
                   updated_at = NOW()
                 """,
@@ -1956,8 +1957,16 @@ def _browser_event_marks_source_success(
     stored_count: int,
     metadata: dict | None = None,
 ) -> bool:
-    if not platform or platform == "bridge" or endpoint == "browser_heartbeat":
+    if not platform or platform == "bridge":
         return False
+    if endpoint == "browser_heartbeat":
+        if not isinstance(metadata, dict) or not metadata.get("running"):
+            return False
+        return str(metadata.get("health_status") or "").lower() not in {
+            "recoverable_error_shell",
+            "loop_cycle_timeout",
+            "forced_cycle_error",
+        }
     if endpoint == "media":
         if stored_count > 0:
             return True

@@ -58,6 +58,8 @@ async def test_create_watchdog_card_serializes_database_numeric_age(monkeypatch)
 
     payload = json.loads(pool.executed[0][1][1])
     assert payload["age_seconds"] == 379765.5
+    assert "make_interval" in pool.executed[0][0]
+    assert pool.executed[0][1][3] == 1200
 
 
 @pytest.mark.asyncio

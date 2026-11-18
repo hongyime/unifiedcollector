@@ -58,6 +58,16 @@ def test_watchdog_stale_strava_positive_threshold_remains_configurable(monkeypat
     assert freshness.CHECKS["strava"][1] == 12345
 
 
+def test_watchdog_stale_instagram_zero_disables_native_source_check(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgres://collector:collector@localhost/unifiedcollector")
+    monkeypatch.setenv("WATCHDOG_STALE_INSTAGRAM", "0")
+    import src.watchdog.freshness as freshness
+
+    freshness = importlib.reload(freshness)
+
+    assert "instagram" not in freshness.CHECKS
+
+
 @pytest.mark.asyncio
 async def test_watchdog_skips_stale_restart_during_active_429_cooldown(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "postgres://collector:collector@localhost/unifiedcollector")
@@ -422,9 +432,11 @@ async def test_watchdog_ignores_intentional_telegram_history_deferrals(monkeypat
         async def fetch(self, query: str):
             if "FROM dead_letter_queue" in query and "GROUP BY source" in query:
                 assert "telegram history claims are active" in query
+                assert "telegram workers are not ready" in query
                 return []
             if "FROM source_health" in query and "dlq backlog:%watchdog%" in query.lower():
                 assert "telegram history claims are active" in query
+                assert "telegram workers are not ready" in query
                 return [{"source": "telegram"}]
             raise AssertionError(query)
 

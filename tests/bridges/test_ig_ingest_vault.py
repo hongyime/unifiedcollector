@@ -1395,6 +1395,20 @@ def test_empty_media_probe_marks_browser_content_progress():
         {},
     )
     assert ig_ingest._browser_event_marks_source_success(
+        "instagram",
+        "browser_heartbeat",
+        1,
+        0,
+        {"running": True},
+    )
+    assert not ig_ingest._browser_event_marks_source_success(
+        "instagram",
+        "browser_heartbeat",
+        1,
+        0,
+        {"running": True, "health_status": "recoverable_error_shell"},
+    )
+    assert ig_ingest._browser_event_marks_source_success(
         "lemon8",
         "media",
         29,
