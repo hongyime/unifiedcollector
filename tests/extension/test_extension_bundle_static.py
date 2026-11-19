@@ -266,6 +266,7 @@ def test_scraper_tabs_are_limited_to_scheduler_selected_platforms():
     assert "const allowed = 1;" in budget_block
     assert "const BROWSER_RESIDENT_TAB_LIMIT = 4;" in background
     assert 'const BROWSER_RESIDENT_PLATFORM_IDS = ["x", "instagram", "facebook", "threads", "tiktok", "lemon8", "strava", "pinterest", "snapchat", "airbnb"];' in background
+    assert 'const BROWSER_ROTATION_PLATFORM_IDS = ["x", "instagram", "facebook", "threads", "tiktok", "lemon8", "strava"];' in background
     assert "async function scraperTabSelection()" in background
     assert "resident_scraper_tab_budget_exceeded" in budget_block
     assert "inactive_scraper_tab_open" in budget_block

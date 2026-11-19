@@ -1100,6 +1100,7 @@
   var AUTO_SCRAPER_PLATFORM_IDS = /* @__PURE__ */ new Set(["instagram", "threads", "tiktok", "lemon8", "x", "facebook", "strava", "pinterest", "snapchat", "airbnb", "bluesky", "youtube"]);
   var BROWSER_RESIDENT_TAB_LIMIT = 4;
   var BROWSER_RESIDENT_PLATFORM_IDS = ["x", "instagram", "facebook", "threads", "tiktok", "lemon8", "strava", "pinterest", "snapchat", "airbnb"];
+  var BROWSER_ROTATION_PLATFORM_IDS = ["x", "instagram", "facebook", "threads", "tiktok", "lemon8", "strava"];
   var BROWSER_RESIDENT_FALLBACK_IDS = ["x", "instagram"];
   var SCRAPER_TAB_FAILOVER_KEY = "ucScraperTabFailover";
   var SCRAPER_TAB_QUARANTINE_MS = 30 * 60 * 1e3;
@@ -1137,6 +1138,10 @@
     const state = await scraperFailoverState();
     let changed = false;
     const eligible = (id) => enabled.has(id) && scraperFailoverProfile(id).tab_eligible !== false;
+    const rotationPriority = new Set(
+      _scrapeConfig.fail_open === true ? [] : BROWSER_ROTATION_PLATFORM_IDS.filter((id) => eligible(id))
+    );
+    const nonRotationLimit = Math.max(0, BROWSER_RESIDENT_TAB_LIMIT - rotationPriority.size);
     if (!state.residents.length) {
       try {
         const existing = selectCanonicalScraperTabRows(await chrome.tabs.query({ url: scraperUrlPatterns() }));
@@ -1149,13 +1154,16 @@
       }
     }
     const residents = [];
+    let nonRotationResidents = 0;
     for (const id of state.residents) {
       if (residents.includes(id)) {
         changed = true;
         continue;
       }
-      if (eligible(id) && !state.evictions[id]) {
+      const prioritized = rotationPriority.has(id);
+      if (eligible(id) && !state.evictions[id] && (prioritized || nonRotationResidents < nonRotationLimit)) {
         residents.push(id);
+        if (!prioritized) nonRotationResidents++;
         continue;
       }
       const profile = scraperFailoverProfile(id);
@@ -1169,7 +1177,11 @@
       }
       changed = true;
     }
-    for (const id of BROWSER_RESIDENT_PLATFORM_IDS) {
+    const residentCandidates = [
+      ...BROWSER_ROTATION_PLATFORM_IDS.filter((id) => rotationPriority.has(id)),
+      ...BROWSER_RESIDENT_PLATFORM_IDS.filter((id) => !rotationPriority.has(id))
+    ];
+    for (const id of residentCandidates) {
       if (residents.length >= BROWSER_RESIDENT_TAB_LIMIT) break;
       if (eligible(id) && !state.evictions[id] && !residents.includes(id)) {
         residents.push(id);

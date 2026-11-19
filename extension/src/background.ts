@@ -1078,6 +1078,7 @@ const SCRAPER_TABS_PINNED_KEY = "ucPinScraperTabs";
 const AUTO_SCRAPER_PLATFORM_IDS = new Set(["instagram", "threads", "tiktok", "lemon8", "x", "facebook", "strava", "pinterest", "snapchat", "airbnb", "bluesky", "youtube"]);
 const BROWSER_RESIDENT_TAB_LIMIT = 4;
 const BROWSER_RESIDENT_PLATFORM_IDS = ["x", "instagram", "facebook", "threads", "tiktok", "lemon8", "strava", "pinterest", "snapchat", "airbnb"];
+const BROWSER_ROTATION_PLATFORM_IDS = ["x", "instagram", "facebook", "threads", "tiktok", "lemon8", "strava"];
 const BROWSER_RESIDENT_FALLBACK_IDS = ["x", "instagram"];
 const SCRAPER_TAB_FAILOVER_KEY = "ucScraperTabFailover";
 const SCRAPER_TAB_QUARANTINE_MS = 30 * 60 * 1000;
@@ -1125,6 +1126,14 @@ async function scraperTabSelection() {
   const state = await scraperFailoverState();
   let changed = false;
   const eligible = (id) => enabled.has(id) && scraperFailoverProfile(id).tab_eligible !== false;
+  // Scheduler-selected sources need resident tabs before native browser tabs
+  // consume the fixed budget. A fail-open config intentionally has no priority.
+  const rotationPriority = new Set(
+    _scrapeConfig.fail_open === true
+      ? []
+      : BROWSER_ROTATION_PLATFORM_IDS.filter((id) => eligible(id)),
+  );
+  const nonRotationLimit = Math.max(0, BROWSER_RESIDENT_TAB_LIMIT - rotationPriority.size);
   // First run after an extension update adopts the healthy tabs already open
   // instead of letting a recovered higher-priority source reshuffle them.
   if (!state.residents.length) {
@@ -1138,10 +1147,13 @@ async function scraperTabSelection() {
     } catch (e) {}
   }
   const residents = [];
+  let nonRotationResidents = 0;
   for (const id of state.residents) {
     if (residents.includes(id)) { changed = true; continue; }
-    if (eligible(id) && !state.evictions[id]) {
+    const prioritized = rotationPriority.has(id);
+    if (eligible(id) && !state.evictions[id] && (prioritized || nonRotationResidents < nonRotationLimit)) {
       residents.push(id);
+      if (!prioritized) nonRotationResidents++;
       continue;
     }
     const profile = scraperFailoverProfile(id);
@@ -1155,7 +1167,11 @@ async function scraperTabSelection() {
     }
     changed = true;
   }
-  for (const id of BROWSER_RESIDENT_PLATFORM_IDS) {
+  const residentCandidates = [
+    ...BROWSER_ROTATION_PLATFORM_IDS.filter((id) => rotationPriority.has(id)),
+    ...BROWSER_RESIDENT_PLATFORM_IDS.filter((id) => !rotationPriority.has(id)),
+  ];
+  for (const id of residentCandidates) {
     if (residents.length >= BROWSER_RESIDENT_TAB_LIMIT) break;
     if (eligible(id) && !state.evictions[id] && !residents.includes(id)) {
       residents.push(id);
