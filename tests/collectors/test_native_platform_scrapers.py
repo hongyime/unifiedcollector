@@ -919,6 +919,76 @@ def test_pinterest_authenticated_content_is_limited_to_anonymous_public_ids():
     assert pins == public_pins
 
 
+@pytest.mark.asyncio
+async def test_pinterest_public_board_keeps_authenticated_pin_cards(monkeypatch):
+    """A verified public board can hide cards until the cookie session loads."""
+    import sys
+    from types import ModuleType
+
+    class Context:
+        async def close(self):
+            return None
+
+    class Browser:
+        async def new_context(self, **_kwargs):
+            return Context()
+
+        async def close(self):
+            return None
+
+    class Chromium:
+        async def launch(self, **_kwargs):
+            return Browser()
+
+    class Playwright:
+        chromium = Chromium()
+
+        async def stop(self):
+            return None
+
+    class PlaywrightManager:
+        async def start(self):
+            return Playwright()
+
+    playwright_module = ModuleType("playwright")
+    async_api_module = ModuleType("playwright.async_api")
+    async_api_module.async_playwright = lambda: PlaywrightManager()
+    monkeypatch.setitem(sys.modules, "playwright", playwright_module)
+    monkeypatch.setitem(sys.modules, "playwright.async_api", async_api_module)
+    monkeypatch.setattr(pinterest_mod, "_load_pinterest_storage_state", lambda: {"cookies": []})
+
+    async def fetch(*_args, **_kwargs):
+        return "https://www.pinterest.com/alice/travel/", "<html></html>"
+
+    monkeypatch.setattr(pinterest_mod, "_fetch_pinterest_html", fetch)
+    collector = object.__new__(PinterestCollector)
+    reads = iter((
+        {
+            "url": "https://www.pinterest.com/alice/travel/",
+            "title": "Travel", "primary_heading": "Travel", "board_header_text": "42 Pins",
+            "pin_cards": [],
+        },
+        {
+            "url": "https://www.pinterest.com/alice/travel/",
+            "title": "Travel", "primary_heading": "Travel", "board_header_text": "42 Pins",
+            "pin_cards": [{
+                "href": "https://www.pinterest.com/pin/123/", "pin_id": "123",
+                "membership_links": ["https://www.pinterest.com/alice/travel/"],
+                "image_url": "https://i.pinimg.com/originals/image.jpg",
+            }],
+        },
+    ))
+
+    async def read(*_args, **_kwargs):
+        return next(reads)
+
+    monkeypatch.setattr(collector, "_read_public_page", read)
+    boards, pins = await collector._scrape_public_page("https://www.pinterest.com/alice/travel/")
+
+    assert len(boards) == 1
+    assert [pin["id"] for pin in pins] == ["123"]
+
+
 def test_pinterest_board_is_not_public_without_its_anonymous_heading_and_count():
     boards, pins = PinterestCollector._parse_native_page(
         "https://www.pinterest.com/alice/travel/",

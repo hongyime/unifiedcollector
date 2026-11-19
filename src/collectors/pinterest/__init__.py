@@ -1050,6 +1050,11 @@ class PinterestCollector(ProfileOnlyCollector):
             if target_kind[0] == "profile" and not authenticated_data.get("profile_identity_verified"):
                 return public_boards, public_pins
             auth_boards, auth_pins = self._parse_native_page(target_url, authenticated_data)
+            if target_kind[0] == "board":
+                # Pinterest's signed-out board shell proves the board and its
+                # pin count but withholds every pin card. It was anonymously
+                # verified above; keep profile and pin-detail matching strict.
+                return public_boards, auth_pins
             return self._intersect_public_content(
                 public_boards, public_pins, auth_boards, auth_pins,
             )
