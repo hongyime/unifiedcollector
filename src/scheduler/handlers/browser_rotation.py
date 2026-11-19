@@ -11,7 +11,6 @@ disturbs the scheduling loop.
 from __future__ import annotations
 
 import logging
-import time as _time
 
 from src.core.browser_rotator import rotate_browser_schedules
 from src.scheduler.handlers.base import SchedulerContext
@@ -25,9 +24,10 @@ class BrowserRotationHandler:
     name = "browser_rotation"
 
     def __init__(self) -> None:
-        # 0.0 forces a run on the first should_run so a restart re-syncs the
-        # active browser set immediately.
-        self._last_run: float = 0.0
+        # Rotation selection is anchored to wall-clock slots.  Tracking an
+        # elapsed interval from scheduler startup leaves the active pair stale
+        # between a UTC slot boundary and the next handler tick.
+        self._last_slot: int | None = None
         self._interval_seconds: int | None = None
 
     async def should_run(self, ctx: SchedulerContext) -> bool:
@@ -36,10 +36,13 @@ class BrowserRotationHandler:
                 "COLLECTOR_BROWSER_ROTATION_INTERVAL_MINUTES", 30, min_value=1,
             )
             self._interval_seconds = minutes * 60
-        return _time.monotonic() - self._last_run >= self._interval_seconds
+        slot = int(ctx.now.timestamp() // self._interval_seconds)
+        if slot == self._last_slot:
+            return False
+        self._last_slot = slot
+        return True
 
     async def run(self, ctx: SchedulerContext) -> None:
-        self._last_run = _time.monotonic()
         try:
             await rotate_browser_schedules(ctx.pool)
         except Exception:

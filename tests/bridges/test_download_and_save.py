@@ -134,6 +134,11 @@ def test_validator_accepts_wildcard_and_exact(monkeypatch):
     ig_ingest._validate_media_url("https://pbs.twimg.com/media/x.jpg")
 
 
+def test_default_allowlist_covers_live_lemon8_cdn():
+    assert "*.ttwstatic.com" in ig_ingest.BRIDGE_MEDIA_ALLOWED_HOSTS
+    ig_ingest._validate_media_url("https://lf-lemon8-web-sg.ttwstatic.com/obj/media.jpg")
+
+
 def test_download_allowed_https_host_succeeds(monkeypatch, tmp_path):
     from src.notifications import realtime_feed
 

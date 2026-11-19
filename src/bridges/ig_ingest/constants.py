@@ -52,6 +52,7 @@ BRIDGE_MEDIA_ALLOWED_HOSTS = [
                 "*.tiktokv.com",
                 "*.tiktokv.us",
                 "*.ibytedtos.com",
+                "*.ttwstatic.com",
                 "*.twimg.com",
                 "*.googleusercontent.com",
                 "*.ggpht.com",
