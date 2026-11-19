@@ -917,6 +917,28 @@ def test_source_matrix_blocker_suppresses_live_stale_watchdog_marker():
     assert blocker["severity"] == "ok"
 
 
+def test_source_matrix_blocker_suppresses_stale_browser_warning_when_rotated_off():
+    blocker = _source_matrix_blocker(
+        _source(
+            source="instagram",
+            status="live",
+            operational_status="scheduled",
+            detail="browser schedule is inactive in the current rotation; freshness is checked when its slot is active",
+            source_health_status="degraded",
+            source_health_error=(
+                "browser capture stalled: browser content progress is 9000s old (> 3600s) (watchdog)"
+            ),
+            browser_content_stale=True,
+        ),
+        rate_row=None,
+        cursor_row=None,
+        extension_issues=[],
+    )
+
+    assert blocker["kind"] == "none"
+    assert blocker["severity"] == "ok"
+
+
 def test_source_matrix_blocker_does_not_block_live_source_for_rotated_auth_event():
     blocker = _source_matrix_blocker(
         _source(status="live"),

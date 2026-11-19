@@ -2427,6 +2427,10 @@ def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: 
         }
     source_health_error_lc = str(source_health_error).lower()
     detail_lc = str(source_row.get("detail") or "").lower()
+    scheduled_inactive = (
+        source_row.get("operational_status") == "scheduled"
+        and "browser schedule is inactive in the current rotation" in detail_lc
+    )
     browser_stall_marker = source_health_error_lc.startswith("browser capture stalled:") or (
         "browser content progress is" in source_health_error_lc
     )
@@ -2434,7 +2438,7 @@ def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: 
         "watchdog" in source_health_error_lc
     )
     stale_browser_content_now = bool(source_row.get("browser_content_stale")) or status != "live"
-    if stale_browser_content_now and (
+    if not scheduled_inactive and stale_browser_content_now and (
         browser_stall_marker
         or "browser content progress is" in detail_lc
     ):
