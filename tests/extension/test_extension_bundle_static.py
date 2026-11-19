@@ -515,7 +515,8 @@ def test_tiktok_browser_upload_allows_webapp_prime_cdn_not_regular_pages():
     )[0]
 
     cases = {"v16-webapp-prime.tiktok.com": True, "v19-webapp.tiktok.com": True,
-             "v16.tiktokcdn.com": True, "www.tiktok.com": False, "tiktok.com": False,
+             "v16.tiktokcdn.com": True, "sf16-website-login.neutral.ttwstatic.com": True,
+             "ttwstatic.com": False, "www.tiktok.com": False, "tiktok.com": False,
              "www.tiktok.com.evil.invalid": False, "v16-webapp-prime.tiktok.com.evil.invalid": False}
     script = """const vm = require('node:vm');
 const [body, cases] = JSON.parse(process.argv[1]);

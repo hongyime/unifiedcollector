@@ -2378,6 +2378,7 @@ function browserUploadAllowed(platform, rawUrl) {
 function tiktokBrowserUploadHostAllowed(host) {
   const h = String(host || "").toLowerCase();
   if (/(^|\.)((tiktokcdn|tiktokv|byteoversea|byteimg|ibytedtos|muscdn)\.com)$/i.test(h)) return true;
+  if (h === "sf16-website-login.neutral.ttwstatic.com") return true;
   // TikTok web playback URLs are first-party CDN hosts, not profile/page hosts.
   // Example seen live: v16-webapp-prime.tiktok.com/video/...
   return /^v\d+-webapp(?:-[a-z0-9-]+)?\.tiktok\.com$/i.test(h);

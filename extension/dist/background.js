@@ -2290,6 +2290,7 @@
   function tiktokBrowserUploadHostAllowed(host) {
     const h = String(host || "").toLowerCase();
     if (/(^|\.)((tiktokcdn|tiktokv|byteoversea|byteimg|ibytedtos|muscdn)\.com)$/i.test(h)) return true;
+    if (h === "sf16-website-login.neutral.ttwstatic.com") return true;
     return /^v\d+-webapp(?:-[a-z0-9-]+)?\.tiktok\.com$/i.test(h);
   }
   function shouldBrowserUploadMedia(item) {
