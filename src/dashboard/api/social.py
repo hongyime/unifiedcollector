@@ -184,6 +184,7 @@ async def social_scrape_config(_user: dict = Depends(require_role("viewer"))):
         }
         for p in browser_platforms
     }
+    expired_rate_limits: set[str] = set()
     try:
         pool = await _get_pool()
         async with pool.acquire() as conn:
@@ -229,15 +230,32 @@ async def social_scrape_config(_user: dict = Depends(require_role("viewer"))):
                         tab_block_reason="manually_paused",
                     )
                     enabled_map[source] = False
-                elif control.get("state") in {"RATE_LIMITED", "AUTH_FAILED"}:
+                elif control.get("state") == "RATE_LIMITED":
                     blocked_until = control.get("blocked_until")
+                    if blocked_until and blocked_until > now:
+                        profiles[source].update(
+                            tab_eligible=False,
+                            tab_block_reason="rate_limited",
+                            tab_retry_at=_iso(blocked_until),
+                            mode="cooldown",
+                            volume_profile="cooldown",
+                        )
+                    elif blocked_until:
+                        # The next scheduled browser pass is the proof that an
+                        # expired provider cooldown recovered. Do not deadlock it
+                        # behind the watchdog's stale pre-cooldown health row.
+                        expired_rate_limits.add(source)
+                    else:
+                        profiles[source].update(
+                            tab_eligible=False,
+                            tab_block_reason="rate_limited",
+                        )
+                elif control.get("state") == "AUTH_FAILED":
                     profiles[source].update(
                         tab_eligible=False,
-                        tab_block_reason=str(control["state"]).lower(),
-                        tab_retry_at=_iso(blocked_until),
+                        tab_block_reason="auth_failed",
+                        tab_retry_at=_iso(control.get("blocked_until")),
                     )
-                    if blocked_until and blocked_until > now:
-                        profiles[source].update(mode="cooldown", volume_profile="cooldown")
         except Exception:
             pass
         try:
@@ -259,7 +277,10 @@ async def social_scrape_config(_user: dict = Depends(require_role("viewer"))):
                 # a later health write.
                 if profile["mode"] == "manually_paused":
                     continue
-                if health.get("status") in {"degraded", "dead", "auth_paused"}:
+                if (
+                    health.get("status") in {"degraded", "dead", "auth_paused"}
+                    and source not in expired_rate_limits
+                ):
                     profile.update(
                         tab_eligible=False,
                         tab_block_reason=health.get("blocker") or health["status"],

@@ -793,6 +793,43 @@ async def test_social_scrape_config_marks_expired_recovery_as_exit_required(monk
 
 
 @pytest.mark.asyncio
+async def test_social_scrape_config_retries_expired_rate_limit_despite_stale_health(monkeypatch):
+    now = datetime.now(timezone.utc)
+
+    class _Conn:
+        async def fetch(self, query, *_args, **_kwargs):
+            if "collection_schedules" in query:
+                return [{"source": "tiktok", "enabled": True}]
+            if "source_controls" in query:
+                return [{
+                    "source_name": "tiktok",
+                    "state": "RATE_LIMITED",
+                    "enabled": True,
+                    "blocked_until": now - timedelta(seconds=1),
+                }]
+            if "source_health" in query:
+                return [{
+                    "source": "tiktok",
+                    "status": "degraded",
+                    "last_success_at": now - timedelta(hours=2),
+                    "last_checked_at": now - timedelta(hours=2),
+                    "blocker": "provider cooldown expired",
+                }]
+            return []
+
+    async def fake_get_pool():
+        return _Pool(_Conn())
+
+    monkeypatch.setattr(dashboard_api, "get_pool", fake_get_pool)
+    res = await dashboard_api.social_scrape_config()
+
+    profile = res["profiles"]["tiktok"]
+    assert profile["tab_eligible"] is True
+    assert profile["mode"] == "near_live_polling"
+    assert profile["health_status"] == "degraded"
+
+
+@pytest.mark.asyncio
 async def test_social_scrape_config_exposes_explicit_tab_failover_blocks(monkeypatch):
     now = datetime.now(timezone.utc)
 
