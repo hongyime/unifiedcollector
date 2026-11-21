@@ -43,9 +43,9 @@ async def _admit_upload(request) -> bool:
         return False
 
 
-async def _run_admitted_upload(sem: asyncio.Semaphore, coro) -> None:
+async def _run_admitted_upload(sem: asyncio.Semaphore, upload) -> None:
     try:
-        await coro
+        await upload()
     finally:
         sem.release()
 
@@ -91,7 +91,10 @@ async def ingest_upload(request):
     platform = _norm_platform(body.get("platform"))
     _schedule_app_task(
         request.app,
-        _run_admitted_upload(sem, _ingest_uploaded_media(request.app, platform, body)),
+        _run_admitted_upload(
+            sem,
+            lambda: _ingest_uploaded_media(request.app, platform, body),
+        ),
         "browser_upload_ingest",
     )
     return _cors(web.json_response(_queued_browser_upload_response(platform, body)))
@@ -159,7 +162,10 @@ async def ingest_upload_binary(request):
 
     _schedule_app_task(
         request.app,
-        _run_admitted_upload(sem, _ingest_uploaded_media(request.app, platform, body)),
+        _run_admitted_upload(
+            sem,
+            lambda: _ingest_uploaded_media(request.app, platform, body),
+        ),
         "browser_upload_binary_ingest",
     )
     return _cors(web.json_response(_queued_browser_upload_response(platform, body)))

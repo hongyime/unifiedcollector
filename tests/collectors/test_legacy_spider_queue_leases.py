@@ -25,5 +25,10 @@ def test_legacy_spider_queue_claims_use_expiry_and_fencing(collector, table):
     assert "lease_expires_at TIMESTAMPTZ" in migration
     assert "claim_token UUID" in migration
     assert "lease_expires_at <= NOW()" in source
-    assert "FOR UPDATE SKIP LOCKED" in source
+    expected_lock = (
+        "FOR UPDATE OF q SKIP LOCKED"
+        if collector in {"github", "strava"}
+        else "FOR UPDATE SKIP LOCKED"
+    )
+    assert expected_lock in source
     assert "AND claim_token = $2" in source

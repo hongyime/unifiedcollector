@@ -27,7 +27,7 @@ COMPOSE = Path(__file__).resolve().parents[2] / "docker" / "docker-compose.yml"
 # Reviewed Compose state after the source-health/capture rollout and Snapchat
 # native-public recovery. Further Compose changes must update this guard in the
 # same reviewed commit.
-FROZEN_COMPOSE_SHA256 = "491df5055dbd96335270944716f05d49be2c01b304be16f6443dedd9d1d4e71a"
+FROZEN_COMPOSE_SHA256 = "7bdd697af5278656ada04aee8c78555799a339716b842f025f56e11b8849c32a"
 
 # The reconciled intended storage root (task 29).
 INTENDED_ROOT = "/media/sg-ultra/unifiedcollector"
