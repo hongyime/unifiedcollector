@@ -185,7 +185,7 @@
   var KICK_DEBOUNCE_MS = 3e4;
   var BROWSER_UPLOAD_MAX_BYTES = 256 * 1024 * 1024;
   var BROWSER_UPLOAD_FETCH_TIMEOUT_MS = 45e3;
-  var BROWSER_UPLOAD_POST_TIMEOUT_MS = 3e4;
+  var BROWSER_UPLOAD_POST_TIMEOUT_MS = 65e3;
   var BROWSER_UPLOAD_ATTEMPT_LIMIT_BY_PLATFORM = {
     instagram: 4,
     threads: 3,
@@ -3206,7 +3206,7 @@
         sendResponse({ ok: false, error: err });
       }
     })();
-    return true;
+    return false;
   });
   async function scrapeNow() {
     await log("info", "manual 'Start/Resume loop' clicked");

@@ -96,6 +96,14 @@ def test_rotator_scrape_config_uses_the_dashboard_control_plane():
     assert 'platformScrapeDisabled(platform, base)' not in source
 
 
+def test_fast_message_reply_closes_the_response_channel():
+    source = (ROOT / "extension/src/background.ts").read_text(encoding="utf-8")
+    fast_path = source.split('const fastReplyTypes = new Set', 1)[1].split('async function scrapeNow', 1)[0]
+
+    assert 'sendResponse({ ok: true });' in fast_path
+    assert 'return false;' in fast_path
+
+
 def test_extension_endpoints_reject_remote_http_before_sending_the_bridge_secret():
     source = (ROOT / "extension/src/shared/ingest_client.ts").read_text(encoding="utf-8")
 

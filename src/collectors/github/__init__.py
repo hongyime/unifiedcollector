@@ -1669,7 +1669,7 @@ class GithubCollector(BaseCollector):
                                 END DESC,
                                 q.priority ASC,
                                 q.collected_at ASC
-                            FOR UPDATE SKIP LOCKED
+                            FOR UPDATE OF q SKIP LOCKED
                             LIMIT 1
                         )
                         RETURNING id, target_type, target_identifier, priority, claim_token

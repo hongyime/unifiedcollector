@@ -2789,7 +2789,7 @@ class SearchCollector(BaseCollector):
 
         def _encode_image() -> bytes:
             out = io.BytesIO()
-            img.save(out, format="JPEG", quality=95)
+            (img if img.mode == "RGB" else img.convert("RGB")).save(out, format="JPEG", quality=95)
             return out.getvalue()
 
         try:

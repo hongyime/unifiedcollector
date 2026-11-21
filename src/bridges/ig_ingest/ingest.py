@@ -16,6 +16,7 @@ Endpoints owned here:
 - POST /ig/ingest                        → ``ingest_ig``
 - POST /social/browser-media-candidates  → ``browser_media_candidates``
 """
+import asyncio
 import json
 import logging
 
@@ -25,6 +26,36 @@ from .cors import _cors
 
 
 logger = logging.getLogger("social_ingest")
+
+
+async def _admit_upload(request) -> bool:
+    """Reserve an upload slot before reading a potentially large request body."""
+    from . import SOCIAL_INGEST_UPLOAD_ADMISSION_WAIT_SECONDS, SOCIAL_INGEST_UPLOAD_CONCURRENCY
+
+    sem = request.app.get("upload_admission_sem")
+    if sem is None:
+        sem = asyncio.Semaphore(SOCIAL_INGEST_UPLOAD_CONCURRENCY)
+        request.app["upload_admission_sem"] = sem
+    try:
+        await asyncio.wait_for(sem.acquire(), timeout=SOCIAL_INGEST_UPLOAD_ADMISSION_WAIT_SECONDS)
+        return True
+    except TimeoutError:
+        return False
+
+
+async def _run_admitted_upload(sem: asyncio.Semaphore, coro) -> None:
+    try:
+        await coro
+    finally:
+        sem.release()
+
+
+def _upload_busy_response():
+    return _cors(web.json_response(
+        {"ok": False, "error": "upload_capacity_busy", "retryable": True},
+        status=503,
+        headers={"Retry-After": "5"},
+    ))
 
 
 async def ingest(request):
@@ -40,15 +71,27 @@ async def ingest_upload(request):
         _ingest_uploaded_media,
         _norm_platform,
         _queued_browser_upload_response,
-        _safe_json,
         _schedule_app_task,
     )
 
-    body = await _safe_json(request)
+    if not await _admit_upload(request):
+        return _upload_busy_response()
+    sem = request.app["upload_admission_sem"]
+    try:
+        body = await request.json()
+    except asyncio.CancelledError:
+        sem.release()
+        raise
+    except Exception:
+        sem.release()
+        return _cors(web.json_response({"ok": False, "error": "bad_json"}, status=400))
+    if not isinstance(body, dict):
+        sem.release()
+        return _cors(web.json_response({"ok": False, "error": "bad_json"}, status=400))
     platform = _norm_platform(body.get("platform"))
     _schedule_app_task(
         request.app,
-        _ingest_uploaded_media(request.app, platform, body),
+        _run_admitted_upload(sem, _ingest_uploaded_media(request.app, platform, body)),
         "browser_upload_ingest",
     )
     return _cors(web.json_response(_queued_browser_upload_response(platform, body)))
@@ -62,6 +105,9 @@ async def ingest_upload_binary(request):
         _schedule_app_task,
     )
 
+    if not await _admit_upload(request):
+        return _upload_busy_response()
+    sem = request.app["upload_admission_sem"]
     body: dict = {}
     file_bytes: bytes | None = None
     file_mime: str | None = None
@@ -80,7 +126,11 @@ async def ingest_upload_binary(request):
                 file_name = part.filename
                 file_mime = part.headers.get("Content-Type")
                 file_bytes = await part.read(decode=False)
+    except asyncio.CancelledError:
+        sem.release()
+        raise
     except Exception as exc:
+        sem.release()
         logger.warning("browser multipart upload parse failed: %s", exc.__class__.__name__)
         return _cors(web.json_response({"ok": False, "error": "bad_multipart"}, status=400))
 
@@ -90,6 +140,7 @@ async def ingest_upload_binary(request):
     item = body.get("item") if isinstance(body.get("item"), dict) else {}
     item = dict(item)
     if not file_bytes:
+        sem.release()
         return _cors(web.json_response({"ok": False, "error": "missing_file", "platform": platform}, status=400))
 
     item["data_bytes"] = file_bytes
@@ -108,7 +159,7 @@ async def ingest_upload_binary(request):
 
     _schedule_app_task(
         request.app,
-        _ingest_uploaded_media(request.app, platform, body),
+        _run_admitted_upload(sem, _ingest_uploaded_media(request.app, platform, body)),
         "browser_upload_binary_ingest",
     )
     return _cors(web.json_response(_queued_browser_upload_response(platform, body)))

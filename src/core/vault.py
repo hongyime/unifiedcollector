@@ -76,13 +76,20 @@ class HistoricalMediaStorageGate:
 HISTORICAL_MEDIA_MIN_FREE_BYTES = 750 * 1024**3
 
 
+def _historical_media_min_free_bytes() -> int:
+    try:
+        return max(0, int(os.getenv("HISTORICAL_MEDIA_MIN_FREE_BYTES", str(HISTORICAL_MEDIA_MIN_FREE_BYTES))))
+    except ValueError:
+        return HISTORICAL_MEDIA_MIN_FREE_BYTES
+
+
 def historical_media_storage_gate(root: Path = VAULT_ROOT) -> HistoricalMediaStorageGate:
-    """Reserve the larger of 750 GiB or 20% of the vault for historical media."""
+    """Reserve the larger of configured (750 GiB by default) or 20% of the vault."""
     try:
         usage = shutil.disk_usage(root)
     except OSError as exc:
         return HistoricalMediaStorageGate(False, None, None, f"storage check failed: {exc}")
-    reserve_bytes = max(HISTORICAL_MEDIA_MIN_FREE_BYTES, usage.total // 5)
+    reserve_bytes = max(_historical_media_min_free_bytes(), usage.total // 5)
     if usage.free <= reserve_bytes:
         return HistoricalMediaStorageGate(
             False,

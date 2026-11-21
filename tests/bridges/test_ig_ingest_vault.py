@@ -5,6 +5,7 @@ import inspect
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -1720,6 +1721,63 @@ def test_structured_browser_capture_paths_use_structured_timeout(monkeypatch):
     assert ig_ingest._request_timeout_seconds("/social/browser-heartbeat") == 31.0
     assert ig_ingest._request_timeout_seconds("/social/ingest-upload") == 60.0
     assert ig_ingest._request_timeout_seconds("/social/targets") == 8.0
+
+
+def test_upload_admission_rejects_before_reading_a_saturated_body(monkeypatch):
+    async def run():
+        sem = asyncio.Semaphore(1)
+        await sem.acquire()
+        request = _FakeRequest({"upload_admission_sem": sem}, {})
+
+        async def unreadable_json():
+            raise AssertionError("saturated uploads must not read the body")
+
+        request.json = unreadable_json
+        monkeypatch.setattr(ig_ingest, "SOCIAL_INGEST_UPLOAD_ADMISSION_WAIT_SECONDS", 0.001)
+        response = await ig_ingest.ingest_upload(request)
+        assert response.status == 503
+        assert response.headers["Retry-After"] == "5"
+
+    asyncio.run(run())
+
+
+def test_upload_admission_releases_slot_for_malformed_json():
+    async def run():
+        sem = asyncio.Semaphore(1)
+        request = _FakeRequest({"upload_admission_sem": sem}, {})
+
+        async def malformed_json():
+            raise ValueError("bad json")
+
+        request.json = malformed_json
+        response = await ig_ingest.ingest_upload(request)
+        assert response.status == 400
+        assert not sem.locked()
+
+    asyncio.run(run())
+
+
+def test_upload_admission_releases_slot_after_background_work(monkeypatch):
+    async def run():
+        scheduled = []
+        sem = asyncio.Semaphore(1)
+        request = _FakeRequest(
+            {"upload_admission_sem": sem},
+            {"platform": "instagram", "username": "alice", "item": {}},
+        )
+
+        def schedule(_app, coro, _label):
+            scheduled.append(coro)
+
+        monkeypatch.setattr(ig_ingest, "_schedule_app_task", schedule)
+        monkeypatch.setattr(ig_ingest, "_ingest_uploaded_media", AsyncMock())
+        response = await ig_ingest.ingest_upload(request)
+        assert response.status == 200
+        assert sem.locked()
+        await scheduled.pop()
+        assert not sem.locked()
+
+    asyncio.run(run())
 
 
 def test_posts_handler_queues_structured_ingest_without_waiting(monkeypatch):

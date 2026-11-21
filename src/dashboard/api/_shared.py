@@ -3809,82 +3809,13 @@ def _jsonish(value):
 
 # /stories/overview route extracted to api/misc.py during PERF-002 4A step 20.
 
-def _parse_media_uuid(media_id: str) -> _uuid.UUID:
-    """Validate the ``media_id`` path param as a UUID.
-
-    ``media_items.id`` is a UUID but the endpoint was previously typed ``int``,
-    so every ``Number(item.id)`` from the frontend turned into ``NaN`` and the
-    request got a 422 -- which is what the "broken image" tiles in the media
-    browser actually were.
-    """
-    try:
-        return _uuid.UUID(media_id)
-    except (ValueError, AttributeError, TypeError):
-        raise HTTPException(status_code=404, detail="Invalid media id")
-
-
-def _is_relative_to_path(path: Path, root: Path) -> bool:
-    try:
-        path.relative_to(root)
-        return True
-    except ValueError:
-        return False
-
-
-def _allowed_media_roots() -> list[Path]:
-    """Roots that are allowed to serve media_items.file_path values.
-
-    Legacy collectors store paths under COLLECTOR_DRIVE_PATH. New vault-backed
-    media blobs are keyed by sha256 under VAULT_ROOT/media. Both locations map
-    to the same external vault in production, but containers can see them as
-    distinct mount points.
-    """
-    from src.core.drive_check import DRIVE_PATH as _DRIVE_PATH
-
-    _vault_root = _p("VAULT_ROOT", VAULT_ROOT)
-    roots = [
-        Path(_DRIVE_PATH).resolve(),
-        (Path(_vault_root) / "media").resolve(),
-    ]
-    unique: list[Path] = []
-    for root in roots:
-        if root not in unique:
-            unique.append(root)
-    return unique
-
-
-def _resolve_media_path(file_path_str: str) -> Path:
-    """Resolve a media_items.file_path, constrained to configured media roots.
-
-    Raises HTTPException (403/404) on traversal or a missing file. Shared by the
-    thumbnail + file endpoints so a poisoned file_path can't serve host files.
-    """
-    if not file_path_str:
-        raise HTTPException(status_code=404, detail="Media path missing")
-    file_path = Path(file_path_str).resolve()
-    if not any(_is_relative_to_path(file_path, root) for root in _allowed_media_roots()):
-        raise HTTPException(status_code=403, detail="Path outside media roots")
-    if not file_path.is_file():
-        raise HTTPException(status_code=404, detail="File not found on disk")
-    return file_path
-
-
-def _thumbnail_placeholder(label: str, detail: str = "") -> Response:
-    safe_label = html.escape((label or "media").upper()[:24])
-    safe_detail = html.escape((detail or "preview unavailable")[:64])
-    svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="300" height="300" viewBox="0 0 300 300" role="img" aria-label="{safe_label}">
-<rect width="300" height="300" fill="#111827"/>
-<rect x="18" y="18" width="264" height="264" rx="10" fill="#1f2937" stroke="#374151" stroke-width="2"/>
-<circle cx="150" cy="122" r="34" fill="#4b5563"/>
-<path d="M142 104 L172 122 L142 140 Z" fill="#e5e7eb"/>
-<text x="150" y="190" text-anchor="middle" fill="#f9fafb" font-family="Arial, sans-serif" font-size="24" font-weight="700">{safe_label}</text>
-<text x="150" y="218" text-anchor="middle" fill="#9ca3af" font-family="Arial, sans-serif" font-size="13">{safe_detail}</text>
-</svg>"""
-    return Response(
-        content=svg,
-        media_type="image/svg+xml",
-        headers={"Cache-Control": "private, max-age=300"},
-    )
+from src.dashboard.api.media_resolver import (  # noqa: E402,F401
+    _allowed_media_roots,
+    _is_relative_to_path,
+    _parse_media_uuid,
+    _resolve_media_path,
+    _thumbnail_placeholder,
+)
 
 
 

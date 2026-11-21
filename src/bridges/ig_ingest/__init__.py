@@ -2101,15 +2101,10 @@ async def _ingest_uploaded_media(app, platform, body):
         "browser_upload_mime_type": body.get("mime_type"),
     }
     reject_stats: dict = {}
-    upload_sem = app.get("upload_sem") or app.get("sem")
-    if upload_sem is None:
-        upload_sem = asyncio.Semaphore(SOCIAL_INGEST_UPLOAD_CONCURRENCY)
-        app["upload_sem"] = upload_sem
     saved = False
     save_error: BaseException | None = None
     try:
-        async with upload_sem:
-            saved = await _download_and_save(app["pool"], app["session"], platform, username, item, reject_stats)
+        saved = await _download_and_save(app["pool"], app["session"], platform, username, item, reject_stats)
     except Exception as exc:
         # The HTTP response already reported queued=true/stored=0; letting this
         # raise would die in _schedule_app_task's debug log with no event row,
@@ -4344,7 +4339,7 @@ async def _on_startup(app):
     app["startup_state"] = {"error": None, "pending": True}
     app["tasks"] = set()
     app["sem"] = asyncio.Semaphore(DL_CONCURRENCY)
-    app["upload_sem"] = asyncio.Semaphore(SOCIAL_INGEST_UPLOAD_CONCURRENCY)
+    app["upload_admission_sem"] = asyncio.Semaphore(SOCIAL_INGEST_UPLOAD_CONCURRENCY)
     app["structured_sem"] = asyncio.Semaphore(SOCIAL_INGEST_STRUCTURED_BACKGROUND_CONCURRENCY)
     app["heartbeat_lane_sem"] = asyncio.Semaphore(SOCIAL_INGEST_HEARTBEAT_CONCURRENCY)
     app["write_lane_sem"] = asyncio.Semaphore(SOCIAL_INGEST_WRITE_CONCURRENCY)

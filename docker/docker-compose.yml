@@ -1148,7 +1148,7 @@ services:
     image: unifiedcollector-collector:latest
     container_name: unifiedcollector_browser_ingest
     command: python -m src.bridges.ig_ingest
-    mem_limit: 512m
+    mem_limit: 2g
     ports:
       - "127.0.0.1:8765:8765"
     environment:
@@ -1166,6 +1166,7 @@ services:
       SOCIAL_INGEST_HEARTBEAT_CONCURRENCY: "16"
       SOCIAL_INGEST_WRITE_CONCURRENCY: "4"
       SOCIAL_INGEST_REVISIT_CONCURRENCY: "2"
+      SOCIAL_INGEST_UPLOAD_CONCURRENCY: "4"
       SOCIAL_INGEST_DM_SAMPLE_CONCURRENCY: "1"
       SOCIAL_INGEST_LANE_WAIT_SECONDS: "0.25"
       BROWSER_CONTENT_HINT_RESPONSE_TIMEOUT_SECONDS: "2.0"

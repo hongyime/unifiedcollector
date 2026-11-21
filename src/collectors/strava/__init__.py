@@ -1169,7 +1169,7 @@ class StravaCollector(BaseCollector):
                             q.priority ASC,
                             q.collected_at ASC
                         LIMIT 1
-                        FOR UPDATE SKIP LOCKED
+                        FOR UPDATE OF q SKIP LOCKED
                     )
                     RETURNING id, platform_athlete_id, claim_token
                 """, uuid4())

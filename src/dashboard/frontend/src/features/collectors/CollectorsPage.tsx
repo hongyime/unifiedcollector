@@ -7,6 +7,7 @@ import { useCollectors } from "../../hooks/useCollectors";
 import { relativeTime } from "../../utils/formatters";
 import type { ColumnDef } from "@tanstack/react-table";
 import type { CollectorStatus } from "../../services/types";
+import { Link } from "react-router";
 
 function mapStatus(s: string): "online" | "processing" | "idle" | "error" | "offline" {
   if (s === "running") return "processing";
@@ -19,7 +20,10 @@ const columns: ColumnDef<CollectorStatus, unknown>[] = [
   {
     accessorKey: "service",
     header: "Collector",
-    cell: (info) => <span className="uppercase font-medium text-text-primary">{info.getValue() as string}</span>,
+    cell: (info) => {
+      const source = info.getValue() as string;
+      return <Link className="uppercase font-medium text-text-primary hover:text-accent" to={`/collectors/${source}`}>{source}</Link>;
+    },
   },
   {
     accessorKey: "status",

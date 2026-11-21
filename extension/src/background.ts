@@ -96,7 +96,7 @@ const WATCHDOG_MIN = 7;          // re-nudge any open scraper tab whose loop die
 const KICK_DEBOUNCE_MS = 30000;  // don't re-nudge the same tab more often than this
 const BROWSER_UPLOAD_MAX_BYTES = 256 * 1024 * 1024;
 const BROWSER_UPLOAD_FETCH_TIMEOUT_MS = 45000;
-const BROWSER_UPLOAD_POST_TIMEOUT_MS = 30000;
+const BROWSER_UPLOAD_POST_TIMEOUT_MS = 65000;
 const BROWSER_UPLOAD_ATTEMPT_LIMIT_BY_PLATFORM = {
   instagram: 4,
   threads: 3,
@@ -2667,8 +2667,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   const fastReplyTypes = new Set(["log", "tabReady", "loopStatus", "cycleReport"]);
   if (msg && fastReplyTypes.has(msg.type)) {
     sendResponse({ ok: true });
-    // Continue heavy work asynchronously; the outer listener still returns
-    // true below so Chrome doesn't complain about a closed channel.
+    // Continue heavy work asynchronously after closing the response channel.
     (async () => {
       try {
         const base = await ingestBase();
@@ -3331,7 +3330,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse({ ok: false, error: err });
     }
   })();
-  return true; // async
+  return false;
 });
 
 async function scrapeNow() {

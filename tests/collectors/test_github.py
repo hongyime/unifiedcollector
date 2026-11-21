@@ -1046,3 +1046,17 @@ async def test_reclaim_stranded_spider_queue_once(monkeypatch):
     # Second call in the same process is a no-op.
     await coll._reclaim_stranded_spider_queue()
     conn.execute.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_spider_claim_locks_only_queue_row(monkeypatch):
+    coll = _new_collector(monkeypatch)
+    coll._reclaim_stranded_spider_queue = AsyncMock()
+    monkeypatch.setattr(github_mod, "refresh_account_proximity_cache", AsyncMock())
+    coll.pool._conn.fetchrow = AsyncMock(return_value=None)
+    _patch_make_client(coll, MagicMock())
+
+    await coll._process_spider_queue(batch_size=1, concurrency=1)
+
+    claim_sql = coll.pool._conn.fetchrow.await_args.args[0]
+    assert "FOR UPDATE OF q SKIP LOCKED" in claim_sql

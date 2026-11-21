@@ -360,10 +360,13 @@ async def serve_guard(database_host: str) -> None:
         socket_path.unlink()
 
     async def attest(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        writer.write(b"ok\n" if network_policy_installed(use_guard_socket=False) else b"blocked\n")
-        await writer.drain()
-        writer.close()
-        await writer.wait_closed()
+        try:
+            writer.write(b"ok\n" if network_policy_installed(use_guard_socket=False) else b"blocked\n")
+            await writer.drain()
+            writer.close()
+            await writer.wait_closed()
+        except (ConnectionResetError, BrokenPipeError):
+            logger.debug("recon guard client disconnected before attestation completed")
 
     server = await asyncio.start_unix_server(attest, path=str(socket_path))
     os.chown(socket_path, -1, shared_gid)

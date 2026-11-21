@@ -1349,6 +1349,22 @@ async def test_reclaim_stranded_spider_queue_once(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_spider_claim_locks_only_queue_row(monkeypatch):
+    _set_web_env(monkeypatch)
+    coll = StravaCollector()
+    pool = _make_pool()
+    coll.set_pool(pool)
+    coll._reclaim_stranded_spider_queue = AsyncMock()
+    monkeypatch.setattr(strava_mod, "refresh_account_proximity_cache", AsyncMock())
+    pool._conn.fetchrow = AsyncMock(return_value=None)
+
+    await coll._process_spider_queue()
+
+    claim_sql = pool._conn.fetchrow.await_args.args[0]
+    assert "FOR UPDATE OF q SKIP LOCKED" in claim_sql
+
+
+@pytest.mark.asyncio
 async def test_failed_cookie_preflight_restores_cycle_state(monkeypatch, tmp_path):
     from contextlib import contextmanager
     from src.core import extractor_fallback

@@ -1,9 +1,14 @@
 """Connection recovery must respect its budget without touching a database."""
 import asyncio
+import inspect
 
 import pytest
 
 from src.db import connection
+
+
+def test_default_pool_cap_is_five(monkeypatch):
+    assert 'DB_POOL_MAX_SIZE", "5"' in inspect.getsource(connection.get_pool)
 
 
 @pytest.mark.asyncio

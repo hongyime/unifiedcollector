@@ -89,7 +89,7 @@ def _schedule_app_task(app, coro, label: str) -> None:
         except asyncio.CancelledError:
             raise
         except Exception:
-            logger.debug("%s background task failed", label, exc_info=True)
+            logger.error("%s background task failed", label, exc_info=True)
 
     task = asyncio.create_task(_runner())
     app.setdefault("tasks", set()).add(task)

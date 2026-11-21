@@ -164,11 +164,12 @@ async def get_pool() -> asyncpg.Pool:
             # of max_size × pools must stay under the server's max_connections,
             # or bursts exhaust the slots and asyncpg raises TimeoutError on
             # connect (observed crashing beeper/whatsapp/lemon8). Defaults:
-            # min_size=1 (small idle footprint), max_size=10 (14×10=140 < the
-            # server's 200 ceiling). Override per-container via env if needed.
+            # min_size=1 (small idle footprint), max_size=5. With the explicit
+            # service overrides this keeps the configured fleet below Postgres's
+            # 200-connection ceiling. Override per-container via env if needed.
             import os as _os
             _min = int(_os.getenv("DB_POOL_MIN_SIZE", "1"))
-            _max = int(_os.getenv("DB_POOL_MAX_SIZE", "10"))
+            _max = int(_os.getenv("DB_POOL_MAX_SIZE", "5"))
             # Server-side session settings applied to every pooled connection:
             #   idle_in_transaction_session_timeout: Postgres kills any session
             #     that stays 'idle in transaction' longer than this. Protects
