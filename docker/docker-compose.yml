@@ -154,6 +154,7 @@ services:
       start_period: 5s
     volumes:
       - /var/lib/unifiedcollector/recon-guard:/var/lib/unifiedcollector/recon-guard
+      - ../src:/app/src:ro
     restart: unless-stopped
     logging: *bounded-json-logs
 

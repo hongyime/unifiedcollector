@@ -226,3 +226,55 @@ def test_database_address_refresh_reinstalls_only_after_docker_dns_changes(monke
     assert addresses == ("172.20.0.13",)
     assert refreshed
     assert installs == ["postgres"]
+
+
+@pytest.mark.asyncio
+async def test_serve_guard_attest_handles_client_disconnect(monkeypatch, tmp_path):
+    from unittest.mock import AsyncMock, MagicMock
+    import asyncio
+    from src.core import recon_egress_guard
+
+    sock_path = tmp_path / "guard.sock"
+    monkeypatch.setenv("RECON_EGRESS_GUARD_SOCKET", str(sock_path))
+    monkeypatch.setattr("os.chown", lambda *args, **kwargs: None)
+    monkeypatch.setattr("os.chmod", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.core.recon_egress_guard.network_policy_installed", lambda use_guard_socket=False: True)
+    monkeypatch.setattr("src.core.recon_egress_guard.install_network_policy", lambda *args, **kwargs: ("127.0.0.1",))
+    monkeypatch.setattr("src.core.recon_egress_guard._refresh_database_policy", lambda host, addr: (addr, False))
+
+    writer = MagicMock()
+    writer.write = MagicMock()
+    writer.drain = AsyncMock(side_effect=ConnectionResetError("Connection reset by peer"))
+    writer.close = MagicMock()
+    writer.wait_closed = AsyncMock()
+
+    captured_attest = None
+
+    async def fake_start_unix_server(client_connected_cb, path):
+        nonlocal captured_attest
+        captured_attest = client_connected_cb
+        server = MagicMock()
+        server.close = MagicMock()
+        server.wait_closed = AsyncMock()
+        return server
+
+    monkeypatch.setattr(asyncio, "start_unix_server", fake_start_unix_server)
+
+    task = asyncio.create_task(recon_egress_guard.serve_guard("postgres"))
+    await asyncio.sleep(0.01)
+    task.cancel()
+    try:
+        await task
+    except (asyncio.CancelledError, Exception):
+        pass
+
+    assert captured_attest is not None
+
+    reader = MagicMock()
+    # Must not raise on ConnectionResetError
+    await captured_attest(reader, writer)
+
+    # Must not raise on BrokenPipeError
+    writer.drain = AsyncMock(side_effect=BrokenPipeError("Broken pipe"))
+    await captured_attest(reader, writer)
+
