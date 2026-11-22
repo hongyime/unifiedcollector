@@ -1,41 +1,5 @@
 "use strict";
 (() => {
-  // src/shared/platforms.ts
-  var UC_PLATFORMS = [
-    { id: "instagram", label: "Instagram", url: "https://www.instagram.com/", host: "www.instagram.com", cookieUrl: "https://www.instagram.com", cookie: "sessionid", scraper: true },
-    // Threads moved threads.net → threads.com in Apr 2025 (.net just redirects).
-    { id: "threads", label: "Threads", url: "https://www.threads.com/", host: "www.threads.com", cookieUrl: "https://www.threads.com", cookie: "sessionid", scraper: true },
-    // Keep one visible /following tab per platform; broader coverage runs in that tab.
-    { id: "tiktok", label: "TikTok", url: "https://www.tiktok.com/following", host: "www.tiktok.com", cookieUrl: "https://www.tiktok.com", cookie: "sessionid", scraper: true },
-    // Keep the single visible tab on the populated For You feed; the extension
-    // supplements the headless API collector with paced DOM media candidates.
-    { id: "lemon8", label: "Lemon8", url: "https://www.lemon8-app.com/feed/foryou", host: "www.lemon8-app.com", cookieUrl: "https://www.lemon8-app.com", cookie: "sessionid", scraper: true, noLogin: true },
-    { id: "x", label: "Twitter / X", url: "https://x.com/home", host: "x.com", aliasHosts: ["twitter.com"], cookieUrl: "https://x.com", cookie: "auth_token", scraper: true },
-    { id: "facebook", label: "Facebook", url: "https://www.facebook.com/", host: "www.facebook.com", cookieUrl: "https://www.facebook.com", cookie: "c_user", scraper: true },
-    { id: "strava", label: "Strava", url: "https://www.strava.com/dashboard", host: "www.strava.com", cookieUrl: "https://www.strava.com", cookie: "_strava4_session", scraper: true },
-    { id: "pinterest", label: "Pinterest", url: "https://www.pinterest.com/", host: "pinterest.com", cookieUrl: "https://www.pinterest.com", cookie: "_pinterest_sess", scraper: true },
-    { id: "snapchat", label: "Snapchat", url: "https://www.snapchat.com/", host: "snapchat.com", cookieUrl: "https://accounts.snapchat.com", cookie: "__Host-sc-a-auth-session", scraper: true },
-    { id: "airbnb", label: "Airbnb", url: "https://www.airbnb.com/", host: "airbnb.com", aliasHosts: ["airbnb.com.sg", "airbnb.co.uk", "airbnb.co.kr"], cookieUrl: "https://www.airbnb.com", cookieUrls: ["https://www.airbnb.com.sg", "https://www.airbnb.co.uk", "https://www.airbnb.co.kr"], cookie: "_aat", scraper: true },
-    // Managed for authenticated CDP cookie snapshots; collection remains source-owned.
-    { id: "bluesky", label: "Bluesky", url: "https://bsky.app/", host: "bsky.app", cookieUrl: "https://bsky.app", cookie: "sid", scraper: true },
-    { id: "youtube", label: "YouTube", url: "https://www.youtube.com/", host: "www.youtube.com", cookieUrl: "https://www.youtube.com", cookie: "SID", scraper: true }
-  ];
-
-  // src/shared/log.ts
-  var LOG_KEY = "ucLog";
-  var LOG_MAX = 200;
-  async function log(level, msg) {
-    const entry = { t: Date.now(), level, msg };
-    try {
-      const { [LOG_KEY]: cur = [] } = await chrome.storage.local.get(LOG_KEY);
-      cur.push(entry);
-      while (cur.length > LOG_MAX) cur.shift();
-      await chrome.storage.local.set({ [LOG_KEY]: cur });
-    } catch (e) {
-    }
-    console.log(`[UC ${level}] ${msg}`);
-  }
-
   // src/shared/ingest_client.ts
   var DEFAULT_INGEST = "http://127.0.0.1:8765";
   var DEFAULT_CONTROL = "http://127.0.0.1:8700";
@@ -118,241 +82,22 @@
     }
   }
 
-  // src/background.ts
-  self.addEventListener("error", (event) => {
-    const detail = {
-      kind: "sw_error_event",
-      message: event && event.message || null,
-      filename: event && event.filename || null,
-      lineno: event && event.lineno || null,
-      colno: event && event.colno || null,
-      stack: event && event.error && event.error.stack || null
-    };
+  // src/shared/log.ts
+  var LOG_KEY = "ucLog";
+  var LOG_MAX = 200;
+  async function log(level, msg) {
+    const entry = { t: Date.now(), level, msg };
     try {
-      console.error("[UC sw_error]", detail);
-    } catch (_) {
+      const { [LOG_KEY]: cur = [] } = await chrome.storage.local.get(LOG_KEY);
+      cur.push(entry);
+      while (cur.length > LOG_MAX) cur.shift();
+      await chrome.storage.local.set({ [LOG_KEY]: cur });
+    } catch (e) {
     }
-    try {
-      _reportSwCrash(detail);
-    } catch (_) {
-    }
-  });
-  self.addEventListener("unhandledrejection", (event) => {
-    const reason = event && event.reason;
-    const detail = {
-      kind: "sw_unhandled_rejection",
-      message: reason && reason.message || (typeof reason === "string" ? reason : null),
-      stack: reason && reason.stack || null
-    };
-    try {
-      console.error("[UC sw_reject]", detail);
-    } catch (_) {
-    }
-    try {
-      _reportSwCrash(detail);
-    } catch (_) {
-    }
-  });
-  async function _reportSwCrash(detail) {
-    try {
-      chrome.storage.local.get("ucLog").then(({ ucLog = [] }) => {
-        ucLog.push({ t: Date.now(), level: "error", msg: "sw_crash", detail });
-        while (ucLog.length > 200) ucLog.shift();
-        chrome.storage.local.set({ ucLog }).catch(() => {
-        });
-      }).catch(() => {
-      });
-    } catch (_) {
-    }
-    try {
-      fetch("http://127.0.0.1:8765/social/sw-crash", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...await bridgeHeaders() },
-        body: JSON.stringify({
-          ...detail,
-          extension_version: chrome.runtime.getManifest && chrome.runtime.getManifest().version || null,
-          reported_at: Date.now()
-        }),
-        keepalive: true
-      }).catch(() => {
-      });
-    } catch (_) {
-    }
+    console.log(`[UC ${level}] ${msg}`);
   }
-  globalThis.UC_PLATFORMS = UC_PLATFORMS;
-  var ALARM = "uc-scrape";
-  var WATCHDOG_MIN = 7;
-  var KICK_DEBOUNCE_MS = 3e4;
-  var BROWSER_UPLOAD_MAX_BYTES = 256 * 1024 * 1024;
-  var BROWSER_UPLOAD_FETCH_TIMEOUT_MS = 45e3;
-  var BROWSER_UPLOAD_POST_TIMEOUT_MS = 65e3;
-  var BROWSER_UPLOAD_ATTEMPT_LIMIT_BY_PLATFORM = {
-    instagram: 4,
-    threads: 3,
-    tiktok: 2,
-    facebook: 2,
-    x: 1,
-    lemon8: 1
-  };
-  var browserUploadChains = {};
-  var PAGE_RECOVERY_PREFIX = "uc-page-recovery:";
-  var PAGE_RECOVERY_STATE_KEY = "ucPageRecovery";
-  var PAGE_RECOVERY_MAX_ATTEMPTS = 3;
-  var PAGE_RECOVERY_STATE_TTL_MS = 60 * 60 * 1e3;
-  var PAGE_RECOVERY_LIMIT_COOLDOWN_MS = 30 * 60 * 1e3;
-  var PAGE_RECOVERY_LIMIT_COOLDOWN_MS_BY_PLATFORM = {
-    x: 10 * 60 * 1e3
-  };
-  var BROWSER_REVISIT_WATCHDOG_PREFIX = "uc-browser-revisit-watchdog:";
-  var BROWSER_REVISIT_NAVIGATION_TIMEOUT_MS = 12e4;
-  var BROWSER_REVISIT_RESULT_TIMEOUT_MS = 10 * 60 * 1e3;
-  var RELOAD_INTENT_KEY = "ucReloadIntent";
-  var LOADED_VERSION_KEY = "ucLoadedExtensionVersion";
-  var SCRAPER_HEARTBEAT_TIMEOUT_MS = 12e3;
-  var SCRAPER_HEARTBEAT_CONCURRENCY = 3;
-  var PAGE_RECOVERY_DELAY_WINDOWS_MS = [
-    [45e3, 15e4],
-    [24e4, 48e4],
-    [72e4, 12e5]
-  ];
-  var HOME_NAV_HARD_REFRESH_PLATFORMS = /* @__PURE__ */ new Set(["x", "threads", "lemon8"]);
-  async function setStatus(patch) {
-    const { ucStatus = {} } = await chrome.storage.local.get("ucStatus");
-    await chrome.storage.local.set({ ucStatus: { ...ucStatus, ...patch } });
-  }
-  async function getStatus() {
-    const { ucStatus = {} } = await chrome.storage.local.get("ucStatus");
-    return ucStatus;
-  }
-  function browserRevisitWatchdogKey(queue, platform) {
-    return `ucBrowserRevisitWatchdog:${queue}:${platform}`;
-  }
-  function browserRevisitWatchdogAlarm(queue, platform) {
-    return `${BROWSER_REVISIT_WATCHDOG_PREFIX}${queue}:${platform}`;
-  }
-  async function armBrowserRevisitWatchdog(msg, sender) {
-    const queue = msg && msg.queue === "tiktok" ? "tiktok" : "browser";
-    const platform = queue === "tiktok" ? "tiktok" : String(msg && msg.platform || "").toLowerCase();
-    const contentId = String(msg && msg.content_id || "").trim();
-    const tabId = sender && sender.tab && Number.isInteger(sender.tab.id) ? sender.tab.id : null;
-    if (!platform || !contentId || tabId == null) return { ok: false };
-    const key = browserRevisitWatchdogKey(queue, platform);
-    const alarmName = browserRevisitWatchdogAlarm(queue, platform);
-    const values = await chrome.storage.local.get(key);
-    const existing = values && values[key];
-    const claimAttempt = msg.claim_attempt == null ? null : Number(msg.claim_attempt);
-    if (existing && existing.content_id === contentId && existing.claim_attempt === claimAttempt && existing.tab_id === tabId && existing.url === msg.url) {
-      await chrome.alarms.create(alarmName, { when: existing.deadline_at || Date.now() + BROWSER_REVISIT_NAVIGATION_TIMEOUT_MS });
-      return { ok: true };
-    }
-    const startedAt = Number(msg.navigation_started_at || Date.now());
-    const state = {
-      queue,
-      platform,
-      content_id: contentId,
-      claim_attempt: claimAttempt,
-      tab_id: tabId,
-      url: String(msg.url || ""),
-      phase: "navigation",
-      deadline_at: startedAt + BROWSER_REVISIT_NAVIGATION_TIMEOUT_MS
-    };
-    await chrome.storage.local.set({ [key]: state });
-    await chrome.alarms.create(alarmName, { when: state.deadline_at });
-    return { ok: true };
-  }
-  function browserRevisitPageMatches(platform, actualUrl, targetUrl) {
-    try {
-      const actual = new URL(actualUrl);
-      const target = new URL(targetUrl);
-      if (actual.pathname.replace(/\/$/, "") !== target.pathname.replace(/\/$/, "")) return false;
-      const hosts = {
-        instagram: /* @__PURE__ */ new Set(["instagram.com", "www.instagram.com"]),
-        threads: /* @__PURE__ */ new Set(["threads.com", "www.threads.com", "threads.net", "www.threads.net"]),
-        tiktok: /* @__PURE__ */ new Set(["tiktok.com", "www.tiktok.com"]),
-        x: /* @__PURE__ */ new Set(["x.com", "www.x.com", "twitter.com", "www.twitter.com"]),
-        facebook: /* @__PURE__ */ new Set(["facebook.com", "www.facebook.com", "m.facebook.com"]),
-        lemon8: /* @__PURE__ */ new Set(["lemon8-app.com", "www.lemon8-app.com", "lemon8.com", "www.lemon8.com"])
-      }[platform];
-      const hostOk = (hostname) => {
-        const host = hostname.toLowerCase();
-        if (hosts && hosts.has(host)) return true;
-        if (platform === "instagram") return host === "instagram.com" || host.endsWith(".instagram.com");
-        if (platform === "facebook") return host === "facebook.com" || host.endsWith(".facebook.com");
-        return false;
-      };
-      return hostOk(actual.hostname) && hostOk(target.hostname);
-    } catch (_) {
-      return false;
-    }
-  }
-  async function clearBrowserRevisitWatchdog(queue, platform, contentId, claimAttempt) {
-    const key = browserRevisitWatchdogKey(queue, platform);
-    const alarmName = browserRevisitWatchdogAlarm(queue, platform);
-    const values = await chrome.storage.local.get(key);
-    const existing = values && values[key];
-    if (!existing || existing.content_id !== contentId || existing.claim_attempt !== claimAttempt) return;
-    await chrome.storage.local.remove(key);
-    await chrome.alarms.clear(alarmName);
-  }
-  async function runBrowserRevisitWatchdog(alarmName) {
-    const suffix = alarmName.slice(BROWSER_REVISIT_WATCHDOG_PREFIX.length);
-    const [queue, ...platformParts] = suffix.split(":");
-    const platform = platformParts.join(":");
-    if (!(/* @__PURE__ */ new Set(["browser", "tiktok"])).has(queue) || !platform) return;
-    const key = browserRevisitWatchdogKey(queue, platform);
-    const values = await chrome.storage.local.get(key);
-    const state = values && values[key];
-    if (!state || !state.content_id) return;
-    if (Number(state.deadline_at || 0) > Date.now()) {
-      await chrome.alarms.create(alarmName, { when: state.deadline_at });
-      return;
-    }
-    let tab = null;
-    try {
-      tab = await chrome.tabs.get(state.tab_id);
-    } catch (_) {
-    }
-    if (tab && browserRevisitPageMatches(platform, tab.url || "", state.url || "")) {
-      if (state.phase === "navigation") {
-        const next2 = { ...state, phase: "result", deadline_at: Date.now() + BROWSER_REVISIT_RESULT_TIMEOUT_MS };
-        await chrome.storage.local.set({ [key]: next2 });
-        await chrome.alarms.create(alarmName, { when: next2.deadline_at });
-        return;
-      }
-    }
-    const reason = !tab ? "detail_tab_closed" : state.phase === "navigation" ? "detail_navigation_timeout" : "detail_result_timeout";
-    try {
-      const base = await ingestBase();
-      const endpoint = queue === "tiktok" ? "/social/tiktok-revisit-result" : "/social/browser-revisit-result";
-      const body = {
-        content_id: state.content_id,
-        claim_attempt: state.claim_attempt,
-        status: "failed",
-        reason,
-        username: null
-      };
-      if (queue === "browser") body.platform = platform;
-      const result = await postJsonWithTimeout(
-        base + endpoint,
-        withExtensionVersion(body),
-        SCRAPER_HEARTBEAT_TIMEOUT_MS
-      );
-      const responseBody = JSON.parse(result.body || "{}");
-      if (result.response && result.response.ok && responseBody.accepted === false) {
-        await clearBrowserRevisitWatchdog(queue, platform, state.content_id, state.claim_attempt);
-        return;
-      }
-      if (result.response && result.response.ok && responseBody.accepted === true) {
-        await clearBrowserRevisitWatchdog(queue, platform, state.content_id, state.claim_attempt);
-        await log("warn", `${platform} browser revisit lease released after ${reason}`);
-        return;
-      }
-    } catch (_) {
-    }
-    const next = { ...state, deadline_at: Date.now() + 2 * 60 * 1e3 };
-    await chrome.storage.local.set({ [key]: next });
-    await chrome.alarms.create(alarmName, { when: next.deadline_at });
-  }
+
+  // src/background/scrape_config.ts
   var _scrapeConfigDisabled = /* @__PURE__ */ new Set();
   var _scrapeConfig = {};
   var _scrapeConfigFetchedAt = 0;
@@ -413,175 +158,9 @@
     if (profile.mode === "cooldown") return { ...profile, mode: "cooldown", volume_profile: "cooldown" };
     return { ...profile, mode: "near_live_polling", volume_profile: "normal" };
   }
-  function extensionVersion() {
-    return chrome.runtime.getManifest && chrome.runtime.getManifest().version || null;
-  }
-  function withExtensionVersion(payload) {
-    return { ...payload, extension_version: extensionVersion() };
-  }
-  async function reportBridgeHeartbeat(reason) {
-    const base = await ingestBase();
-    const payload = withExtensionVersion({
-      platform: "bridge",
-      label: "UnifiedCollector Bridge",
-      running: true,
-      tab_id: "service_worker",
-      url: "chrome-extension://" + chrome.runtime.id + "/background.js",
-      health_status: "service_worker_active",
-      health_reason: reason || "startup"
-    });
-    try {
-      const result = await postJsonWithTimeout(base + "/social/browser-heartbeat", payload);
-      const body = parseHeartbeatResponseBody(result && result.body);
-      await maybeAutoReloadExtension(
-        base,
-        null,
-        { id: "bridge", label: "UnifiedCollector Bridge" },
-        body,
-        reason || "bridge_heartbeat"
-      );
-      await setStatus({
-        lastBridgeHeartbeatOkAt: Date.now(),
-        lastBridgeHeartbeatError: null,
-        lastBridgeHeartbeatBase: base,
-        lastBridgeHeartbeatReason: reason || "startup"
-      });
-    } catch (e) {
-      const err = String(e && e.message ? e.message : e);
-      await setStatus({
-        lastBridgeHeartbeatFailAt: Date.now(),
-        lastBridgeHeartbeatError: err,
-        lastBridgeHeartbeatBase: base,
-        lastBridgeHeartbeatReason: reason || "startup"
-      });
-      await log("warn", `browser heartbeat failed to reach ${base}: ${err}`);
-    }
-  }
-  async function sendManualIngestProbe() {
-    const base = await ingestBase();
-    const payload = withExtensionVersion({
-      platform: "bridge",
-      label: "UnifiedCollector Bridge",
-      running: true,
-      tab_id: "manual_test",
-      url: "chrome-extension://" + chrome.runtime.id + "/tabs.html",
-      health_status: "manual_ingest_probe",
-      health_reason: "tabs_page_test"
-    });
-    try {
-      const { response: r } = await postJsonWithTimeout(base + "/social/browser-heartbeat", payload, 6e3);
-      await setStatus({ lastManualIngestProbeAt: Date.now(), lastManualIngestProbeOk: true, lastManualIngestProbeError: null });
-      await log("info", `manual ingest probe ok (${base})`);
-      return { ok: true, status: r.status, base };
-    } catch (e) {
-      const err = String(e && e.message ? e.message : e);
-      await setStatus({ lastManualIngestProbeAt: Date.now(), lastManualIngestProbeOk: false, lastManualIngestProbeError: err });
-      await log("error", `manual ingest probe failed: ${err}`);
-      return { ok: false, error: err, base };
-    }
-  }
-  function platformForTabUrl(url) {
-    let host = "";
-    try {
-      host = new URL(url || "").host;
-    } catch (e) {
-      return null;
-    }
-    return scraperPlatforms().find((p) => platformHosts(p).includes(host)) || null;
-  }
-  async function reportScraperTabHeartbeats(reason) {
-    const base = await ingestBase();
-    let seen = 0;
-    let sent = 0;
-    let failed = 0;
-    let lastError = null;
-    let canonical = 0;
-    let skipped = 0;
-    try {
-      const allTabs = await chrome.tabs.query({ url: scraperUrlPatterns() });
-      const selection = selectCanonicalScraperTabRows(allTabs);
-      const activeIds = (await scraperTabSelection()).activeIds;
-      const tabs = selection.rows.filter((row) => activeIds.has(row.platform.id));
-      seen = selection.seen;
-      canonical = tabs.length;
-      skipped = selection.skipped;
-      await mapLimit(tabs, SCRAPER_HEARTBEAT_CONCURRENCY, async ({ tab, platform }) => {
-        try {
-          const result = await postJsonWithTimeout(base + "/social/browser-heartbeat", withExtensionVersion({
-            platform: platform.id,
-            label: platform.label,
-            running: true,
-            tab_id: tab.id,
-            url: tab.url || null,
-            health_status: "background_tab_seen",
-            health_reason: reason || "background_watchdog",
-            page_title: tab.title || null
-          }), SCRAPER_HEARTBEAT_TIMEOUT_MS);
-          await scheduleMaybeForceScrapeCycle(tab, platform, result && result.body, reason || "background_watchdog", base);
-          sent++;
-        } catch (e) {
-          failed++;
-          lastError = String(e && e.message ? e.message : e);
-        }
-      });
-    } catch (e) {
-      lastError = String(e && e.message ? e.message : e);
-    }
-    await setStatus({
-      lastScraperHeartbeatAt: Date.now(),
-      lastScraperHeartbeatSeen: seen,
-      lastScraperHeartbeatSent: sent,
-      lastScraperHeartbeatFailed: failed,
-      lastScraperHeartbeatCanonical: canonical,
-      lastScraperHeartbeatSkippedDuplicates: skipped,
-      lastScraperHeartbeatError: lastError,
-      lastScraperHeartbeatBase: base,
-      lastScraperHeartbeatReason: reason || "background_watchdog"
-    });
-    if (failed || lastError) {
-      await log("warn", `scraper heartbeat delivery: ${sent}/${seen} sent to ${base}${lastError ? " (" + lastError + ")" : ""}`);
-    }
-    await reportScraperHeartbeatSummary(base, reason, { seen, sent, failed, canonical, skipped, lastError }).catch(() => {
-    });
-  }
-  async function reportScraperHeartbeatSummary(base, reason, summary) {
-    const seen = Number(summary && summary.seen || 0);
-    const sent = Number(summary && summary.sent || 0);
-    const failed = Number(summary && summary.failed || 0);
-    const lastError = summary && summary.lastError ? String(summary.lastError).slice(0, 240) : null;
-    const healthStatus = seen <= 0 ? "scraper_tabs_missing" : failed > 0 || sent <= 0 ? "scraper_heartbeat_degraded" : "scraper_heartbeat_ok";
-    try {
-      await postJsonWithTimeout(base + "/social/browser-heartbeat", withExtensionVersion({
-        platform: "bridge",
-        label: "UnifiedCollector Bridge",
-        running: true,
-        tab_id: "scraper_tabs",
-        url: "chrome-extension://" + chrome.runtime.id + "/background.js",
-        health_status: healthStatus,
-        health_reason: reason || "background_watchdog",
-        scraper_tabs_seen: seen,
-        scraper_tabs_sent: sent,
-        scraper_tabs_failed: failed,
-        scraper_tabs_canonical: Number(summary && summary.canonical || 0),
-        scraper_tabs_skipped: Number(summary && summary.skipped || 0),
-        scraper_heartbeat_error: lastError
-      }), SCRAPER_HEARTBEAT_TIMEOUT_MS);
-      await setStatus({
-        lastBridgeHeartbeatOkAt: Date.now(),
-        lastBridgeHeartbeatError: null,
-        lastBridgeHeartbeatBase: base,
-        lastBridgeHeartbeatReason: reason || "scraper_heartbeat_summary"
-      });
-    } catch (e) {
-      await setStatus({
-        lastBridgeHeartbeatFailAt: Date.now(),
-        lastBridgeHeartbeatError: String(e && e.message ? e.message : e),
-        lastBridgeHeartbeatBase: base,
-        lastBridgeHeartbeatReason: reason || "scraper_heartbeat_summary"
-      });
-      throw e;
-    }
-  }
+
+  // src/background/tab_recovery.ts
+  var HOME_NAV_HARD_REFRESH_PLATFORMS = /* @__PURE__ */ new Set(["x", "threads", "lemon8"]);
   var lastForcedCycleByTab = {};
   var lastForcedReloadByTab = {};
   var lastForcedFailureByTab = {};
@@ -875,6 +454,136 @@
     }
     return true;
   }
+  async function _handleStaleForcedCycle(base, tab, platform, body, key, now, lastForcedAt, forcedAgeMs, hardReloadMs) {
+    if (!lastForcedAt || forcedAgeMs <= hardReloadMs) return false;
+    const lastReloadAt = Number(lastForcedReloadByTab[key] || 0);
+    if (!lastReloadAt || now - lastReloadAt > FORCED_CYCLE_RELOAD_DEBOUNCE_MS) {
+      try {
+        await hardRefreshForcedCycleTab(base, tab, platform, "stale_forced_cycle", {
+          forced_age_ms: forcedAgeMs,
+          hard_reload_ms: hardReloadMs,
+          content_age_seconds: body.content_age_seconds || null
+        });
+        await log("warn", `${platform.label}: stale forced scrape did not finish after ${Math.round(forcedAgeMs / 1e3)}s; hard-refreshed tab`);
+      } catch (e) {
+        await log("warn", `${platform.label}: stale forced scrape hard-refresh failed: ${e && e.message ? e.message : e}`);
+      }
+      return true;
+    }
+    return false;
+  }
+  async function _handleForcedCycleFailure(base, tab, platform, body, key, firstErr) {
+    const cycleError = firstErr && firstErr.message ? firstErr.message : String(firstErr);
+    const failKey = `${key}:${platform && platform.id ? platform.id : "unknown"}`;
+    const lastFailureAt = Number(lastForcedFailureByTab[failKey] || 0);
+    const failureAgeMs = lastFailureAt ? Date.now() - lastFailureAt : 0;
+    const receiverMissing = isNoReceiverError(firstErr);
+    const messageTimedOut = isTabMessageTimeout(firstErr);
+    if (receiverMissing && lastFailureAt && failureAgeMs < FORCED_CYCLE_FAILURE_DEBOUNCE_MS) {
+      await recordServiceWorkerRecovery(base, tab, platform, "forced_cycle_request_debounced", body.force_reason || "browser_content_stale", {
+        content_age_seconds: body.content_age_seconds || null,
+        cycle_error: cycleError,
+        failure_age_ms: failureAgeMs,
+        no_receiver: true
+      });
+      return;
+    }
+    lastForcedFailureByTab[failKey] = Date.now();
+    if (messageTimedOut) {
+      const contentAgeSeconds = Number(body.content_age_seconds || 0);
+      const staleReloadSeconds = messageTimeoutStaleReloadSeconds(platform && platform.id);
+      if (Number.isFinite(contentAgeSeconds) && contentAgeSeconds >= staleReloadSeconds) {
+        const reloaded = await hardRefreshForcedCycleTab(base, tab, platform, "message_timeout_content_stale", {
+          content_age_seconds: contentAgeSeconds,
+          stale_reload_seconds: staleReloadSeconds,
+          cycle_error: cycleError,
+          message_timeout: true,
+          recovery: "message_timeout_stale_refresh"
+        });
+        await recordServiceWorkerRecovery(base, tab, platform, "forced_cycle_request_timed_out", body.force_reason || "browser_content_stale", {
+          content_age_seconds: contentAgeSeconds,
+          stale_reload_seconds: staleReloadSeconds,
+          cycle_error: cycleError,
+          message_timeout: true,
+          stale_refresh_attempted: true,
+          stale_refresh_ok: reloaded || null
+        });
+        if (!reloaded) {
+          const refreshed2 = await refreshContentScriptAndNudge(base, tab, platform, "forced_cycle_reload_debounced_timeout", {
+            content_age_seconds: contentAgeSeconds,
+            stale_reload_seconds: staleReloadSeconds,
+            cycle_error: cycleError,
+            message_timeout: true,
+            recovery: "reload_debounced_manifest_refresh"
+          });
+          await recordServiceWorkerRecovery(base, tab, platform, "forced_cycle_reload_debounced_refresh", body.force_reason || "browser_content_stale", {
+            content_age_seconds: contentAgeSeconds,
+            stale_reload_seconds: staleReloadSeconds,
+            cycle_error: cycleError,
+            message_timeout: true,
+            refresh_attempted: true,
+            refresh_ok: refreshed2 || null
+          });
+        }
+        await log("warn", `${platform.label}: stale-content forced scrape message timed out; ${reloaded ? "hard-refreshed stale tab" : "refresh skipped by debounce"}`);
+        return;
+      }
+      const refreshed = await refreshContentScriptAndNudge(base, tab, platform, "forced_cycle_message_timeout", {
+        content_age_seconds: body.content_age_seconds || null,
+        cycle_error: cycleError,
+        message_timeout: true,
+        recovery: "message_timeout_manifest_refresh"
+      });
+      await recordServiceWorkerRecovery(base, tab, platform, "forced_cycle_request_timed_out", body.force_reason || "browser_content_stale", {
+        content_age_seconds: body.content_age_seconds || null,
+        cycle_error: cycleError,
+        message_timeout: true,
+        refresh_attempted: true,
+        refresh_ok: refreshed || null
+      });
+      await log("warn", `${platform.label}: stale-content forced scrape message timed out; ${refreshed ? "hard-refreshed tab for manifest content script" : "leaving the tab running and retrying later"}`);
+      return;
+    }
+    await recordServiceWorkerRecovery(base, tab, platform, "forced_cycle_request_failed", body.force_reason || "browser_content_stale", {
+      content_age_seconds: body.content_age_seconds || null,
+      cycle_error: cycleError,
+      no_receiver: receiverMissing || null
+    });
+    try {
+      if (receiverMissing) {
+        try {
+          const reloaded2 = await refreshTabForMissingContentScript(base, tab, platform, "content_script_receiver_missing", {
+            content_age_seconds: body.content_age_seconds || null,
+            cycle_error: cycleError,
+            no_receiver: true
+          });
+          if (reloaded2) {
+            await log("warn", `${platform.label}: content script receiver missing; hard-refreshed tab so manifest content.js can reload`);
+            return;
+          }
+        } catch (refreshErr) {
+          await recordServiceWorkerRecovery(base, tab, platform, "content_script_refresh_failed", "content_script_receiver_missing", {
+            content_age_seconds: body.content_age_seconds || null,
+            cycle_error: cycleError,
+            refresh_error: refreshErr && refreshErr.message ? refreshErr.message : String(refreshErr),
+            no_receiver: true
+          });
+        }
+      }
+      const reloaded = await hardRefreshForcedCycleTab(base, tab, platform, receiverMissing ? "content_script_receiver_missing" : "failed_force_message", {
+        content_age_seconds: body.content_age_seconds || null,
+        cycle_error: cycleError,
+        no_receiver: receiverMissing || null
+      });
+      if (reloaded) {
+        await log("warn", `${platform.label}: stale-content forced scrape failed; hard-refreshed tab (${cycleError})`);
+      } else {
+        await log("warn", `${platform.label}: stale-content forced scrape failed; reload already debounced (${cycleError})`);
+      }
+    } catch (reloadErr) {
+      await log("warn", `${platform.label}: stale-content forced scrape failed and hard-refresh failed: ${reloadErr && reloadErr.message ? reloadErr.message : reloadErr}`);
+    }
+  }
   async function maybeForceScrapeCycle(tab, platform, responseBody, reason, base = null) {
     const body = parseHeartbeatResponseBody(responseBody);
     if (!body) return;
@@ -888,22 +597,7 @@
     const lastForcedAt = Number(lastForcedCycleByTab[key] || 0);
     const forcedAgeMs = lastForcedAt ? now - lastForcedAt : 0;
     const hardReloadMs = forcedCycleHardReloadMs(platform && platform.id);
-    if (lastForcedAt && forcedAgeMs > hardReloadMs) {
-      const lastReloadAt = Number(lastForcedReloadByTab[key] || 0);
-      if (!lastReloadAt || now - lastReloadAt > FORCED_CYCLE_RELOAD_DEBOUNCE_MS) {
-        try {
-          await hardRefreshForcedCycleTab(base, tab, platform, "stale_forced_cycle", {
-            forced_age_ms: forcedAgeMs,
-            hard_reload_ms: hardReloadMs,
-            content_age_seconds: body.content_age_seconds || null
-          });
-          await log("warn", `${platform.label}: stale forced scrape did not finish after ${Math.round(forcedAgeMs / 1e3)}s; hard-refreshed tab`);
-        } catch (e) {
-          await log("warn", `${platform.label}: stale forced scrape hard-refresh failed: ${e && e.message ? e.message : e}`);
-        }
-        return;
-      }
-    }
+    if (await _handleStaleForcedCycle(base, tab, platform, body, key, now, lastForcedAt, forcedAgeMs, hardReloadMs)) return;
     if (lastForcedAt && forcedAgeMs < FORCED_CYCLE_DEBOUNCE_MS) return;
     const recoveryMessage = {
       type: "scrapeCycle",
@@ -919,116 +613,7 @@
       });
       await log("warn", `${platform.label}: nudged scraper loop because browser content is stale`);
     } catch (firstErr) {
-      const cycleError = firstErr && firstErr.message ? firstErr.message : String(firstErr);
-      const failKey = `${key}:${platform && platform.id ? platform.id : "unknown"}`;
-      const lastFailureAt = Number(lastForcedFailureByTab[failKey] || 0);
-      const failureAgeMs = lastFailureAt ? Date.now() - lastFailureAt : 0;
-      const receiverMissing = isNoReceiverError(firstErr);
-      const messageTimedOut = isTabMessageTimeout(firstErr);
-      if (receiverMissing && lastFailureAt && failureAgeMs < FORCED_CYCLE_FAILURE_DEBOUNCE_MS) {
-        await recordServiceWorkerRecovery(base, tab, platform, "forced_cycle_request_debounced", body.force_reason || "browser_content_stale", {
-          content_age_seconds: body.content_age_seconds || null,
-          cycle_error: cycleError,
-          failure_age_ms: failureAgeMs,
-          no_receiver: true
-        });
-        return;
-      }
-      lastForcedFailureByTab[failKey] = Date.now();
-      if (messageTimedOut) {
-        const contentAgeSeconds = Number(body.content_age_seconds || 0);
-        const staleReloadSeconds = messageTimeoutStaleReloadSeconds(platform && platform.id);
-        if (Number.isFinite(contentAgeSeconds) && contentAgeSeconds >= staleReloadSeconds) {
-          const reloaded = await hardRefreshForcedCycleTab(base, tab, platform, "message_timeout_content_stale", {
-            content_age_seconds: contentAgeSeconds,
-            stale_reload_seconds: staleReloadSeconds,
-            cycle_error: cycleError,
-            message_timeout: true,
-            recovery: "message_timeout_stale_refresh"
-          });
-          await recordServiceWorkerRecovery(base, tab, platform, "forced_cycle_request_timed_out", body.force_reason || "browser_content_stale", {
-            content_age_seconds: contentAgeSeconds,
-            stale_reload_seconds: staleReloadSeconds,
-            cycle_error: cycleError,
-            message_timeout: true,
-            stale_refresh_attempted: true,
-            stale_refresh_ok: reloaded || null
-          });
-          if (!reloaded) {
-            const refreshed2 = await refreshContentScriptAndNudge(base, tab, platform, "forced_cycle_reload_debounced_timeout", {
-              content_age_seconds: contentAgeSeconds,
-              stale_reload_seconds: staleReloadSeconds,
-              cycle_error: cycleError,
-              message_timeout: true,
-              recovery: "reload_debounced_manifest_refresh"
-            });
-            await recordServiceWorkerRecovery(base, tab, platform, "forced_cycle_reload_debounced_refresh", body.force_reason || "browser_content_stale", {
-              content_age_seconds: contentAgeSeconds,
-              stale_reload_seconds: staleReloadSeconds,
-              cycle_error: cycleError,
-              message_timeout: true,
-              refresh_attempted: true,
-              refresh_ok: refreshed2 || null
-            });
-          }
-          await log("warn", `${platform.label}: stale-content forced scrape message timed out; ${reloaded ? "hard-refreshed stale tab" : "refresh skipped by debounce"}`);
-          return;
-        }
-        const refreshed = await refreshContentScriptAndNudge(base, tab, platform, "forced_cycle_message_timeout", {
-          content_age_seconds: body.content_age_seconds || null,
-          cycle_error: cycleError,
-          message_timeout: true,
-          recovery: "message_timeout_manifest_refresh"
-        });
-        await recordServiceWorkerRecovery(base, tab, platform, "forced_cycle_request_timed_out", body.force_reason || "browser_content_stale", {
-          content_age_seconds: body.content_age_seconds || null,
-          cycle_error: cycleError,
-          message_timeout: true,
-          refresh_attempted: true,
-          refresh_ok: refreshed || null
-        });
-        await log("warn", `${platform.label}: stale-content forced scrape message timed out; ${refreshed ? "hard-refreshed tab for manifest content script" : "leaving the tab running and retrying later"}`);
-        return;
-      }
-      await recordServiceWorkerRecovery(base, tab, platform, "forced_cycle_request_failed", body.force_reason || "browser_content_stale", {
-        content_age_seconds: body.content_age_seconds || null,
-        cycle_error: cycleError,
-        no_receiver: receiverMissing || null
-      });
-      try {
-        if (receiverMissing) {
-          try {
-            const reloaded2 = await refreshTabForMissingContentScript(base, tab, platform, "content_script_receiver_missing", {
-              content_age_seconds: body.content_age_seconds || null,
-              cycle_error: cycleError,
-              no_receiver: true
-            });
-            if (reloaded2) {
-              await log("warn", `${platform.label}: content script receiver missing; hard-refreshed tab so manifest content.js can reload`);
-              return;
-            }
-          } catch (refreshErr) {
-            await recordServiceWorkerRecovery(base, tab, platform, "content_script_refresh_failed", "content_script_receiver_missing", {
-              content_age_seconds: body.content_age_seconds || null,
-              cycle_error: cycleError,
-              refresh_error: refreshErr && refreshErr.message ? refreshErr.message : String(refreshErr),
-              no_receiver: true
-            });
-          }
-        }
-        const reloaded = await hardRefreshForcedCycleTab(base, tab, platform, receiverMissing ? "content_script_receiver_missing" : "failed_force_message", {
-          content_age_seconds: body.content_age_seconds || null,
-          cycle_error: cycleError,
-          no_receiver: receiverMissing || null
-        });
-        if (reloaded) {
-          await log("warn", `${platform.label}: stale-content forced scrape failed; hard-refreshed tab (${cycleError})`);
-        } else {
-          await log("warn", `${platform.label}: stale-content forced scrape failed; reload already debounced (${cycleError})`);
-        }
-      } catch (reloadErr) {
-        await log("warn", `${platform.label}: stale-content forced scrape failed and hard-refresh failed: ${reloadErr && reloadErr.message ? reloadErr.message : reloadErr}`);
-      }
+      await _handleForcedCycleFailure(base, tab, platform, body, key, firstErr);
     }
   }
   async function scheduleMaybeForceScrapeCycle(tab, platform, responseBody, reason, base = null) {
@@ -1038,33 +623,8 @@
       await log("warn", `${platform && platform.label ? platform.label : "scraper"} recovery failed: ${e && e.message ? e.message : e}`);
     }
   }
-  async function fetchJsonWithTimeout(url, timeoutMs = 12e3, headers = {}) {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-    try {
-      const r = await fetch(url, { signal: ctrl.signal, headers });
-      const j = await r.json().catch(() => ({}));
-      return { response: r, json: j };
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-  var ALARM_REFRESH = "uc-refresh";
-  var REFRESH_MIN = 45;
-  var ALARM_MEMORY = "uc-memory-check";
-  var MEMORY_SENSITIVE_PLATFORMS = /* @__PURE__ */ new Set(["facebook", "threads"]);
-  var MEMORY_CHECK_INTERVAL_MIN = 30;
-  var MEMORY_RELOAD_THRESHOLD_JS_MB = 250;
-  var MEMORY_RELOAD_DOM_NODES = 4e4;
-  var MEMORY_RELOAD_MIN_INTERVAL_MIN = 90;
-  var MEMORY_TIME_CAP_MIN = 240;
-  var MEMORY_LAST_RELOAD_KEY = "ucMemoryLastReloadByTab";
-  var MEMORY_THRESHOLD_MB_OVERRIDE_KEY = "memoryReloadThresholdMB";
-  var MEMORY_DOM_OVERRIDE_KEY = "memoryReloadDomNodes";
-  async function autoTabsEnabled() {
-    const { ucAutoTabs } = await chrome.storage.local.get("ucAutoTabs");
-    return ucAutoTabs !== false;
-  }
+
+  // src/background/util.ts
   var _sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   var _jitterMs = (base, spread = 0.55) => Math.round(base * (1 - spread + Math.random() * spread * 2));
   var _humanGap = (base) => {
@@ -1074,8 +634,6 @@
   };
   var _randBetween = (min, max) => Math.round(min + Math.random() * (max - min));
   var _alarmJitter = () => _sleep(15e3 + Math.random() * 12e4);
-  var _tabsOpInProgress = false;
-  var _startupRecoveryChain = Promise.resolve();
   async function mapLimit(items, limit, worker) {
     const out = [];
     let next = 0;
@@ -1088,6 +646,13 @@
     await Promise.all(runners);
     return out;
   }
+
+  // src/background/tab_selection.ts
+  async function autoTabsEnabled() {
+    const { ucAutoTabs } = await chrome.storage.local.get("ucAutoTabs");
+    return ucAutoTabs !== false;
+  }
+  var _tabsOpInProgress = false;
   var _tpath = (u) => {
     try {
       return new URL(u).pathname.split("?")[0].replace(/\/$/, "") || "/";
@@ -1128,20 +693,7 @@
       return { residents: [], evictions: {}, probe: null };
     }
   }
-  async function scraperTabSelection() {
-    await refreshScrapeConfig();
-    const enabled = _scrapeConfig && _scrapeConfig.fail_open !== true && Array.isArray(_scrapeConfig.enabled) ? new Set(_scrapeConfig.enabled.map((id) => String(id).toLowerCase())) : null;
-    if (!enabled) {
-      return { residentIds: new Set(BROWSER_RESIDENT_FALLBACK_IDS), activeIds: new Set(BROWSER_RESIDENT_FALLBACK_IDS), probeId: null };
-    }
-    const now = Date.now();
-    const state = await scraperFailoverState();
-    let changed = false;
-    const eligible = (id) => enabled.has(id) && scraperFailoverProfile(id).tab_eligible !== false;
-    const rotationPriority = new Set(
-      _scrapeConfig.fail_open === true ? [] : BROWSER_ROTATION_PLATFORM_IDS.filter((id) => eligible(id))
-    );
-    const nonRotationLimit = Math.max(0, BROWSER_RESIDENT_TAB_LIMIT - rotationPriority.size);
+  async function _adoptExistingResidentTabs(state) {
     if (!state.residents.length) {
       try {
         const existing = selectCanonicalScraperTabRows(await chrome.tabs.query({ url: scraperUrlPatterns() }));
@@ -1149,10 +701,14 @@
           if (state.residents.length >= BROWSER_RESIDENT_TAB_LIMIT) break;
           if (existing.rows.some((row) => row.platform.id === id)) state.residents.push(id);
         }
-        changed = state.residents.length > 0;
+        return state.residents.length > 0;
       } catch (e) {
       }
     }
+    return false;
+  }
+  async function _rebuildResidentTabs(state, now, eligible, rotationPriority, nonRotationLimit) {
+    let changed = false;
     const residents = [];
     let nonRotationResidents = 0;
     for (const id of state.residents) {
@@ -1189,7 +745,10 @@
       }
     }
     if (residents.join(",") !== state.residents.join(",")) changed = true;
-    state.residents = residents;
+    return { residents, changed };
+  }
+  async function _resolveRecoveryProbe(state, now, enabled) {
+    let changed = false;
     let probeId = state.probe && state.probe.platform;
     if (probeId) {
       const profile = scraperFailoverProfile(probeId);
@@ -1238,6 +797,28 @@
         await log("info", `scraper recovery probe started: ${candidate}`);
       }
     }
+    return { probeId, changed };
+  }
+  async function scraperTabSelection() {
+    await refreshScrapeConfig();
+    const enabled = _scrapeConfig && _scrapeConfig.fail_open !== true && Array.isArray(_scrapeConfig.enabled) ? new Set(_scrapeConfig.enabled.map((id) => String(id).toLowerCase())) : null;
+    if (!enabled) {
+      return { residentIds: new Set(BROWSER_RESIDENT_FALLBACK_IDS), activeIds: new Set(BROWSER_RESIDENT_FALLBACK_IDS), probeId: null };
+    }
+    const now = Date.now();
+    const state = await scraperFailoverState();
+    let changed = false;
+    const eligible = (id) => enabled.has(id) && scraperFailoverProfile(id).tab_eligible !== false;
+    const rotationPriority = new Set(
+      _scrapeConfig.fail_open === true ? [] : BROWSER_ROTATION_PLATFORM_IDS.filter((id) => eligible(id))
+    );
+    const nonRotationLimit = Math.max(0, BROWSER_RESIDENT_TAB_LIMIT - rotationPriority.size);
+    changed = await _adoptExistingResidentTabs(state) || changed;
+    const { residents, changed: rebuildChanged } = await _rebuildResidentTabs(state, now, eligible, rotationPriority, nonRotationLimit);
+    changed = changed || rebuildChanged;
+    state.residents = residents;
+    const { probeId, changed: probeChanged } = await _resolveRecoveryProbe(state, now, enabled);
+    changed = changed || probeChanged;
     if (changed) await chrome.storage.local.set({ [SCRAPER_TAB_FAILOVER_KEY]: state });
     const residentIds = new Set(state.residents);
     const activeIds = new Set(state.residents);
@@ -1673,244 +1254,21 @@
       _tabsOpInProgress = false;
     }
   }
-  async function fetchTabMemoryMetrics(tabId) {
-    const reader = () => ({
-      js_heap_bytes: typeof performance !== "undefined" && performance.memory && performance.memory.usedJSHeapSize || null,
-      js_heap_limit_bytes: typeof performance !== "undefined" && performance.memory && performance.memory.jsHeapSizeLimit || null,
-      dom_nodes: document.querySelectorAll("*").length
-    });
-    let isolatedResult = null;
-    try {
-      const results = await chrome.scripting.executeScript({
-        target: { tabId },
-        func: reader
-      });
-      if (results && results[0] && results[0].result) isolatedResult = results[0].result;
-    } catch (e) {
-      return { error: e && e.message || String(e) };
-    }
-    if (isolatedResult && isolatedResult.js_heap_bytes !== null) return isolatedResult;
-    try {
-      const results = await chrome.scripting.executeScript({
-        target: { tabId },
-        world: "MAIN",
-        func: reader
-      });
-      if (results && results[0] && results[0].result) {
-        const main = results[0].result;
-        return {
-          js_heap_bytes: main.js_heap_bytes !== null ? main.js_heap_bytes : isolatedResult && isolatedResult.js_heap_bytes,
-          js_heap_limit_bytes: main.js_heap_limit_bytes !== null ? main.js_heap_limit_bytes : isolatedResult && isolatedResult.js_heap_limit_bytes,
-          dom_nodes: main.dom_nodes !== null ? main.dom_nodes : isolatedResult && isolatedResult.dom_nodes
-        };
-      }
-    } catch (e) {
-      if (isolatedResult) return isolatedResult;
-      return { error: e && e.message || String(e) };
-    }
-    return isolatedResult;
-  }
-  async function memoryReloadThresholdMB() {
-    try {
-      const stored = await chrome.storage.local.get(MEMORY_THRESHOLD_MB_OVERRIDE_KEY);
-      const value = Number(stored[MEMORY_THRESHOLD_MB_OVERRIDE_KEY]);
-      if (Number.isFinite(value) && value > 0) return value;
-    } catch (e) {
-    }
-    return MEMORY_RELOAD_THRESHOLD_JS_MB;
-  }
-  async function memoryReloadDomThreshold() {
-    try {
-      const stored = await chrome.storage.local.get(MEMORY_DOM_OVERRIDE_KEY);
-      const value = Number(stored[MEMORY_DOM_OVERRIDE_KEY]);
-      if (Number.isFinite(value) && value > 0) return value;
-    } catch (e) {
-    }
-    return MEMORY_RELOAD_DOM_NODES;
-  }
-  async function checkMemorySensitiveTabs(reason = "scheduled") {
-    if (_tabsOpInProgress) return { skipped: true, reason: "tabs_operation_in_progress", checked: 0, reloaded: 0 };
-    const base = await ingestBase();
-    const now = Date.now();
-    const jsThresholdMB = await memoryReloadThresholdMB();
-    const jsThresholdBytes = jsThresholdMB * 1024 * 1024;
-    const domThreshold = await memoryReloadDomThreshold();
-    const minIntervalMs = MEMORY_RELOAD_MIN_INTERVAL_MIN * 60 * 1e3;
-    const timeCapMs = MEMORY_TIME_CAP_MIN * 60 * 1e3;
-    const stored = await chrome.storage.local.get(MEMORY_LAST_RELOAD_KEY);
-    const lastByTab = { ...stored[MEMORY_LAST_RELOAD_KEY] || {} };
-    let allTabs = [];
-    try {
-      allTabs = await chrome.tabs.query({ url: scraperUrlPatterns() });
-    } catch (e) {
-      return { skipped: true, reason: "tabs_query_failed", error: e && e.message || String(e), checked: 0, reloaded: 0 };
-    }
-    const selection = selectCanonicalScraperTabRows(allTabs);
-    const { activeIds } = await scraperTabSelection();
-    const rows = selection.rows.filter((r) => r.platform && activeIds.has(r.platform.id) && MEMORY_SENSITIVE_PLATFORMS.has(r.platform.id));
-    let checked = 0;
-    let reloaded = 0;
-    const reasons = [];
-    for (const row of rows) {
-      const tab = row.tab;
-      const platform = row.platform;
-      if (!tab || tab.id == null) continue;
-      checked++;
-      const key = `${platform.id}:${tab.id}`;
-      const lastAtStored = Number(lastByTab[key] || 0);
-      const inMemLastReload = Number(lastForcedReloadByTab[String(tab.id)] || 0);
-      const lastAt = Math.max(lastAtStored, inMemLastReload);
-      const ageMs = lastAt ? now - lastAt : Number.POSITIVE_INFINITY;
-      const metrics = await fetchTabMemoryMetrics(tab.id);
-      const jsHeapBytes = metrics && Number.isFinite(Number(metrics.js_heap_bytes)) ? Number(metrics.js_heap_bytes) : null;
-      const jsHeapMB = jsHeapBytes !== null ? Number((jsHeapBytes / (1024 * 1024)).toFixed(1)) : null;
-      const domNodes = metrics && Number.isFinite(Number(metrics.dom_nodes)) ? Number(metrics.dom_nodes) : null;
-      const metricsError = metrics && metrics.error ? String(metrics.error) : null;
-      const overHeap = jsHeapBytes !== null && jsHeapBytes >= jsThresholdBytes;
-      const overNodes = domNodes !== null && domNodes >= domThreshold;
-      const overTimeCap = lastAtStored > 0 && ageMs >= timeCapMs;
-      let triggerReason = null;
-      if (overHeap) triggerReason = "js_heap_over_threshold";
-      else if (overNodes) triggerReason = "dom_nodes_over_threshold";
-      else if (overTimeCap) triggerReason = "time_cap_exceeded";
-      const baseExtras = {
-        memory_js_heap_bytes: jsHeapBytes,
-        memory_js_heap_mb: jsHeapMB,
-        memory_dom_nodes: domNodes,
-        memory_threshold_mb: jsThresholdMB,
-        memory_dom_threshold: domThreshold,
-        memory_last_reload_age_ms: Number.isFinite(ageMs) ? ageMs : null,
-        memory_metrics_error: metricsError,
-        memory_check_reason: reason
-      };
-      if (!triggerReason) {
-        await recordServiceWorkerRecovery(base, tab, platform, "memory_check_skipped", "under_threshold", baseExtras);
-        if (!lastAtStored) {
-          lastByTab[key] = now;
-        }
-        continue;
-      }
-      if (ageMs < minIntervalMs) {
-        await recordServiceWorkerRecovery(base, tab, platform, "memory_reload_debounced", triggerReason, baseExtras);
-        continue;
-      }
-      reasons.push(`${platform.id}:${triggerReason}`);
-      await recordServiceWorkerRecovery(base, tab, platform, "memory_soft_reload", triggerReason, baseExtras);
-      try {
-        await chrome.tabs.reload(tab.id, { bypassCache: false });
-        reloaded++;
-        lastByTab[key] = now;
-        lastForcedReloadByTab[String(tab.id)] = now;
-        await log(
-          "warn",
-          `${platform.label}: memory soft-reload (${triggerReason}; jsHeap=${jsHeapMB !== null ? jsHeapMB + "MB" : "?"} nodes=${domNodes !== null ? domNodes : "?"})`
-        );
-        schedulePostReloadScrapeNudge(base, tab, platform, `memory_soft_reload_${triggerReason}`, {
-          memory_js_heap_mb: jsHeapMB,
-          memory_dom_nodes: domNodes,
-          memory_reload_reason: triggerReason
-        });
-      } catch (e) {
-        await recordServiceWorkerRecovery(base, tab, platform, "memory_reload_failed", triggerReason, {
-          ...baseExtras,
-          reload_error: e && e.message || String(e)
-        });
-      }
-    }
-    await chrome.storage.local.set({ [MEMORY_LAST_RELOAD_KEY]: lastByTab });
-    const prevStatus = await getStatus();
-    const prevCount = Number(prevStatus.memoryReloadCount || 0);
-    const patch = { lastMemoryCheckAt: now, lastMemoryCheckReason: reason };
-    if (reloaded > 0) {
-      patch.memoryReloadCount = prevCount + reloaded;
-      patch.lastMemoryReloadAt = now;
-      patch.lastMemoryReloadReasons = reasons;
-    }
-    await setStatus(patch);
-    return { checked, reloaded, reasons };
-  }
-  async function scheduleAlarm() {
-    chrome.alarms.create(ALARM, { periodInMinutes: WATCHDOG_MIN });
-    chrome.alarms.create(ALARM_REFRESH, { periodInMinutes: REFRESH_MIN });
-    chrome.alarms.create(ALARM_MEMORY, { periodInMinutes: MEMORY_CHECK_INTERVAL_MIN });
-    await setStatus({ swStartedAt: Date.now() });
-    const ver = chrome.runtime.getManifest && chrome.runtime.getManifest().version || "?";
-    await log("info", `worker started v${ver} - jittered tabs + ${WATCHDOG_MIN}-min watchdog + ${REFRESH_MIN}-min refresh + ${MEMORY_CHECK_INTERVAL_MIN}-min memory check`);
-    await reportBridgeHeartbeat("schedule_alarm");
-    await reportScraperTabHeartbeats("schedule_alarm");
-  }
-  function runStartupRecovery(reason, options = {}) {
-    const attempt = Number(options.attempt || 0);
-    _startupRecoveryChain = _startupRecoveryChain.catch(() => null).then(() => performStartupRecovery(reason, { ...options, attempt })).catch((e) => log("warn", `${reason} recovery failed: ${e && e.message ? e.message : e}`));
-    return _startupRecoveryChain;
-  }
-  async function performStartupRecovery(reason, options = {}) {
-    const attempt = Number(options.attempt || 0);
-    const retries = Math.max(0, Number(options.retries || 0));
-    const force = !!options.force;
-    const refreshTabs = !!options.refreshTabs;
-    const openTabs = options.openTabs !== false;
-    const refreshForce = options.refreshForce !== false;
-    await setStatus({
-      swStartedAt: Date.now(),
-      lastStartupRecoveryAt: Date.now(),
-      lastStartupRecoveryReason: reason,
-      lastStartupRecoveryAttempt: attempt
-    });
-    await log("info", `startup recovery ${reason}${attempt ? " retry " + attempt : ""}`);
-    if (attempt === 0 && shouldResetPageRecoveryForStartup(reason)) {
-      await clearPageRecoveryState(reason).catch(() => {
-      });
-    }
-    await scheduleAlarm().catch((e) => log("warn", `${reason} schedule failed: ${e && e.message ? e.message : e}`));
-    if (openTabs) {
-      await ensureScraperTabsOpen(reason, { force }).catch((e) => log("warn", `${reason} tab audit failed: ${e && e.message ? e.message : e}`));
-    }
-    await reportBridgeHeartbeat(reason).catch((e) => log("warn", `${reason} bridge heartbeat failed: ${e && e.message ? e.message : e}`));
-    await reportScraperTabHeartbeats(reason).catch((e) => log("warn", `${reason} scraper heartbeat failed: ${e && e.message ? e.message : e}`));
-    if (refreshTabs) {
-      const refreshGapMs = Number.isFinite(Number(options.refreshGapMs)) ? Number(options.refreshGapMs) : 1500;
-      await refreshScraperTabs({ bypassCache: true, force: refreshForce || force, reason, gapMs: refreshGapMs }).catch((e) => log("warn", `${reason} tab refresh failed: ${e && e.message ? e.message : e}`));
-      await reportScraperTabHeartbeats(reason + "_refresh").catch((e) => log("warn", `${reason} refresh heartbeat failed: ${e && e.message ? e.message : e}`));
-    }
-    await ensureLoops(reason).catch((e) => log("warn", `${reason} loop nudge failed: ${e && e.message ? e.message : e}`));
-    if (attempt < retries) {
-      const delay = [45e3, 15e4, 36e4][Math.min(attempt, 2)];
-      setTimeout(() => {
-        runStartupRecovery(reason, { ...options, attempt: attempt + 1, retries });
-      }, delay);
-    }
-  }
-  chrome.runtime.onInstalled.addListener(async () => {
-    runStartupRecovery("installed", { force: true, refreshTabs: true, refreshGapMs: 1500, retries: 2 });
-  });
-  chrome.runtime.onStartup.addListener(() => {
-    runStartupRecovery("startup", { force: false, refreshTabs: true, refreshGapMs: 1500, retries: 2 });
-  });
-  chrome.alarms.onAlarm.addListener(async (a) => {
-    if (a.name && a.name.startsWith(BROWSER_REVISIT_WATCHDOG_PREFIX)) {
-      await runBrowserRevisitWatchdog(a.name);
-    } else if (a.name && a.name.startsWith(PAGE_RECOVERY_PREFIX)) {
-      await runPageRecovery(a.name.slice(PAGE_RECOVERY_PREFIX.length));
-    } else if (a.name === EXTENSION_AUTO_RELOAD_ALARM) {
-      try {
-        chrome.runtime.reload();
-      } catch (e) {
-      }
-    } else if (a.name === ALARM) {
-      await _alarmJitter();
-      await ensureScraperTabsOpen("watchdog");
-      await reportScraperTabHeartbeats("watchdog");
-      await ensureLoops("watchdog");
-    } else if (a.name === ALARM_REFRESH) {
-      await _alarmJitter();
-      await refreshScraperTabs({ reason: "scheduled" });
-      await reportScraperTabHeartbeats("refresh");
-    } else if (a.name === ALARM_MEMORY) {
-      await _alarmJitter();
-      await checkMemorySensitiveTabs("scheduled");
-    }
-  });
+
+  // src/background/page_recovery.ts
+  var PAGE_RECOVERY_PREFIX = "uc-page-recovery:";
+  var PAGE_RECOVERY_STATE_KEY = "ucPageRecovery";
+  var PAGE_RECOVERY_MAX_ATTEMPTS = 3;
+  var PAGE_RECOVERY_STATE_TTL_MS = 60 * 60 * 1e3;
+  var PAGE_RECOVERY_LIMIT_COOLDOWN_MS = 30 * 60 * 1e3;
+  var PAGE_RECOVERY_LIMIT_COOLDOWN_MS_BY_PLATFORM = {
+    x: 10 * 60 * 1e3
+  };
+  var PAGE_RECOVERY_DELAY_WINDOWS_MS = [
+    [45e3, 15e4],
+    [24e4, 48e4],
+    [72e4, 12e5]
+  ];
   function scraperPlatforms() {
     return (globalThis.UC_PLATFORMS || []).filter((p) => p.scraper && AUTO_SCRAPER_PLATFORM_IDS.has(p.id));
   }
@@ -2157,6 +1515,192 @@
       await savePageRecoveryState(state);
     }
   }
+
+  // src/background/status.ts
+  async function setStatus(patch) {
+    const { ucStatus = {} } = await chrome.storage.local.get("ucStatus");
+    await chrome.storage.local.set({ ucStatus: { ...ucStatus, ...patch } });
+  }
+  async function getStatus() {
+    const { ucStatus = {} } = await chrome.storage.local.get("ucStatus");
+    return ucStatus;
+  }
+
+  // src/background/heartbeat.ts
+  var SCRAPER_HEARTBEAT_TIMEOUT_MS = 12e3;
+  var SCRAPER_HEARTBEAT_CONCURRENCY = 3;
+  function extensionVersion() {
+    return chrome.runtime.getManifest && chrome.runtime.getManifest().version || null;
+  }
+  function withExtensionVersion(payload) {
+    return { ...payload, extension_version: extensionVersion() };
+  }
+  async function reportBridgeHeartbeat(reason) {
+    const base = await ingestBase();
+    const payload = withExtensionVersion({
+      platform: "bridge",
+      label: "UnifiedCollector Bridge",
+      running: true,
+      tab_id: "service_worker",
+      url: "chrome-extension://" + chrome.runtime.id + "/background.js",
+      health_status: "service_worker_active",
+      health_reason: reason || "startup"
+    });
+    try {
+      const result = await postJsonWithTimeout(base + "/social/browser-heartbeat", payload);
+      const body = parseHeartbeatResponseBody(result && result.body);
+      await maybeAutoReloadExtension(
+        base,
+        null,
+        { id: "bridge", label: "UnifiedCollector Bridge" },
+        body,
+        reason || "bridge_heartbeat"
+      );
+      await setStatus({
+        lastBridgeHeartbeatOkAt: Date.now(),
+        lastBridgeHeartbeatError: null,
+        lastBridgeHeartbeatBase: base,
+        lastBridgeHeartbeatReason: reason || "startup"
+      });
+    } catch (e) {
+      const err = String(e && e.message ? e.message : e);
+      await setStatus({
+        lastBridgeHeartbeatFailAt: Date.now(),
+        lastBridgeHeartbeatError: err,
+        lastBridgeHeartbeatBase: base,
+        lastBridgeHeartbeatReason: reason || "startup"
+      });
+      await log("warn", `browser heartbeat failed to reach ${base}: ${err}`);
+    }
+  }
+  async function sendManualIngestProbe() {
+    const base = await ingestBase();
+    const payload = withExtensionVersion({
+      platform: "bridge",
+      label: "UnifiedCollector Bridge",
+      running: true,
+      tab_id: "manual_test",
+      url: "chrome-extension://" + chrome.runtime.id + "/tabs.html",
+      health_status: "manual_ingest_probe",
+      health_reason: "tabs_page_test"
+    });
+    try {
+      const { response: r } = await postJsonWithTimeout(base + "/social/browser-heartbeat", payload, 6e3);
+      await setStatus({ lastManualIngestProbeAt: Date.now(), lastManualIngestProbeOk: true, lastManualIngestProbeError: null });
+      await log("info", `manual ingest probe ok (${base})`);
+      return { ok: true, status: r.status, base };
+    } catch (e) {
+      const err = String(e && e.message ? e.message : e);
+      await setStatus({ lastManualIngestProbeAt: Date.now(), lastManualIngestProbeOk: false, lastManualIngestProbeError: err });
+      await log("error", `manual ingest probe failed: ${err}`);
+      return { ok: false, error: err, base };
+    }
+  }
+  function platformForTabUrl(url) {
+    let host = "";
+    try {
+      host = new URL(url || "").host;
+    } catch (e) {
+      return null;
+    }
+    return scraperPlatforms().find((p) => platformHosts(p).includes(host)) || null;
+  }
+  async function reportScraperTabHeartbeats(reason) {
+    const base = await ingestBase();
+    let seen = 0;
+    let sent = 0;
+    let failed = 0;
+    let lastError = null;
+    let canonical = 0;
+    let skipped = 0;
+    try {
+      const allTabs = await chrome.tabs.query({ url: scraperUrlPatterns() });
+      const selection = selectCanonicalScraperTabRows(allTabs);
+      const activeIds = (await scraperTabSelection()).activeIds;
+      const tabs = selection.rows.filter((row) => activeIds.has(row.platform.id));
+      seen = selection.seen;
+      canonical = tabs.length;
+      skipped = selection.skipped;
+      await mapLimit(tabs, SCRAPER_HEARTBEAT_CONCURRENCY, async ({ tab, platform }) => {
+        try {
+          const result = await postJsonWithTimeout(base + "/social/browser-heartbeat", withExtensionVersion({
+            platform: platform.id,
+            label: platform.label,
+            running: true,
+            tab_id: tab.id,
+            url: tab.url || null,
+            health_status: "background_tab_seen",
+            health_reason: reason || "background_watchdog",
+            page_title: tab.title || null
+          }), SCRAPER_HEARTBEAT_TIMEOUT_MS);
+          await scheduleMaybeForceScrapeCycle(tab, platform, result && result.body, reason || "background_watchdog", base);
+          sent++;
+        } catch (e) {
+          failed++;
+          lastError = String(e && e.message ? e.message : e);
+        }
+      });
+    } catch (e) {
+      lastError = String(e && e.message ? e.message : e);
+    }
+    await setStatus({
+      lastScraperHeartbeatAt: Date.now(),
+      lastScraperHeartbeatSeen: seen,
+      lastScraperHeartbeatSent: sent,
+      lastScraperHeartbeatFailed: failed,
+      lastScraperHeartbeatCanonical: canonical,
+      lastScraperHeartbeatSkippedDuplicates: skipped,
+      lastScraperHeartbeatError: lastError,
+      lastScraperHeartbeatBase: base,
+      lastScraperHeartbeatReason: reason || "background_watchdog"
+    });
+    if (failed || lastError) {
+      await log("warn", `scraper heartbeat delivery: ${sent}/${seen} sent to ${base}${lastError ? " (" + lastError + ")" : ""}`);
+    }
+    await reportScraperHeartbeatSummary(base, reason, { seen, sent, failed, canonical, skipped, lastError }).catch(() => {
+    });
+  }
+  async function reportScraperHeartbeatSummary(base, reason, summary) {
+    const seen = Number(summary && summary.seen || 0);
+    const sent = Number(summary && summary.sent || 0);
+    const failed = Number(summary && summary.failed || 0);
+    const lastError = summary && summary.lastError ? String(summary.lastError).slice(0, 240) : null;
+    const healthStatus = seen <= 0 ? "scraper_tabs_missing" : failed > 0 || sent <= 0 ? "scraper_heartbeat_degraded" : "scraper_heartbeat_ok";
+    try {
+      await postJsonWithTimeout(base + "/social/browser-heartbeat", withExtensionVersion({
+        platform: "bridge",
+        label: "UnifiedCollector Bridge",
+        running: true,
+        tab_id: "scraper_tabs",
+        url: "chrome-extension://" + chrome.runtime.id + "/background.js",
+        health_status: healthStatus,
+        health_reason: reason || "background_watchdog",
+        scraper_tabs_seen: seen,
+        scraper_tabs_sent: sent,
+        scraper_tabs_failed: failed,
+        scraper_tabs_canonical: Number(summary && summary.canonical || 0),
+        scraper_tabs_skipped: Number(summary && summary.skipped || 0),
+        scraper_heartbeat_error: lastError
+      }), SCRAPER_HEARTBEAT_TIMEOUT_MS);
+      await setStatus({
+        lastBridgeHeartbeatOkAt: Date.now(),
+        lastBridgeHeartbeatError: null,
+        lastBridgeHeartbeatBase: base,
+        lastBridgeHeartbeatReason: reason || "scraper_heartbeat_summary"
+      });
+    } catch (e) {
+      await setStatus({
+        lastBridgeHeartbeatFailAt: Date.now(),
+        lastBridgeHeartbeatError: String(e && e.message ? e.message : e),
+        lastBridgeHeartbeatBase: base,
+        lastBridgeHeartbeatReason: reason || "scraper_heartbeat_summary"
+      });
+      throw e;
+    }
+  }
+
+  // src/background/loops.ts
+  var KICK_DEBOUNCE_MS = 3e4;
   async function ensureLoops(reason) {
     const forceCycle = /browser_content_stale|manual|scrape|tabs_page|stale/i.test(reason || "");
     const allTabs = await chrome.tabs.query({ url: scraperUrlPatterns() });
@@ -2243,17 +1787,6 @@
     }
     return ensureLoops(reason);
   }
-  chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
-    if (info.status !== "complete" || !tab.url) return;
-    const host = (() => {
-      try {
-        return new URL(tab.url).host;
-      } catch (e) {
-        return "";
-      }
-    })();
-    if (scraperPlatforms().some((p) => platformHosts(p).includes(host))) kick("tab-loaded", tabId);
-  });
   async function tabForPlatform(p) {
     const tabs = await chrome.tabs.query({ url: platformUrlPatterns(p) });
     const selection = selectCanonicalScraperTabRows(tabs);
@@ -2282,6 +1815,20 @@
     }
     return out;
   }
+
+  // src/background/browser_upload.ts
+  var BROWSER_UPLOAD_MAX_BYTES = 256 * 1024 * 1024;
+  var BROWSER_UPLOAD_FETCH_TIMEOUT_MS = 45e3;
+  var BROWSER_UPLOAD_POST_TIMEOUT_MS = 65e3;
+  var BROWSER_UPLOAD_ATTEMPT_LIMIT_BY_PLATFORM = {
+    instagram: 4,
+    threads: 3,
+    tiktok: 2,
+    facebook: 2,
+    x: 1,
+    lemon8: 1
+  };
+  var browserUploadChains = {};
   function browserUploadAllowed(platform, rawUrl) {
     let host = "";
     try {
@@ -2513,6 +2060,505 @@
       return { id: p.id, error: String(e.message || e) };
     }
   }
+
+  // src/background/memory.ts
+  var MEMORY_SENSITIVE_PLATFORMS = /* @__PURE__ */ new Set(["facebook", "threads"]);
+  var MEMORY_RELOAD_THRESHOLD_JS_MB = 250;
+  var MEMORY_RELOAD_DOM_NODES = 4e4;
+  var MEMORY_RELOAD_MIN_INTERVAL_MIN = 90;
+  var MEMORY_TIME_CAP_MIN = 240;
+  var MEMORY_LAST_RELOAD_KEY = "ucMemoryLastReloadByTab";
+  var MEMORY_THRESHOLD_MB_OVERRIDE_KEY = "memoryReloadThresholdMB";
+  var MEMORY_DOM_OVERRIDE_KEY = "memoryReloadDomNodes";
+  async function fetchTabMemoryMetrics(tabId) {
+    const reader = () => ({
+      js_heap_bytes: typeof performance !== "undefined" && performance.memory && performance.memory.usedJSHeapSize || null,
+      js_heap_limit_bytes: typeof performance !== "undefined" && performance.memory && performance.memory.jsHeapSizeLimit || null,
+      dom_nodes: document.querySelectorAll("*").length
+    });
+    let isolatedResult = null;
+    try {
+      const results = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: reader
+      });
+      if (results && results[0] && results[0].result) isolatedResult = results[0].result;
+    } catch (e) {
+      return { error: e && e.message || String(e) };
+    }
+    if (isolatedResult && isolatedResult.js_heap_bytes !== null) return isolatedResult;
+    try {
+      const results = await chrome.scripting.executeScript({
+        target: { tabId },
+        world: "MAIN",
+        func: reader
+      });
+      if (results && results[0] && results[0].result) {
+        const main = results[0].result;
+        return {
+          js_heap_bytes: main.js_heap_bytes !== null ? main.js_heap_bytes : isolatedResult && isolatedResult.js_heap_bytes,
+          js_heap_limit_bytes: main.js_heap_limit_bytes !== null ? main.js_heap_limit_bytes : isolatedResult && isolatedResult.js_heap_limit_bytes,
+          dom_nodes: main.dom_nodes !== null ? main.dom_nodes : isolatedResult && isolatedResult.dom_nodes
+        };
+      }
+    } catch (e) {
+      if (isolatedResult) return isolatedResult;
+      return { error: e && e.message || String(e) };
+    }
+    return isolatedResult;
+  }
+  async function memoryReloadThresholdMB() {
+    try {
+      const stored = await chrome.storage.local.get(MEMORY_THRESHOLD_MB_OVERRIDE_KEY);
+      const value = Number(stored[MEMORY_THRESHOLD_MB_OVERRIDE_KEY]);
+      if (Number.isFinite(value) && value > 0) return value;
+    } catch (e) {
+    }
+    return MEMORY_RELOAD_THRESHOLD_JS_MB;
+  }
+  async function memoryReloadDomThreshold() {
+    try {
+      const stored = await chrome.storage.local.get(MEMORY_DOM_OVERRIDE_KEY);
+      const value = Number(stored[MEMORY_DOM_OVERRIDE_KEY]);
+      if (Number.isFinite(value) && value > 0) return value;
+    } catch (e) {
+    }
+    return MEMORY_RELOAD_DOM_NODES;
+  }
+  async function checkMemorySensitiveTabs(reason = "scheduled") {
+    if (_tabsOpInProgress) return { skipped: true, reason: "tabs_operation_in_progress", checked: 0, reloaded: 0 };
+    const base = await ingestBase();
+    const now = Date.now();
+    const jsThresholdMB = await memoryReloadThresholdMB();
+    const jsThresholdBytes = jsThresholdMB * 1024 * 1024;
+    const domThreshold = await memoryReloadDomThreshold();
+    const minIntervalMs = MEMORY_RELOAD_MIN_INTERVAL_MIN * 60 * 1e3;
+    const timeCapMs = MEMORY_TIME_CAP_MIN * 60 * 1e3;
+    const stored = await chrome.storage.local.get(MEMORY_LAST_RELOAD_KEY);
+    const lastByTab = { ...stored[MEMORY_LAST_RELOAD_KEY] || {} };
+    let allTabs = [];
+    try {
+      allTabs = await chrome.tabs.query({ url: scraperUrlPatterns() });
+    } catch (e) {
+      return { skipped: true, reason: "tabs_query_failed", error: e && e.message || String(e), checked: 0, reloaded: 0 };
+    }
+    const selection = selectCanonicalScraperTabRows(allTabs);
+    const { activeIds } = await scraperTabSelection();
+    const rows = selection.rows.filter((r) => r.platform && activeIds.has(r.platform.id) && MEMORY_SENSITIVE_PLATFORMS.has(r.platform.id));
+    let checked = 0;
+    let reloaded = 0;
+    const reasons = [];
+    for (const row of rows) {
+      const tab = row.tab;
+      const platform = row.platform;
+      if (!tab || tab.id == null) continue;
+      checked++;
+      const key = `${platform.id}:${tab.id}`;
+      const lastAtStored = Number(lastByTab[key] || 0);
+      const inMemLastReload = Number(lastForcedReloadByTab[String(tab.id)] || 0);
+      const lastAt = Math.max(lastAtStored, inMemLastReload);
+      const ageMs = lastAt ? now - lastAt : Number.POSITIVE_INFINITY;
+      const metrics = await fetchTabMemoryMetrics(tab.id);
+      const jsHeapBytes = metrics && Number.isFinite(Number(metrics.js_heap_bytes)) ? Number(metrics.js_heap_bytes) : null;
+      const jsHeapMB = jsHeapBytes !== null ? Number((jsHeapBytes / (1024 * 1024)).toFixed(1)) : null;
+      const domNodes = metrics && Number.isFinite(Number(metrics.dom_nodes)) ? Number(metrics.dom_nodes) : null;
+      const metricsError = metrics && metrics.error ? String(metrics.error) : null;
+      const overHeap = jsHeapBytes !== null && jsHeapBytes >= jsThresholdBytes;
+      const overNodes = domNodes !== null && domNodes >= domThreshold;
+      const overTimeCap = lastAtStored > 0 && ageMs >= timeCapMs;
+      let triggerReason = null;
+      if (overHeap) triggerReason = "js_heap_over_threshold";
+      else if (overNodes) triggerReason = "dom_nodes_over_threshold";
+      else if (overTimeCap) triggerReason = "time_cap_exceeded";
+      const baseExtras = {
+        memory_js_heap_bytes: jsHeapBytes,
+        memory_js_heap_mb: jsHeapMB,
+        memory_dom_nodes: domNodes,
+        memory_threshold_mb: jsThresholdMB,
+        memory_dom_threshold: domThreshold,
+        memory_last_reload_age_ms: Number.isFinite(ageMs) ? ageMs : null,
+        memory_metrics_error: metricsError,
+        memory_check_reason: reason
+      };
+      if (!triggerReason) {
+        await recordServiceWorkerRecovery(base, tab, platform, "memory_check_skipped", "under_threshold", baseExtras);
+        if (!lastAtStored) {
+          lastByTab[key] = now;
+        }
+        continue;
+      }
+      if (ageMs < minIntervalMs) {
+        await recordServiceWorkerRecovery(base, tab, platform, "memory_reload_debounced", triggerReason, baseExtras);
+        continue;
+      }
+      reasons.push(`${platform.id}:${triggerReason}`);
+      await recordServiceWorkerRecovery(base, tab, platform, "memory_soft_reload", triggerReason, baseExtras);
+      try {
+        await chrome.tabs.reload(tab.id, { bypassCache: false });
+        reloaded++;
+        lastByTab[key] = now;
+        lastForcedReloadByTab[String(tab.id)] = now;
+        await log(
+          "warn",
+          `${platform.label}: memory soft-reload (${triggerReason}; jsHeap=${jsHeapMB !== null ? jsHeapMB + "MB" : "?"} nodes=${domNodes !== null ? domNodes : "?"})`
+        );
+        schedulePostReloadScrapeNudge(base, tab, platform, `memory_soft_reload_${triggerReason}`, {
+          memory_js_heap_mb: jsHeapMB,
+          memory_dom_nodes: domNodes,
+          memory_reload_reason: triggerReason
+        });
+      } catch (e) {
+        await recordServiceWorkerRecovery(base, tab, platform, "memory_reload_failed", triggerReason, {
+          ...baseExtras,
+          reload_error: e && e.message || String(e)
+        });
+      }
+    }
+    await chrome.storage.local.set({ [MEMORY_LAST_RELOAD_KEY]: lastByTab });
+    const prevStatus = await getStatus();
+    const prevCount = Number(prevStatus.memoryReloadCount || 0);
+    const patch = { lastMemoryCheckAt: now, lastMemoryCheckReason: reason };
+    if (reloaded > 0) {
+      patch.memoryReloadCount = prevCount + reloaded;
+      patch.lastMemoryReloadAt = now;
+      patch.lastMemoryReloadReasons = reasons;
+    }
+    await setStatus(patch);
+    return { checked, reloaded, reasons };
+  }
+
+  // src/background/revisit_watchdog.ts
+  var BROWSER_REVISIT_WATCHDOG_PREFIX = "uc-browser-revisit-watchdog:";
+  var BROWSER_REVISIT_NAVIGATION_TIMEOUT_MS = 12e4;
+  var BROWSER_REVISIT_RESULT_TIMEOUT_MS = 10 * 60 * 1e3;
+  function browserRevisitWatchdogKey(queue, platform) {
+    return `ucBrowserRevisitWatchdog:${queue}:${platform}`;
+  }
+  function browserRevisitWatchdogAlarm(queue, platform) {
+    return `${BROWSER_REVISIT_WATCHDOG_PREFIX}${queue}:${platform}`;
+  }
+  async function armBrowserRevisitWatchdog(msg, sender) {
+    const queue = msg && msg.queue === "tiktok" ? "tiktok" : "browser";
+    const platform = queue === "tiktok" ? "tiktok" : String(msg && msg.platform || "").toLowerCase();
+    const contentId = String(msg && msg.content_id || "").trim();
+    const tabId = sender && sender.tab && Number.isInteger(sender.tab.id) ? sender.tab.id : null;
+    if (!platform || !contentId || tabId == null) return { ok: false };
+    const key = browserRevisitWatchdogKey(queue, platform);
+    const alarmName = browserRevisitWatchdogAlarm(queue, platform);
+    const values = await chrome.storage.local.get(key);
+    const existing = values && values[key];
+    const claimAttempt = msg.claim_attempt == null ? null : Number(msg.claim_attempt);
+    if (existing && existing.content_id === contentId && existing.claim_attempt === claimAttempt && existing.tab_id === tabId && existing.url === msg.url) {
+      await chrome.alarms.create(alarmName, { when: existing.deadline_at || Date.now() + BROWSER_REVISIT_NAVIGATION_TIMEOUT_MS });
+      return { ok: true };
+    }
+    const startedAt = Number(msg.navigation_started_at || Date.now());
+    const state = {
+      queue,
+      platform,
+      content_id: contentId,
+      claim_attempt: claimAttempt,
+      tab_id: tabId,
+      url: String(msg.url || ""),
+      phase: "navigation",
+      deadline_at: startedAt + BROWSER_REVISIT_NAVIGATION_TIMEOUT_MS
+    };
+    await chrome.storage.local.set({ [key]: state });
+    await chrome.alarms.create(alarmName, { when: state.deadline_at });
+    return { ok: true };
+  }
+  function browserRevisitPageMatches(platform, actualUrl, targetUrl) {
+    try {
+      const actual = new URL(actualUrl);
+      const target = new URL(targetUrl);
+      if (actual.pathname.replace(/\/$/, "") !== target.pathname.replace(/\/$/, "")) return false;
+      const hosts = {
+        instagram: /* @__PURE__ */ new Set(["instagram.com", "www.instagram.com"]),
+        threads: /* @__PURE__ */ new Set(["threads.com", "www.threads.com", "threads.net", "www.threads.net"]),
+        tiktok: /* @__PURE__ */ new Set(["tiktok.com", "www.tiktok.com"]),
+        x: /* @__PURE__ */ new Set(["x.com", "www.x.com", "twitter.com", "www.twitter.com"]),
+        facebook: /* @__PURE__ */ new Set(["facebook.com", "www.facebook.com", "m.facebook.com"]),
+        lemon8: /* @__PURE__ */ new Set(["lemon8-app.com", "www.lemon8-app.com", "lemon8.com", "www.lemon8.com"])
+      }[platform];
+      const hostOk = (hostname) => {
+        const host = hostname.toLowerCase();
+        if (hosts && hosts.has(host)) return true;
+        if (platform === "instagram") return host === "instagram.com" || host.endsWith(".instagram.com");
+        if (platform === "facebook") return host === "facebook.com" || host.endsWith(".facebook.com");
+        return false;
+      };
+      return hostOk(actual.hostname) && hostOk(target.hostname);
+    } catch (_) {
+      return false;
+    }
+  }
+  async function clearBrowserRevisitWatchdog(queue, platform, contentId, claimAttempt) {
+    const key = browserRevisitWatchdogKey(queue, platform);
+    const alarmName = browserRevisitWatchdogAlarm(queue, platform);
+    const values = await chrome.storage.local.get(key);
+    const existing = values && values[key];
+    if (!existing || existing.content_id !== contentId || existing.claim_attempt !== claimAttempt) return;
+    await chrome.storage.local.remove(key);
+    await chrome.alarms.clear(alarmName);
+  }
+  async function runBrowserRevisitWatchdog(alarmName) {
+    const suffix = alarmName.slice(BROWSER_REVISIT_WATCHDOG_PREFIX.length);
+    const [queue, ...platformParts] = suffix.split(":");
+    const platform = platformParts.join(":");
+    if (!(/* @__PURE__ */ new Set(["browser", "tiktok"])).has(queue) || !platform) return;
+    const key = browserRevisitWatchdogKey(queue, platform);
+    const values = await chrome.storage.local.get(key);
+    const state = values && values[key];
+    if (!state || !state.content_id) return;
+    if (Number(state.deadline_at || 0) > Date.now()) {
+      await chrome.alarms.create(alarmName, { when: state.deadline_at });
+      return;
+    }
+    let tab = null;
+    try {
+      tab = await chrome.tabs.get(state.tab_id);
+    } catch (_) {
+    }
+    if (tab && browserRevisitPageMatches(platform, tab.url || "", state.url || "")) {
+      if (state.phase === "navigation") {
+        const next2 = { ...state, phase: "result", deadline_at: Date.now() + BROWSER_REVISIT_RESULT_TIMEOUT_MS };
+        await chrome.storage.local.set({ [key]: next2 });
+        await chrome.alarms.create(alarmName, { when: next2.deadline_at });
+        return;
+      }
+    }
+    const reason = !tab ? "detail_tab_closed" : state.phase === "navigation" ? "detail_navigation_timeout" : "detail_result_timeout";
+    try {
+      const base = await ingestBase();
+      const endpoint = queue === "tiktok" ? "/social/tiktok-revisit-result" : "/social/browser-revisit-result";
+      const body = {
+        content_id: state.content_id,
+        claim_attempt: state.claim_attempt,
+        status: "failed",
+        reason,
+        username: null
+      };
+      if (queue === "browser") body.platform = platform;
+      const result = await postJsonWithTimeout(
+        base + endpoint,
+        withExtensionVersion(body),
+        SCRAPER_HEARTBEAT_TIMEOUT_MS
+      );
+      const responseBody = JSON.parse(result.body || "{}");
+      if (result.response && result.response.ok && responseBody.accepted === false) {
+        await clearBrowserRevisitWatchdog(queue, platform, state.content_id, state.claim_attempt);
+        return;
+      }
+      if (result.response && result.response.ok && responseBody.accepted === true) {
+        await clearBrowserRevisitWatchdog(queue, platform, state.content_id, state.claim_attempt);
+        await log("warn", `${platform} browser revisit lease released after ${reason}`);
+        return;
+      }
+    } catch (_) {
+    }
+    const next = { ...state, deadline_at: Date.now() + 2 * 60 * 1e3 };
+    await chrome.storage.local.set({ [key]: next });
+    await chrome.alarms.create(alarmName, { when: next.deadline_at });
+  }
+
+  // src/shared/platforms.ts
+  var UC_PLATFORMS = [
+    { id: "instagram", label: "Instagram", url: "https://www.instagram.com/", host: "www.instagram.com", cookieUrl: "https://www.instagram.com", cookie: "sessionid", scraper: true },
+    // Threads moved threads.net → threads.com in Apr 2025 (.net just redirects).
+    { id: "threads", label: "Threads", url: "https://www.threads.com/", host: "www.threads.com", cookieUrl: "https://www.threads.com", cookie: "sessionid", scraper: true },
+    // Keep one visible /following tab per platform; broader coverage runs in that tab.
+    { id: "tiktok", label: "TikTok", url: "https://www.tiktok.com/following", host: "www.tiktok.com", cookieUrl: "https://www.tiktok.com", cookie: "sessionid", scraper: true },
+    // Keep the single visible tab on the populated For You feed; the extension
+    // supplements the headless API collector with paced DOM media candidates.
+    { id: "lemon8", label: "Lemon8", url: "https://www.lemon8-app.com/feed/foryou", host: "www.lemon8-app.com", cookieUrl: "https://www.lemon8-app.com", cookie: "sessionid", scraper: true, noLogin: true },
+    { id: "x", label: "Twitter / X", url: "https://x.com/home", host: "x.com", aliasHosts: ["twitter.com"], cookieUrl: "https://x.com", cookie: "auth_token", scraper: true },
+    { id: "facebook", label: "Facebook", url: "https://www.facebook.com/", host: "www.facebook.com", cookieUrl: "https://www.facebook.com", cookie: "c_user", scraper: true },
+    { id: "strava", label: "Strava", url: "https://www.strava.com/dashboard", host: "www.strava.com", cookieUrl: "https://www.strava.com", cookie: "_strava4_session", scraper: true },
+    { id: "pinterest", label: "Pinterest", url: "https://www.pinterest.com/", host: "pinterest.com", cookieUrl: "https://www.pinterest.com", cookie: "_pinterest_sess", scraper: true },
+    { id: "snapchat", label: "Snapchat", url: "https://www.snapchat.com/", host: "snapchat.com", cookieUrl: "https://accounts.snapchat.com", cookie: "__Host-sc-a-auth-session", scraper: true },
+    { id: "airbnb", label: "Airbnb", url: "https://www.airbnb.com/", host: "airbnb.com", aliasHosts: ["airbnb.com.sg", "airbnb.co.uk", "airbnb.co.kr"], cookieUrl: "https://www.airbnb.com", cookieUrls: ["https://www.airbnb.com.sg", "https://www.airbnb.co.uk", "https://www.airbnb.co.kr"], cookie: "_aat", scraper: true },
+    // Managed for authenticated CDP cookie snapshots; collection remains source-owned.
+    { id: "bluesky", label: "Bluesky", url: "https://bsky.app/", host: "bsky.app", cookieUrl: "https://bsky.app", cookie: "sid", scraper: true },
+    { id: "youtube", label: "YouTube", url: "https://www.youtube.com/", host: "www.youtube.com", cookieUrl: "https://www.youtube.com", cookie: "SID", scraper: true }
+  ];
+
+  // src/background/startup.ts
+  var ALARM = "uc-scrape";
+  var WATCHDOG_MIN = 7;
+  var ALARM_REFRESH = "uc-refresh";
+  var REFRESH_MIN = 45;
+  var ALARM_MEMORY = "uc-memory-check";
+  var MEMORY_CHECK_INTERVAL_MIN = 30;
+  var _startupRecoveryChain = Promise.resolve();
+  async function scheduleAlarm() {
+    chrome.alarms.create(ALARM, { periodInMinutes: WATCHDOG_MIN });
+    chrome.alarms.create(ALARM_REFRESH, { periodInMinutes: REFRESH_MIN });
+    chrome.alarms.create(ALARM_MEMORY, { periodInMinutes: MEMORY_CHECK_INTERVAL_MIN });
+    await setStatus({ swStartedAt: Date.now() });
+    const ver = chrome.runtime.getManifest && chrome.runtime.getManifest().version || "?";
+    await log("info", `worker started v${ver} - jittered tabs + ${WATCHDOG_MIN}-min watchdog + ${REFRESH_MIN}-min refresh + ${MEMORY_CHECK_INTERVAL_MIN}-min memory check`);
+    await reportBridgeHeartbeat("schedule_alarm");
+    await reportScraperTabHeartbeats("schedule_alarm");
+  }
+  function runStartupRecovery(reason, options = {}) {
+    const attempt = Number(options.attempt || 0);
+    _startupRecoveryChain = _startupRecoveryChain.catch(() => null).then(() => performStartupRecovery(reason, { ...options, attempt })).catch((e) => log("warn", `${reason} recovery failed: ${e && e.message ? e.message : e}`));
+    return _startupRecoveryChain;
+  }
+  async function performStartupRecovery(reason, options = {}) {
+    const attempt = Number(options.attempt || 0);
+    const retries = Math.max(0, Number(options.retries || 0));
+    const force = !!options.force;
+    const refreshTabs = !!options.refreshTabs;
+    const openTabs = options.openTabs !== false;
+    const refreshForce = options.refreshForce !== false;
+    await setStatus({
+      swStartedAt: Date.now(),
+      lastStartupRecoveryAt: Date.now(),
+      lastStartupRecoveryReason: reason,
+      lastStartupRecoveryAttempt: attempt
+    });
+    await log("info", `startup recovery ${reason}${attempt ? " retry " + attempt : ""}`);
+    if (attempt === 0 && shouldResetPageRecoveryForStartup(reason)) {
+      await clearPageRecoveryState(reason).catch(() => {
+      });
+    }
+    await scheduleAlarm().catch((e) => log("warn", `${reason} schedule failed: ${e && e.message ? e.message : e}`));
+    if (openTabs) {
+      await ensureScraperTabsOpen(reason, { force }).catch((e) => log("warn", `${reason} tab audit failed: ${e && e.message ? e.message : e}`));
+    }
+    await reportBridgeHeartbeat(reason).catch((e) => log("warn", `${reason} bridge heartbeat failed: ${e && e.message ? e.message : e}`));
+    await reportScraperTabHeartbeats(reason).catch((e) => log("warn", `${reason} scraper heartbeat failed: ${e && e.message ? e.message : e}`));
+    if (refreshTabs) {
+      const refreshGapMs = Number.isFinite(Number(options.refreshGapMs)) ? Number(options.refreshGapMs) : 1500;
+      await refreshScraperTabs({ bypassCache: true, force: refreshForce || force, reason, gapMs: refreshGapMs }).catch((e) => log("warn", `${reason} tab refresh failed: ${e && e.message ? e.message : e}`));
+      await reportScraperTabHeartbeats(reason + "_refresh").catch((e) => log("warn", `${reason} refresh heartbeat failed: ${e && e.message ? e.message : e}`));
+    }
+    await ensureLoops(reason).catch((e) => log("warn", `${reason} loop nudge failed: ${e && e.message ? e.message : e}`));
+    if (attempt < retries) {
+      const delay = [45e3, 15e4, 36e4][Math.min(attempt, 2)];
+      setTimeout(() => {
+        runStartupRecovery(reason, { ...options, attempt: attempt + 1, retries });
+      }, delay);
+    }
+  }
+
+  // src/background.ts
+  self.addEventListener("error", (event) => {
+    const detail = {
+      kind: "sw_error_event",
+      message: event && event.message || null,
+      filename: event && event.filename || null,
+      lineno: event && event.lineno || null,
+      colno: event && event.colno || null,
+      stack: event && event.error && event.error.stack || null
+    };
+    try {
+      console.error("[UC sw_error]", detail);
+    } catch (_) {
+    }
+    try {
+      _reportSwCrash(detail);
+    } catch (_) {
+    }
+  });
+  self.addEventListener("unhandledrejection", (event) => {
+    const reason = event && event.reason;
+    const detail = {
+      kind: "sw_unhandled_rejection",
+      message: reason && reason.message || (typeof reason === "string" ? reason : null),
+      stack: reason && reason.stack || null
+    };
+    try {
+      console.error("[UC sw_reject]", detail);
+    } catch (_) {
+    }
+    try {
+      _reportSwCrash(detail);
+    } catch (_) {
+    }
+  });
+  async function _reportSwCrash(detail) {
+    try {
+      chrome.storage.local.get("ucLog").then(({ ucLog = [] }) => {
+        ucLog.push({ t: Date.now(), level: "error", msg: "sw_crash", detail });
+        while (ucLog.length > 200) ucLog.shift();
+        chrome.storage.local.set({ ucLog }).catch(() => {
+        });
+      }).catch(() => {
+      });
+    } catch (_) {
+    }
+    try {
+      fetch("http://127.0.0.1:8765/social/sw-crash", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...await bridgeHeaders() },
+        body: JSON.stringify({
+          ...detail,
+          extension_version: chrome.runtime.getManifest && chrome.runtime.getManifest().version || null,
+          reported_at: Date.now()
+        }),
+        keepalive: true
+      }).catch(() => {
+      });
+    } catch (_) {
+    }
+  }
+  globalThis.UC_PLATFORMS = UC_PLATFORMS;
+  var RELOAD_INTENT_KEY = "ucReloadIntent";
+  var LOADED_VERSION_KEY = "ucLoadedExtensionVersion";
+  async function fetchJsonWithTimeout(url, timeoutMs = 12e3, headers = {}) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const r = await fetch(url, { signal: ctrl.signal, headers });
+      const j = await r.json().catch(() => ({}));
+      return { response: r, json: j };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  chrome.runtime.onInstalled.addListener(async () => {
+    runStartupRecovery("installed", { force: true, refreshTabs: true, refreshGapMs: 1500, retries: 2 });
+  });
+  chrome.runtime.onStartup.addListener(() => {
+    runStartupRecovery("startup", { force: false, refreshTabs: true, refreshGapMs: 1500, retries: 2 });
+  });
+  chrome.alarms.onAlarm.addListener(async (a) => {
+    if (a.name && a.name.startsWith(BROWSER_REVISIT_WATCHDOG_PREFIX)) {
+      await runBrowserRevisitWatchdog(a.name);
+    } else if (a.name && a.name.startsWith(PAGE_RECOVERY_PREFIX)) {
+      await runPageRecovery(a.name.slice(PAGE_RECOVERY_PREFIX.length));
+    } else if (a.name === EXTENSION_AUTO_RELOAD_ALARM) {
+      try {
+        chrome.runtime.reload();
+      } catch (e) {
+      }
+    } else if (a.name === ALARM) {
+      await _alarmJitter();
+      await ensureScraperTabsOpen("watchdog");
+      await reportScraperTabHeartbeats("watchdog");
+      await ensureLoops("watchdog");
+    } else if (a.name === ALARM_REFRESH) {
+      await _alarmJitter();
+      await refreshScraperTabs({ reason: "scheduled" });
+      await reportScraperTabHeartbeats("refresh");
+    } else if (a.name === ALARM_MEMORY) {
+      await _alarmJitter();
+      await checkMemorySensitiveTabs("scheduled");
+    }
+  });
+  chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
+    if (info.status !== "complete" || !tab.url) return;
+    const host = (() => {
+      try {
+        return new URL(tab.url).host;
+      } catch (e) {
+        return "";
+      }
+    })();
+    if (scraperPlatforms().some((p) => platformHosts(p).includes(host))) kick("tab-loaded", tabId);
+  });
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg && msg.type === "getBrowserTabId") {
       const tabId = sender && sender.tab && Number.isInteger(sender.tab.id) ? sender.tab.id : null;
