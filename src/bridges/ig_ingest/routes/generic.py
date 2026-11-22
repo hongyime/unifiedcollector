@@ -7,7 +7,8 @@ from aiohttp import web
 
 from ..constants import SOCIAL_INGEST_STRUCTURED_BACKGROUND_CONCURRENCY
 from ..cors import _cors
-from ..storage.generic import record_users, save_comments, save_posts, save_profile
+from .._posts import record_users, save_comments
+from .._profiles import save_profile
 
 
 async def target_status_handler(request):
@@ -124,7 +125,8 @@ async def posts_handler(request):
 async def _posts_ingest_background(app, platform: str, body: dict) -> None:
     from .. import (
         _VERIFIED_FILTER_PLATFORMS, _archive_browser_capture, _explicitly_verified_capture,
-        _record_browser_ingest_event, normalize_collection_surface,
+        _record_browser_ingest_event, _record_users, _save_posts,
+        normalize_collection_surface,
     )
 
     if platform in _VERIFIED_FILTER_PLATFORMS and _explicitly_verified_capture(body):
@@ -142,7 +144,7 @@ async def _posts_ingest_background(app, platform: str, body: dict) -> None:
     surface = normalize_collection_surface(body.get("collection_surface") or body.get("surface"))
     async with semaphore:
         await _archive_browser_capture(app["pool"], platform, "posts", body)
-        saved = await save_posts(app["pool"], platform, posts, surface)
+        saved = await _save_posts(app["pool"], platform, posts, surface)
         await _record_browser_ingest_event(
             app["pool"], platform, "posts", body.get("username") or body.get("owner"),
             observed_count=len(posts), stored_count=saved, collection_surface=surface,
@@ -150,7 +152,7 @@ async def _posts_ingest_background(app, platform: str, body: dict) -> None:
             outcome="partial" if saved and saved < len(posts) else "failed" if posts and not saved else "success" if saved else "empty",
             error_class="post_row_not_saved" if saved < len(posts) else None,
         )
-        await record_users(app["pool"], platform, [
+        await _record_users(app["pool"], platform, [
             {"username": post.get("author_username"), "source_record_id": post.get("platform_post_id") or post.get("post_id") or post.get("id")}
             for post in posts if isinstance(post, dict) and post.get("author_username")
         ], "author")

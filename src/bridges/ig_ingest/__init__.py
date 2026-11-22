@@ -27,40 +27,28 @@ the "message channel closed before a response was received" errors. We ack fast
 and download out-of-band.
 """
 import asyncio
-import json
 import logging
-import base64
 import os
 import re
 import time
-import hashlib
-from datetime import datetime, timezone
-from pathlib import Path
-from urllib.parse import urlparse
 
 import aiohttp
-from asyncpg.exceptions import UniqueViolationError
 from aiohttp import web
 
 from src.db.connection import get_pool, close_pool
-from src.core.media_filter import inspect as inspect_media
 from src.core.priority_hints import refresh_collector_priority_hints as refresh_collector_priority_hints
 from src.core.proximity import refresh_account_proximity_cache as refresh_account_proximity_cache
-from src.core.rate_limit_events import record_rate_limit_event
-from src.core.recovery_profiles import mark_recovery_observation
-from src.core.dynamic_cooldown import record_dynamic_cooldown
+from src.core.recovery_profiles import mark_recovery_observation as mark_recovery_observation
+from src.core.dynamic_cooldown import record_dynamic_cooldown as record_dynamic_cooldown
 from src.core.strava_route_queue import fetch_strava_route_capture_queue as fetch_strava_route_capture_queue
 from src.core.vault import (
-    VAULT_ROOT,
-    assert_media_write_allowed,
-    verify_media_item_db_consistency,
-    write_atomic_artifact,
-    write_media_sidecar,
-    write_raw_payload,
+    VAULT_ROOT as VAULT_ROOT,
+    assert_media_write_allowed as assert_media_write_allowed,
+    verify_media_item_db_consistency as verify_media_item_db_consistency,
+    write_media_sidecar as write_media_sidecar,
+    write_raw_payload as write_raw_payload,
 )
-from src.core.collection_surface import normalize_collection_surface
-from src.core.profile_media import approved_profile_image_url
-from src.collectors.strava import _derive_gps_route_fields
+from src.core.collection_surface import normalize_collection_surface as normalize_collection_surface
 
 # Follow-aware access recording (Phase 0). The extension IS the live IG path, so
 # recording access outcomes here populates profile_access_{summary,attempts} far
@@ -89,15 +77,15 @@ logger = logging.getLogger("social_ingest")
 # ``src.bridges.ig_ingest.<CONSTANT>`` keep working.
 from .constants import *  # noqa: E402,F401,F403 -- re-export
 from .constants import (
-    BRIDGE_MEDIA_ALLOWED_HOSTS,
-    BROWSER_CONTENT_HINT_TTL_SECONDS,
-    BROWSER_CONTENT_STALE_SECONDS,
-    BROWSER_DIAGNOSTIC_PLATFORMS,
-    BROWSER_HEARTBEAT_ONLY_PLATFORMS,
-    BROWSER_TELEMETRY_WRITE_TIMEOUT_SECONDS,
+    BRIDGE_MEDIA_ALLOWED_HOSTS as BRIDGE_MEDIA_ALLOWED_HOSTS,
+    BROWSER_CONTENT_HINT_TTL_SECONDS as BROWSER_CONTENT_HINT_TTL_SECONDS,
+    BROWSER_CONTENT_STALE_SECONDS as BROWSER_CONTENT_STALE_SECONDS,
+    BROWSER_DIAGNOSTIC_PLATFORMS as BROWSER_DIAGNOSTIC_PLATFORMS,
+    BROWSER_HEARTBEAT_ONLY_PLATFORMS as BROWSER_HEARTBEAT_ONLY_PLATFORMS,
+    BROWSER_TELEMETRY_WRITE_TIMEOUT_SECONDS as BROWSER_TELEMETRY_WRITE_TIMEOUT_SECONDS,
     DL_CONCURRENCY,
-    KNOWN_PLATFORMS,
-    MEDIA_ROOT,
+    KNOWN_PLATFORMS as KNOWN_PLATFORMS,
+    MEDIA_ROOT as MEDIA_ROOT,
     PORT,
     SOCIAL_INGEST_HEARTBEAT_CONCURRENCY,
     SOCIAL_INGEST_PREP_DB_ON_STARTUP,
@@ -106,17 +94,17 @@ from .constants import (
     SOCIAL_INGEST_STRUCTURED_BACKGROUND_CONCURRENCY,
     SOCIAL_INGEST_UPLOAD_CONCURRENCY,
     SOCIAL_INGEST_WRITE_CONCURRENCY,
-    STRAVA_BROWSER_429_COOLDOWN_SECONDS,
-    STRAVA_BROWSER_429_MAX_COOLDOWN_SECONDS,
-    STRAVA_BROWSER_429_MEMORY_SECONDS,
-    TIKTOK_FOLLOW_OWNER_FALLBACK,
+    STRAVA_BROWSER_429_COOLDOWN_SECONDS as STRAVA_BROWSER_429_COOLDOWN_SECONDS,
+    STRAVA_BROWSER_429_MAX_COOLDOWN_SECONDS as STRAVA_BROWSER_429_MAX_COOLDOWN_SECONDS,
+    STRAVA_BROWSER_429_MEMORY_SECONDS as STRAVA_BROWSER_429_MEMORY_SECONDS,
+    TIKTOK_FOLLOW_OWNER_FALLBACK as TIKTOK_FOLLOW_OWNER_FALLBACK,
     UC_EXTENSION_EXPECTED_VERSION,
-    X_ZERO_PROGRESS_PROBES,
+    X_ZERO_PROGRESS_PROBES as X_ZERO_PROGRESS_PROBES,
 )
 from .constants import (  # noqa: E402  -- explicit for the private names not in *
-    _SAFE,
-    _THREADS_SYNTHETIC_MEDIA_ID,
-    _BROWSER_CONTENT_HINT_FAIL_ACTIVE_PLATFORMS,
+    _SAFE as _SAFE,
+    _THREADS_SYNTHETIC_MEDIA_ID as _THREADS_SYNTHETIC_MEDIA_ID,
+    _BROWSER_CONTENT_HINT_FAIL_ACTIVE_PLATFORMS as _BROWSER_CONTENT_HINT_FAIL_ACTIVE_PLATFORMS,
 )
 from .cors import _cors, handle_options  # noqa: E402,F401
 from .middleware import (  # noqa: E402,F401
@@ -132,31 +120,6 @@ from .middleware import (  # noqa: E402,F401
     db_pool_middleware,
 )
 
-# Mutable module state — must remain in __init__.py so that ``global``
-# reassignments in helpers still find these names. Tests reach for these
-# via ``ig_ingest._BROWSER_CONTENT_HINT_CACHE``, etc.
-_BROWSER_CONTENT_HINT_CACHE: dict[str, tuple[float, dict]] = {}
-_BROWSER_CONTENT_HINT_INFLIGHT: set[str] = set()
-_BROWSER_CAPTURE_TARGET_TABLES = {
-    "profile": {
-        "instagram": ["instagram_profiles"],
-        "x": ["x_profiles"],
-        "facebook": ["facebook_profiles"],
-    },
-    "posts": {
-        "instagram": ["instagram_posts"],
-        "threads": ["threads_posts"],
-        "facebook": ["facebook_posts"],
-        "x": ["x_posts"],
-    },
-    "comments": {
-        "instagram": ["instagram_comments"],
-    },
-    "strava_streams": {
-        "strava": ["strava_activities", "strava_gps_streams"],
-    },
-}
-_BROWSER_CAPTURE_COMPRESSED_ENDPOINTS = {"profile", "posts", "comments"}
 
 # 2-hop spider (instagram only): the extension scrapes a target's media AND, when
 # the target's hop < MAX_HOP, crawls its followers/following and POSTs them to
@@ -340,124 +303,24 @@ CREATE INDEX IF NOT EXISTS idx_browser_media_revisit_due
 """
 
 
-async def _execute_ddl_script(conn, script: str) -> None:
-    for statement in (s.strip() for s in str(script or "").split(";")):
-        if statement:
-            await conn.execute(statement)
 
 
-_IG_EPOCH = 1314220021721  # Instagram media-id custom epoch (ms)
-_IG_LONG = re.compile(r"\d{8,}")
 
 
-def _ig_date_from_id(content_id: str):
-    """Instagram media ids encode creation time: (id>>23)+epoch. Return YYYYMMDD."""
-    m = _IG_LONG.search(content_id or "")
-    if not m:
-        return None
-    try:
-        d = datetime.fromtimestamp(((int(m.group(0)) >> 23) + _IG_EPOCH) / 1000, tz=timezone.utc)
-        if 2010 <= d.year <= datetime.now(tz=timezone.utc).year + 1:
-            return d.strftime("%Y%m%d")
-    except Exception:
-        return None
-    return None
 
 
-# Instagram/Threads shortcode alphabet — numeric media pk → the ~11-char code in
-# the public URL (instagram.com/p/<code>, threads.com/post/<code>). The extension
-# sometimes stores a wrong/long "code"; we derive the canonical one from the pk so
-# verification URLs always open.
-_SC_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 
 
-def _shortcode_from_id(media_id: str):
-    """Reverse Instagram's base64 media-id encoding into the public shortcode."""
-    m = _IG_LONG.search(str(media_id or ""))
-    if not m:
-        return None
-    try:
-        n = int(m.group(0))
-    except Exception:
-        return None
-    if n <= 0:
-        return None
-    out = []
-    while n > 0:
-        out.append(_SC_ALPHABET[n & 63])
-        n >>= 6
-    return "".join(reversed(out))
 
 
-def _verify_url(platform, media_id):
-    """Canonical openable URL for a post, for manual spot-checking."""
-    sc = _shortcode_from_id(media_id)
-    if not sc:
-        return None
-    if platform == "instagram":
-        return f"https://instagram.com/p/{sc}/"
-    if platform == "threads":
-        return f"https://threads.com/post/{sc}/"
-    return None
 
 
-def _date_prefix(item, platform="") -> str:
-    """YYYYMMDD for the filename so files sort chronologically. Prefer the post's
-    own taken_at; for instagram fall back to the date encoded in the media id;
-    finally fall back to today (collection)."""
-    epoch = item.get("taken_at")
-    if epoch is None:
-        meta = item.get("meta") or {}
-        epoch = meta.get("taken_at") if isinstance(meta, dict) else None
-    try:
-        if epoch:
-            return datetime.fromtimestamp(float(epoch), tz=timezone.utc).strftime("%Y%m%d")
-    except (TypeError, ValueError, OSError):
-        pass
-    if platform == "instagram":
-        d = _ig_date_from_id(str(item.get("content_id") or ""))
-        if d:
-            return d
-    return datetime.now(tz=timezone.utc).strftime("%Y%m%d")
 
 
-def _norm_platform(p, *, allow_diagnostics: bool = False):
-    p = (p or "instagram").strip().lower()
-    if p in {"twitter", "twitter / x", "twitter/x", "x.com"}:
-        p = "x"
-    if allow_diagnostics and p in BROWSER_DIAGNOSTIC_PLATFORMS:
-        return p
-    return p if p in KNOWN_PLATFORMS else "instagram"
 
 
-_VERIFIED_CAPTURE_KEYS = (
-    "is_verified", "verified", "isVerified", "is_blue_verified", "isBlueVerified",
-    "blue_verified", "blueVerified", "author_is_verified", "author_verified",
-    "verified_author", "is_verified_merchant", "isVerifiedMerchant", "verifiedMerchant",
-    "channel_is_verified", "channelIsVerified", "verified_badge", "verifiedBadge",
-)
-_VERIFIED_FILTER_PLATFORMS = frozenset({
-    "instagram", "snapchat", "pinterest", "x", "threads", "tiktok", "youtube",
-})
 
 
-def _explicitly_verified_capture(value: object) -> bool:
-    """Recognize only explicit platform badge/verification fields."""
-    if not isinstance(value, dict):
-        return False
-    for key in _VERIFIED_CAPTURE_KEYS:
-        flag = value.get(key)
-        if flag is True or (isinstance(flag, int) and flag == 1) or (
-            isinstance(flag, str) and flag.strip().lower() in {"true", "1", "yes"}
-        ):
-            return True
-    # `owner` is commonly the logged-in collector account in extension bodies;
-    # do not let that account's badge suppress unrelated targets.
-    for key in ("author", "creator", "user", "profile", "channel", "meta", "metadata"):
-        nested = value.get(key)
-        if isinstance(nested, dict) and _explicitly_verified_capture(nested):
-            return True
-    return False
 
 
 # ---------------------------------------------------------------------------
@@ -522,6 +385,13 @@ from .strava import (  # noqa: E402,F401
     strava_streams_handler,
     strava_route_queue_handler,
     strava_route_visit_handler,
+    _upsert_strava_browser_stream,
+    _record_empty_strava_browser_stream,
+    _browser_http_status,
+    _browser_account_label,
+    _record_strava_stream_http_event,
+    _touch_recent_strava_stream_http_event,
+    _strava_stream_response_status,
 )
 
 
@@ -530,6 +400,141 @@ from .telemetry import browser_heartbeat_handler, sw_crash_handler  # noqa: E402
 
 # Cooldown moved to .cooldown per split step 10.
 from .cooldown import ig_cooldown  # noqa: E402,F401
+
+
+# Core helpers moved to sibling modules per split step 11.
+from ._util import (  # noqa: E402,F401
+    _int,
+    _num,
+    _safe_json,
+    _url_hash,
+    _item_meta,
+    _top_reject_reason,
+    _reject_count,
+    _inspect_media_payload,
+    _merge_reject_stats,
+    _stream_values,
+    _json_array_or_none,
+    _queued_browser_upload_response,
+)
+from ._ids import (  # noqa: E402,F401
+    _execute_ddl_script,
+    _ig_date_from_id,
+    _shortcode_from_id,
+    _verify_url,
+    _date_prefix,
+    _norm_platform,
+    _explicitly_verified_capture,
+    _IG_EPOCH,
+    _IG_LONG,
+    _SC_ALPHABET,
+    _VERIFIED_CAPTURE_KEYS,
+    _VERIFIED_FILTER_PLATFORMS,
+)
+from ._media import (  # noqa: E402,F401
+    BridgeMediaRejected,
+    _download_headers,
+    _is_allowed_media_host,
+    _validate_media_url,
+    _threads_media_content_base_id,
+    _media_store_content_id,
+    _write_extension_media_artifacts_sync,
+    _candidate_asset_role,
+    _tiktok_asset_role,
+    _candidate_dimensions,
+    _candidate_is_video,
+    _tiktok_candidate_is_video,
+    _looks_like_tiny_thumbnail,
+    _classify_tiktok_candidate_result,
+    _classify_browser_candidate_result,
+    _tiktok_candidate_post_url,
+    _canonical_browser_revisit_url,
+    _browser_candidate_post_url,
+    _browser_revisit_priority,
+    _prepare_tiktok_browser_candidate,
+    _record_tiktok_browser_candidate,
+    _prepare_browser_media_candidate,
+    _record_browser_media_candidate,
+    _TIKTOK_BROWSER_MEDIA_CANDIDATE_UPSERT_SQL,
+    _TIKTOK_BROWSER_REVISIT_UPSERT_SQL,
+    _BROWSER_MEDIA_CANDIDATE_UPSERT_SQL,
+    _BROWSER_MEDIA_REVISIT_UPSERT_SQL,
+)
+from ._download import (  # noqa: E402,F401
+    _download_and_save,
+    _drain,
+    BRIDGE_MEDIA_MAX_BYTES,
+)
+from ._events import (  # noqa: E402,F401
+    _record_browser_ingest_event,
+    _write_browser_ingest_event,
+    _browser_event_marks_source_success,
+    _browser_event_duplicate_count,
+)
+from ._browser_ingest import (  # noqa: E402,F401
+    _ingest,
+    _ingest_uploaded_media,
+    _record_browser_media_candidate_batch,
+)
+from ._handles import (  # noqa: E402,F401
+    _derive_handle_from_caption,
+    _ig_author_uid,
+    _x_handle,
+    _tiktok_handle,
+    _lemon8_handle,
+    _owner_account_for_follow,
+    _executemany_with_fallback,
+    _enqueue_tiktok_profile_targets,
+    _enqueue_lemon8_profile_targets,
+    _x_post_url,
+    _enqueue_x_profile_targets,
+    _record_x_edge,
+    _record_x_post_graph,
+    _ensure_ig_profile,
+    _HANDLE_RE,
+    _X_HANDLE_RE,
+    _LEMON8_HANDLE_RE,
+    _TIKTOK_HANDLE_RE,
+)
+from ._posts import (  # noqa: E402,F401
+    _save_posts,
+    _save_comments,
+    _cross_seed_instagram,
+    _record_users,
+    _SOCIAL_USERS_UPSERT_SQL,
+    _FOLLOW_EDGES_UPSERT_SQL,
+    record_users,
+    save_comments,
+    save_posts,
+)
+from ._profiles import (  # noqa: E402,F401
+    _save_profile,
+    _record_profile_capability_receipts,
+    _track_ig_profile_change,
+    _record_ig_access,
+    save_profile,
+)
+from ._capture import (  # noqa: E402,F401
+    _archive_browser_capture,
+    _browser_capture_subject,
+    _BROWSER_CAPTURE_TARGET_TABLES,
+    _BROWSER_CAPTURE_COMPRESSED_ENDPOINTS,
+)
+from ._hints import (  # noqa: E402,F401
+    _browser_content_recovery_hint,
+    _browser_content_timeout_hint,
+    _BROWSER_CONTENT_HINT_CACHE,
+    _BROWSER_CONTENT_HINT_INFLIGHT,
+)
+from ._legacy import (  # noqa: E402,F401
+    _legacy_target_status_handler,
+    _legacy_users_handler,
+    _legacy_seed_handler,
+    _legacy_profile_handler,
+    _legacy_posts_handler,
+    _posts_ingest_background,
+    _legacy_comments_handler,
+)
 
 
 # Targets endpoints moved to .targets per split step 4.
@@ -541,1763 +546,92 @@ from .cooldown import ig_cooldown  # noqa: E402,F401
 # ig_cooldown moved to .cooldown per split step 10.
 
 
-async def _legacy_target_status_handler(request):
-    """Let the extension retire bad spider targets.
-
-    Instagram returns HTTP 400/404 for some unavailable/private/deleted profile
-    lookups. Those are not throttles and should not keep rotating through the
-    active spider queue forever.
-    """
-    body = await _safe_json(request)
-    platform = _norm_platform(body.get("platform"))
-    username = (body.get("username") or "").strip().lstrip("@")
-    status = (body.get("status") or "").strip().lower()
-    reason = str(body.get("reason") or "")[:120]
-    if platform != "instagram" or not username:
-        return _cors(web.json_response({"updated": 0}))
-    if status not in {"unavailable", "skipped"}:
-        status = "unavailable"
-    updated = 0
-    async with request.app["pool"].acquire() as conn:
-        result = await conn.execute(
-            """
-            UPDATE instagram_spider_targets
-            SET status = $2,
-                last_scraped_at = now()
-            WHERE username = $1
-              AND status = 'active'
-            """,
-            username, status,
-        )
-        if result.endswith("1"):
-            updated = 1
-    if updated:
-        logger.info("target-status[%s] %s -> %s (%s)", platform, username, status, reason)
-    return _cors(web.json_response({"updated": updated, "status": status}))
-
-
-# ---------------------------------------------------------------------------
-# download + persist (generic over platform)
-# ---------------------------------------------------------------------------
-def _download_headers(platform: str, url: str, item: dict | None = None) -> dict:
-    """Browser-like headers for CDN media fetched from extension-discovered URLs."""
-    accept = "image/avif,image/webp,image/apng,image/svg+xml,image/*,video/*,*/*;q=0.8"
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
-        ),
-        "Accept": accept,
-        "Accept-Language": "en-US,en;q=0.9",
-    }
-    referers = {
-        "facebook": "https://www.facebook.com/",
-        "instagram": "https://www.instagram.com/",
-        "threads": "https://www.threads.com/",
-        "tiktok": "https://www.tiktok.com/",
-        "x": "https://x.com/",
-    }
-    referer = referers.get(platform)
-    if referer:
-        headers["Referer"] = referer
-        headers["Sec-Fetch-Site"] = "cross-site"
-        headers["Sec-Fetch-Mode"] = "no-cors"
-        headers["Sec-Fetch-Dest"] = "image"
-    return headers
-
-
-BRIDGE_MEDIA_MAX_BYTES = 200 * 1024 * 1024
-
-
-class BridgeMediaRejected(ValueError):
-    """Extension-supplied media URL failed the SSRF/allowlist gate."""
-
-
-def _is_allowed_media_host(hostname: str) -> bool:
-    host = (hostname or "").lower().rstrip(".")
-    for pattern in BRIDGE_MEDIA_ALLOWED_HOSTS:
-        pattern = pattern.lower().strip().rstrip(".")
-        if pattern.startswith("*."):
-            suffix = pattern[1:]
-            if host.endswith(suffix) and host != suffix[1:]:
-                return True
-        elif host == pattern:
-            return True
-    return False
-
-
-def _validate_media_url(url: str) -> None:
-    parsed = urlparse(url or "")
-    if parsed.scheme != "https":
-        raise BridgeMediaRejected(f"scheme not allowed: {parsed.scheme or 'none'}")
-    try:
-        hostname = parsed.hostname
-    except ValueError as exc:
-        raise BridgeMediaRejected(f"invalid host: {exc}") from exc
-    if not _is_allowed_media_host(hostname):
-        raise BridgeMediaRejected(f"host not allowed: {hostname or 'none'}")
-
-
-def _threads_media_content_base_id(platform: str, content_id: str, sha256: str | None = None) -> str:
-    """Stabilize extension-generated Threads media IDs with the stored bytes.
-
-    The browser bridge sometimes sends short synthetic IDs like ``img_abc123``
-    for DOM media candidates. Threads can reuse those IDs for separate carousel
-    or feed blobs, so using the raw value as ``media_items.content_id`` lets
-    distinct files overwrite each other before the vault consistency check runs.
-    Real platform IDs are left untouched.
-    """
-    base = str(content_id or "")
-    digest = str(sha256 or "").strip().lower()
-    if platform == "threads" and digest and _THREADS_SYNTHETIC_MEDIA_ID.match(base):
-        return f"{base}_{digest[:12]}"
-    return base
-
-
-def _media_store_content_id(media_kind: str, content_base_id: str) -> str:
-    return content_base_id if media_kind == "post" else f"{media_kind}_{content_base_id}"
-
-
-def _url_hash(url: str | None) -> str:
-    return hashlib.sha256(str(url or "").encode("utf-8")).hexdigest()
-
-
-def _item_meta(item: dict | None) -> dict:
-    if not isinstance(item, dict):
-        return {}
-    meta = item.get("meta")
-    return dict(meta) if isinstance(meta, dict) else {}
-
-
-def _top_reject_reason(reject_stats: dict | None) -> tuple[str | None, str | None]:
-    if not isinstance(reject_stats, dict):
-        return None, None
-    examples = reject_stats.get("examples") if isinstance(reject_stats.get("examples"), dict) else {}
-    best_reason = None
-    best_count = -1
-    for key, raw_count in reject_stats.items():
-        if key == "examples":
-            continue
-        try:
-            count = int(raw_count or 0)
-        except (TypeError, ValueError):
-            continue
-        if count > best_count:
-            best_reason = str(key)
-            best_count = count
-    detail = examples.get(best_reason) if best_reason and isinstance(examples, dict) else None
-    return best_reason, str(detail) if detail is not None else None
-
-
-def _reject_count(value) -> int:
-    if isinstance(value, bool):
-        return 1 if value else 0
-    if isinstance(value, (int, float)):
-        return int(value)
-    if isinstance(value, str):
-        try:
-            return int(float(value))
-        except ValueError:
-            return 0
-    return 0
-
-
-def _inspect_media_payload(data: bytes, ct_header: str | None) -> tuple[bool, str | None, str | None, str | None, str | None]:
-    ok, ext, mtype, reason = inspect_media(data, ct_header)
-    if not ok:
-        return False, ext, mtype, reason, None
-    return True, ext, mtype, reason, hashlib.sha256(data).hexdigest()
-
-
-def _write_extension_media_artifacts_sync(
-    *,
-    platform: str,
-    safe_user: str,
-    username: str,
-    item: dict,
-    data: bytes,
-    ext: str,
-    sha: str,
-    ctype: str,
-    media_kind: str,
-    store_cid: str,
-    dest: Path,
-    url: str,
-):
-    meta = item.get("meta") or {}
-    meta_obj = dict(meta) if isinstance(meta, dict) else {}
-    artifact = write_atomic_artifact(
-        source=platform,
-        artifact_id=f"extension/{media_kind}/{store_cid}",
-        artifact_kind="media_blob",
-        data=data,
-        extension=ext,
-        expected_sha256=sha,
-        metadata={
-            **meta_obj,
-            "entity_id": safe_user,
-            "entity_name": item.get("entity_name") or username,
-            "content_type": ctype,
-            "content_id": store_cid,
-            "kind": media_kind,
-            "filename": dest.name,
-            "source_url": url,
-            "request_url": url,
-            "ingest_path": "extension",
-            "legacy_path": str(dest),
-            "rebuild_target_tables": ["media_items"],
-        },
-        root=VAULT_ROOT,
-    )
-    if artifact.path is None:
-        return artifact, None, None, None
-    stored_path = artifact.path
-    meta_obj["vault_artifact"] = {
-        "ok": artifact.ok,
-        "partial": artifact.partial,
-        "path": artifact.relative_path,
-        "blob_path": artifact.blob_relative_path,
-        "sha256": artifact.sha256,
-        "file_size": artifact.file_size,
-        "sidecar_ok": artifact.sidecar.ok if artifact.sidecar else None,
-        "sidecar_path": artifact.sidecar.relative_path if artifact.sidecar else None,
-        "duplicate_blob": artifact.duplicate_blob,
-        "error": artifact.error,
-    }
-    sidecar = write_media_sidecar(
-        source=platform,
-        entity_id=safe_user,
-        entity_name=item.get("entity_name") or username,
-        content_type=ctype,
-        content_id=store_cid,
-        filename=dest.name,
-        file_path=str(stored_path),
-        file_size=len(data),
-        width=None,
-        height=None,
-        sha256=sha,
-        source_url=url,
-        metadata=meta_obj,
-        ingest_path="extension",
-        kind=media_kind,
-    )
-    meta_obj["vault_sidecar"] = {
-        "enabled": sidecar.enabled,
-        "ok": sidecar.ok,
-        "path": sidecar.relative_path,
-        "error": sidecar.error,
-    }
-    return artifact, sidecar, json.dumps(meta_obj), stored_path
-
-
-def _candidate_asset_role(item: dict | None, platform: str | None = None) -> str | None:
-    meta = _item_meta(item)
-    keys = []
-    if platform:
-        keys.append(f"{platform}_asset_role")
-    keys.extend([
-        "asset_role",
-        "tiktok_asset_role",
-        "x_asset_role",
-        "facebook_asset_role",
-        "threads_asset_role",
-        "instagram_asset_role",
-        "lemon8_asset_role",
-    ])
-    role = None
-    for key in keys:
-        role = meta.get(key)
-        if role is None and isinstance(item, dict):
-            role = item.get(key)
-        if role:
-            break
-    role_s = str(role or "").strip().lower()
-    return role_s or None
-
-
-def _tiktok_asset_role(item: dict | None) -> str | None:
-    return _candidate_asset_role(item, "tiktok")
-
-
-def _candidate_dimensions(item: dict | None) -> tuple[int | None, int | None]:
-    meta = _item_meta(item)
-    width = _int(meta.get("width") if meta.get("width") is not None else (item or {}).get("width"))
-    height = _int(meta.get("height") if meta.get("height") is not None else (item or {}).get("height"))
-    return width, height
-
-
-def _candidate_is_video(item: dict | None, platform: str | None = None) -> bool:
-    role = _candidate_asset_role(item, platform) or ""
-    ctype = str((item or {}).get("content_type") or "").lower()
-    mime = str((item or {}).get("mime_type") or _item_meta(item).get("browser_upload_mime_type") or "").lower()
-    url = str((item or {}).get("url") or "").lower()
-    return (
-        ctype == "video"
-        or ctype.startswith("video/")
-        or mime.startswith("video/")
-        or "video" in role
-        or "playaddr" in role
-        or "/video/" in url
-        or url.endswith(".mp4")
-        or "video.twimg.com" in url
-    )
-
-
-def _tiktok_candidate_is_video(item: dict | None) -> bool:
-    return _candidate_is_video(item, "tiktok")
-
-
-def _looks_like_tiny_thumbnail(item: dict | None, detail: str | None = None) -> bool:
-    role = _candidate_asset_role(item) or ""
-    url = str((item or {}).get("url") or "").lower()
-    detail_l = str(detail or "").lower()
-    width, height = _candidate_dimensions(item)
-    return (
-        "too small" in detail_l
-        or "thumbnail" in detail_l
-        or "avatar" in role
-        or "avatar" in url
-        or "icon" in url
-        or "logo" in url
-        or bool(width and width < 160)
-        or bool(height and height < 160)
-    )
-
-
-def _classify_tiktok_candidate_result(
-    item: dict | None,
-    *,
-    saved: bool = False,
-    reject_stats: dict | None = None,
-    ingest_mode: str = "url",
-    browser_result: dict | None = None,
-) -> tuple[str, str | None, bool]:
-    """Classify a TikTok media candidate into an actionable bucket.
-
-    The aggregate saw/stored counters are useful but too blunt. This turns each
-    candidate into a ledger row and queues only likely real video misses for a
-    browser detail revisit.
-    """
-    if saved:
-        return "stored", None, False
-
-    result = browser_result if isinstance(browser_result, dict) else {}
-    if result:
-        if result.get("deduped") is True or _reject_count(result.get("deduped")) > 0:
-            return "duplicate", "duplicate_sha256", False
-        if _reject_count(result.get("saved")) > 0 or _reject_count(result.get("stored")) > 0:
-            return "stored", None, False
-        reason = str(result.get("reason") or "browser_upload_failed")
-        if reason == "deferred_upload_budget":
-            return (
-                "deferred",
-                reason,
-                _tiktok_candidate_is_video(item) or bool((item or {}).get("browser_upload_only")),
-            )
-        if reason in {"duplicate_content_id", "duplicate_sha256"}:
-            return "duplicate", reason, False
-        if reason.startswith("http_") or reason in {"timeout", "failed", "browser_upload_failed"}:
-            if _tiktok_candidate_is_video(item):
-                return "short_lived_url", reason, True
-            return "browser_fetch_failed", reason, False
-        if reason in {"too_large", "too_large_header"}:
-            return "too_large", reason, False
-        if reason == "disallowed_host":
-            return "disallowed_host", reason, False
-        return "browser_upload_failed", reason, _tiktok_candidate_is_video(item)
-
-    reason, detail = _top_reject_reason(reject_stats)
-    if not reason:
-        return "failed", None, _tiktok_candidate_is_video(item) and ingest_mode == "browser_upload"
-    if reason in {"duplicate_content_id", "duplicate_sha256"}:
-        return "duplicate", reason, False
-    if reason == "invalid_media":
-        if _looks_like_tiny_thumbnail(item, detail):
-            return "tiny_thumbnail", detail or reason, False
-        return "invalid_media", detail or reason, _tiktok_candidate_is_video(item)
-    if reason == "http_status":
-        if _tiktok_candidate_is_video(item):
-            return "short_lived_url", detail or reason, True
-        return "http_error", detail or reason, False
-    if reason in {"bad_uploaded_media", "exception", "timeout", "artifact_write_failed"}:
-        return reason, detail or reason, _tiktok_candidate_is_video(item)
-    if reason == "vault_unavailable":
-        return "vault_unavailable", detail or reason, False
-    return reason, detail or reason, False
-
-
-def _classify_browser_candidate_result(
-    platform: str,
-    item: dict | None,
-    *,
-    saved: bool = False,
-    reject_stats: dict | None = None,
-    ingest_mode: str = "url",
-    browser_result: dict | None = None,
-) -> tuple[str, str | None, bool]:
-    if platform == "tiktok":
-        return _classify_tiktok_candidate_result(
-            item,
-            saved=saved,
-            reject_stats=reject_stats,
-            ingest_mode=ingest_mode,
-            browser_result=browser_result,
-        )
-
-    is_video = _candidate_is_video(item, platform)
-    if saved:
-        return "stored", None, False
-
-    result = browser_result if isinstance(browser_result, dict) else {}
-    if result:
-        if result.get("deduped") is True or _reject_count(result.get("deduped")) > 0:
-            return "duplicate", "duplicate_sha256", False
-        if _reject_count(result.get("saved")) > 0 or _reject_count(result.get("stored")) > 0:
-            return "stored", None, False
-        reason = str(result.get("reason") or "browser_upload_failed")
-        if reason == "deferred_upload_budget":
-            return (
-                "deferred",
-                reason,
-                is_video or bool((item or {}).get("browser_upload_only")),
-            )
-        if reason in {"duplicate_content_id", "duplicate_sha256"}:
-            return "duplicate", reason, False
-        if reason.startswith("http_") or reason in {"timeout", "failed", "browser_upload_failed"}:
-            return "browser_fetch_failed", reason, is_video
-        if reason in {"too_large", "too_large_header", "disallowed_host"}:
-            return reason, reason, False
-        if reason == "invalid_media" and _looks_like_tiny_thumbnail(item):
-            return "tiny_thumbnail", reason, False
-        return "browser_upload_failed", reason, is_video
-
-    reason, detail = _top_reject_reason(reject_stats)
-    if not reason:
-        return "failed", None, is_video and ingest_mode == "browser_upload"
-    if reason in {"duplicate_content_id", "duplicate_sha256"}:
-        return "duplicate", reason, False
-    if reason == "invalid_media":
-        if _looks_like_tiny_thumbnail(item, detail):
-            return "tiny_thumbnail", detail or reason, False
-        return "invalid_media", detail or reason, is_video
-    if reason == "http_status":
-        return "http_error", detail or reason, is_video
-    if reason in {"bad_uploaded_media", "exception", "timeout", "artifact_write_failed"}:
-        return reason, detail or reason, is_video
-    if reason == "vault_unavailable":
-        return "vault_unavailable", detail or reason, False
-    return reason, detail or reason, False
-
-
-def _tiktok_candidate_post_url(item: dict | None, username: str | None) -> str | None:
-    meta = _item_meta(item)
-    for key in ("post_url", "canonical_url", "page_url"):
-        value = str(meta.get(key) or (item or {}).get(key) or "").strip()
-        if _canonical_browser_revisit_url("tiktok", value):
-            return value
-    source_url = str((item or {}).get("source_url") or (item or {}).get("url") or "").strip()
-    if _canonical_browser_revisit_url("tiktok", source_url):
-        return source_url
-    handle = _tiktok_handle(username)
-    content_id = str((item or {}).get("content_id") or "").strip()
-    if handle and content_id.isdigit():
-        return f"https://www.tiktok.com/@{handle}/video/{content_id}"
-    return None
-
-
-def _canonical_browser_revisit_url(platform: str, value: str | None) -> str | None:
-    """Return only a first-party detail permalink supported by the browser worker."""
-    raw = str(value or "").strip()
-    if not raw.startswith("https://"):
-        return None
-    try:
-        parsed = urlparse(raw)
-        host = (parsed.hostname or "").lower().rstrip(".")
-        path = parsed.path or ""
-        port = parsed.port
-    except Exception:
-        return None
-    if parsed.username or parsed.password or port not in (None, 443):
-        return None
-    if platform == "instagram":
-        first_party = host in {"instagram.com", "www.instagram.com"}
-        valid_path = re.match(r"^/(?:p|reel|reels|tv|stories)/[^/]+(?:/[^/]+)?/?$", path, re.I)
-    elif platform == "threads":
-        first_party = host in {"threads.com", "www.threads.com", "threads.net", "www.threads.net"}
-        valid_path = re.match(r"^/@[^/]+/post/[^/]+/?$", path, re.I)
-    elif platform == "tiktok":
-        first_party = host in {"tiktok.com", "www.tiktok.com"}
-        valid_path = re.match(r"^/@[^/]+/(?:video|photo)/\d+/?$", path, re.I)
-    elif platform == "x":
-        first_party = host in {"x.com", "www.x.com", "twitter.com", "www.twitter.com"}
-        valid_path = re.match(r"^/[A-Za-z0-9_]{1,20}/status/\d+/?$", path)
-    elif platform == "facebook":
-        first_party = host == "facebook.com" or host.endswith(".facebook.com")
-        valid_path = re.match(r"^/(?:[^/]+/)?(?:posts|photos|videos)/[^/]+/?$|^/(?:photo|permalink|story)\.php(?:/|$)", path, re.I)
-    elif platform == "lemon8":
-        first_party = "lemon8" in host
-        valid_path = re.search(r"/(?:@[^/]+/)?\d{6,}(?:/|$)|/@[^/]+", path, re.I)
-    else:
-        return None
-    return raw if first_party and valid_path else None
-
-
-def _browser_candidate_post_url(platform: str, item: dict | None, username: str | None) -> str | None:
-    meta = _item_meta(item)
-    for key in ("post_url", "canonical_url", "verify_url", "page_url", "url"):
-        value = str(meta.get(key) or (item or {}).get(key) or "").strip()
-        if _canonical_browser_revisit_url(platform, value):
-            return value
-    if platform == "instagram":
-        content_id = str((item or {}).get("content_id") or "").strip()
-        media_id = re.split(r"[_:/-]", content_id, maxsplit=1)[0]
-        if media_id.isdigit():
-            return _verify_url("instagram", media_id)
-    if platform == "x":
-        meta_post_id = str(meta.get("post_id") or (item or {}).get("post_id") or "").strip()
-        author = str(meta.get("author_username") or username or "").strip().lstrip("@")
-        if author and meta_post_id:
-            return f"https://x.com/{author}/status/{meta_post_id}"
-    return None
-
-
-def _browser_revisit_priority(platform: str, item: dict | None, outcome: str) -> int:
-    if _candidate_is_video(item, platform):
-        return 90
-    if outcome in {"browser_fetch_failed", "http_error", "short_lived_url"}:
-        return 75
-    return 60
-
-
-_TIKTOK_BROWSER_MEDIA_CANDIDATE_UPSERT_SQL = """
-INSERT INTO tiktok_browser_media_candidates
-  (content_id, username, source_url, url_hash, asset_role,
-   content_type, width, height, file_size, mime_type,
-   extension_version, ingest_mode, outcome, reason,
-   needs_revisit, metadata)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb)
-ON CONFLICT (content_id, url_hash, ingest_mode) DO UPDATE SET
-  username = COALESCE(EXCLUDED.username, tiktok_browser_media_candidates.username),
-  source_url = EXCLUDED.source_url,
-  asset_role = COALESCE(EXCLUDED.asset_role, tiktok_browser_media_candidates.asset_role),
-  content_type = COALESCE(EXCLUDED.content_type, tiktok_browser_media_candidates.content_type),
-  width = COALESCE(EXCLUDED.width, tiktok_browser_media_candidates.width),
-  height = COALESCE(EXCLUDED.height, tiktok_browser_media_candidates.height),
-  file_size = COALESCE(EXCLUDED.file_size, tiktok_browser_media_candidates.file_size),
-  mime_type = COALESCE(EXCLUDED.mime_type, tiktok_browser_media_candidates.mime_type),
-  extension_version = COALESCE(EXCLUDED.extension_version, tiktok_browser_media_candidates.extension_version),
-  outcome = EXCLUDED.outcome,
-  reason = EXCLUDED.reason,
-  needs_revisit = EXCLUDED.needs_revisit,
-  metadata = tiktok_browser_media_candidates.metadata || EXCLUDED.metadata,
-  attempts = tiktok_browser_media_candidates.attempts + 1,
-  last_seen = now()
-WHERE tiktok_browser_media_candidates.outcome IS DISTINCT FROM 'stored'
-   OR EXCLUDED.outcome = 'stored'
-"""
-
-_TIKTOK_BROWSER_REVISIT_UPSERT_SQL = """
-INSERT INTO tiktok_browser_revisit_queue
-  (content_id, username, post_url, source_url, reason, priority, metadata)
-VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)
-ON CONFLICT (content_id) DO UPDATE SET
-  username = COALESCE(EXCLUDED.username, tiktok_browser_revisit_queue.username),
-  post_url = COALESCE(EXCLUDED.post_url, tiktok_browser_revisit_queue.post_url),
-  source_url = COALESCE(EXCLUDED.source_url, tiktok_browser_revisit_queue.source_url),
-  reason = EXCLUDED.reason,
-  priority = GREATEST(tiktok_browser_revisit_queue.priority, EXCLUDED.priority),
-  metadata = tiktok_browser_revisit_queue.metadata || EXCLUDED.metadata,
-  updated_at = now()
-"""
-
-
-def _prepare_tiktok_browser_candidate(
-    username: str | None,
-    item: dict | None,
-    *,
-    ingest_mode: str,
-    saved: bool = False,
-    reject_stats: dict | None = None,
-    extension_version: str | None = None,
-    browser_result: dict | None = None,
-) -> tuple[tuple, tuple | None] | None:
-    if not isinstance(item, dict):
-        return None
-    url = str(item.get("url") or "").strip()
-    if not url:
-        return None
-    content_id = str(item.get("content_id") or _url_hash(url)[:32])[:300]
-    meta = _item_meta(item)
-    ext_version = extension_version or str(meta.get("extension_version") or "") or None
-    width, height = _candidate_dimensions(item)
-    file_size = _int(item.get("file_size") or meta.get("browser_upload_size"))
-    mime_type = item.get("mime_type") or item.get("content_type_header") or meta.get("browser_upload_mime_type")
-    outcome, reason, needs_revisit = _classify_tiktok_candidate_result(
-        item,
-        saved=saved,
-        reject_stats=reject_stats,
-        ingest_mode=ingest_mode,
-        browser_result=browser_result,
-    )
-    post_url = _tiktok_candidate_post_url(item, username)
-    priority = 95 if _tiktok_candidate_is_video(item) else 65
-    metadata = {
-        "raw_meta": meta,
-        "browser_upload": bool(item.get("browser_upload")),
-        "browser_upload_only": bool(item.get("browser_upload_only")),
-    }
-    if reject_stats:
-        metadata["reject_stats"] = reject_stats
-    if browser_result:
-        metadata["browser_result"] = browser_result
-    candidate_args = (
-        content_id,
-        username,
-        url[:2000],
-        _url_hash(url),
-        _tiktok_asset_role(item),
-        str(item.get("content_type") or "")[:40] or None,
-        width,
-        height,
-        file_size,
-        str(mime_type)[:120] if mime_type else None,
-        ext_version,
-        ingest_mode,
-        outcome,
-        reason,
-        needs_revisit,
-        json.dumps(metadata, default=str),
-    )
-    revisit_args = None
-    if needs_revisit and post_url:
-        revisit_args = (
-            content_id,
-            username,
-            post_url,
-            url[:2000],
-            reason or outcome,
-            priority,
-            json.dumps(metadata, default=str),
-        )
-    return candidate_args, revisit_args
-
-
-async def _record_tiktok_browser_candidate(
-    pool,
-    username: str | None,
-    item: dict | None,
-    *,
-    ingest_mode: str,
-    saved: bool = False,
-    reject_stats: dict | None = None,
-    extension_version: str | None = None,
-    browser_result: dict | None = None,
-) -> None:
-    prepared = _prepare_tiktok_browser_candidate(
-        username,
-        item,
-        ingest_mode=ingest_mode,
-        saved=saved,
-        reject_stats=reject_stats,
-        extension_version=extension_version,
-        browser_result=browser_result,
-    )
-    if prepared is None:
-        return
-    candidate_args, revisit_args = prepared
-    content_id = candidate_args[0]
-    try:
-        async with pool.acquire() as conn:
-            await conn.execute(_TIKTOK_BROWSER_MEDIA_CANDIDATE_UPSERT_SQL, *candidate_args)
-            if revisit_args is not None:
-                await conn.execute(_TIKTOK_BROWSER_REVISIT_UPSERT_SQL, *revisit_args)
-    except Exception:
-        logger.debug(
-            "tiktok browser media candidate record failed content_id=%s mode=%s",
-            content_id,
-            ingest_mode,
-            exc_info=True,
-        )
-
-
-_BROWSER_MEDIA_CANDIDATE_UPSERT_SQL = """
-INSERT INTO browser_media_candidates
-  (platform, content_id, username, source_url, url_hash, asset_role,
-   content_type, width, height, file_size, mime_type,
-   extension_version, ingest_mode, outcome, reason,
-   needs_revisit, metadata)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17::jsonb)
-ON CONFLICT (platform, content_id, url_hash, ingest_mode) DO UPDATE SET
-  username = COALESCE(EXCLUDED.username, browser_media_candidates.username),
-  source_url = EXCLUDED.source_url,
-  asset_role = COALESCE(EXCLUDED.asset_role, browser_media_candidates.asset_role),
-  content_type = COALESCE(EXCLUDED.content_type, browser_media_candidates.content_type),
-  width = COALESCE(EXCLUDED.width, browser_media_candidates.width),
-  height = COALESCE(EXCLUDED.height, browser_media_candidates.height),
-  file_size = COALESCE(EXCLUDED.file_size, browser_media_candidates.file_size),
-  mime_type = COALESCE(EXCLUDED.mime_type, browser_media_candidates.mime_type),
-  extension_version = COALESCE(EXCLUDED.extension_version, browser_media_candidates.extension_version),
-  outcome = EXCLUDED.outcome,
-  reason = EXCLUDED.reason,
-  needs_revisit = EXCLUDED.needs_revisit,
-  metadata = browser_media_candidates.metadata || EXCLUDED.metadata,
-  attempts = browser_media_candidates.attempts + 1,
-  last_seen = now()
-WHERE browser_media_candidates.outcome IS DISTINCT FROM 'stored'
-   OR EXCLUDED.outcome = 'stored'
-"""
-
-_BROWSER_MEDIA_REVISIT_UPSERT_SQL = """
-INSERT INTO browser_media_revisit_queue
-  (platform, content_id, username, post_url, source_url, reason,
-   priority, metadata)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb)
-ON CONFLICT (platform, content_id) DO UPDATE SET
-  username = COALESCE(EXCLUDED.username, browser_media_revisit_queue.username),
-  post_url = COALESCE(EXCLUDED.post_url, browser_media_revisit_queue.post_url),
-  source_url = COALESCE(EXCLUDED.source_url, browser_media_revisit_queue.source_url),
-  reason = EXCLUDED.reason,
-  priority = GREATEST(browser_media_revisit_queue.priority, EXCLUDED.priority),
-  metadata = browser_media_revisit_queue.metadata || EXCLUDED.metadata,
-  updated_at = now()
-"""
-
-
-def _prepare_browser_media_candidate(
-    platform: str,
-    username: str | None,
-    item: dict | None,
-    *,
-    ingest_mode: str,
-    saved: bool = False,
-    reject_stats: dict | None = None,
-    extension_version: str | None = None,
-    browser_result: dict | None = None,
-) -> tuple[tuple, tuple | None] | None:
-    if platform not in KNOWN_PLATFORMS or not isinstance(item, dict):
-        return None
-    url = str(item.get("url") or "").strip()
-    if not url:
-        return None
-    content_id = str(item.get("content_id") or _url_hash(url)[:32])[:300]
-    meta = _item_meta(item)
-    ext_version = extension_version or str(meta.get("extension_version") or "") or None
-    width, height = _candidate_dimensions(item)
-    file_size = _int(item.get("file_size") or meta.get("browser_upload_size"))
-    mime_type = item.get("mime_type") or item.get("content_type_header") or meta.get("browser_upload_mime_type")
-    outcome, reason, needs_revisit = _classify_browser_candidate_result(
-        platform,
-        item,
-        saved=saved,
-        reject_stats=reject_stats,
-        ingest_mode=ingest_mode,
-        browser_result=browser_result,
-    )
-    metadata = {
-        "raw_meta": meta,
-        "browser_upload": bool(item.get("browser_upload")),
-        "browser_upload_only": bool(item.get("browser_upload_only")),
-    }
-    if reject_stats:
-        metadata["reject_stats"] = reject_stats
-    if browser_result:
-        metadata["browser_result"] = browser_result
-    candidate_args = (
-        platform,
-        content_id,
-        username,
-        url[:2000],
-        _url_hash(url),
-        _candidate_asset_role(item, platform),
-        str(item.get("content_type") or "")[:40] or None,
-        width,
-        height,
-        file_size,
-        str(mime_type)[:120] if mime_type else None,
-        ext_version,
-        ingest_mode,
-        outcome,
-        reason,
-        needs_revisit,
-        json.dumps(metadata, default=str),
-    )
-    revisit_args = None
-    if needs_revisit and platform != "tiktok":
-        post_url = _browser_candidate_post_url(platform, item, username)
-        if post_url:
-            revisit_args = (
-                platform,
-                content_id,
-                username,
-                post_url,
-                url[:2000],
-                reason or outcome,
-                _browser_revisit_priority(platform, item, outcome),
-                json.dumps(metadata, default=str),
-            )
-    return candidate_args, revisit_args
-
-
-async def _record_browser_media_candidate(
-    pool,
-    platform: str,
-    username: str | None,
-    item: dict | None,
-    *,
-    ingest_mode: str,
-    saved: bool = False,
-    reject_stats: dict | None = None,
-    extension_version: str | None = None,
-    browser_result: dict | None = None,
-) -> None:
-    prepared = _prepare_browser_media_candidate(
-        platform,
-        username,
-        item,
-        ingest_mode=ingest_mode,
-        saved=saved,
-        reject_stats=reject_stats,
-        extension_version=extension_version,
-        browser_result=browser_result,
-    )
-    if prepared is None:
-        return
-    candidate_args, revisit_args = prepared
-    content_id = candidate_args[1]
-    try:
-        async with pool.acquire() as conn:
-            try:
-                await conn.execute(_BROWSER_MEDIA_CANDIDATE_UPSERT_SQL, *candidate_args)
-            except Exception:
-                logger.debug(
-                    "browser media candidate record failed platform=%s content_id=%s mode=%s",
-                    platform,
-                    content_id,
-                    ingest_mode,
-                    exc_info=True,
-                )
-            if revisit_args is not None:
-                try:
-                    await conn.execute(_BROWSER_MEDIA_REVISIT_UPSERT_SQL, *revisit_args)
-                except Exception:
-                    logger.debug(
-                        "browser media revisit queue insert failed platform=%s content_id=%s",
-                        platform,
-                        content_id,
-                        exc_info=True,
-                    )
-    except Exception:
-        logger.debug(
-            "browser media candidate pool acquire failed platform=%s content_id=%s mode=%s",
-            platform,
-            content_id,
-            ingest_mode,
-            exc_info=True,
-        )
-
-    if platform == "tiktok":
-        await _record_tiktok_browser_candidate(
-            pool,
-            username,
-            item,
-            ingest_mode=ingest_mode,
-            saved=saved,
-            reject_stats=reject_stats,
-            extension_version=extension_version,
-            browser_result=browser_result,
-        )
-
-
-async def _download_and_save(pool, session, platform, username, item, reject_stats: dict | None = None) -> bool:
-    def _reject(reason: str, detail: str | None = None) -> bool:
-        if reject_stats is not None:
-            reject_stats[reason] = int(reject_stats.get(reason, 0)) + 1
-            if detail:
-                examples = reject_stats.setdefault("examples", {})
-                if isinstance(examples, dict) and reason not in examples:
-                    examples[reason] = detail[:180]
-        return False
-
-    url = item.get("url")
-    cid = str(item.get("content_id") or "")
-    collection_surface = normalize_collection_surface(
-        item.get("collection_surface") or item.get("surface"),
-        context=(item.get("meta") or {}).get("collection_surface") if isinstance(item.get("meta"), dict) else None,
-    )
-    if not url or not cid:
-        return _reject("missing_url_or_content_id")
-    # media kind: post (default) | story | highlight. Stories/highlights live in
-    # their own subtree and get a namespaced content_id so they never collide with
-    # a feed post that happens to share an id.
-    media_kind = (item.get("kind") or "post").lower()
-    if media_kind not in ("post", "story", "highlight", "tagged", "profile"):
-        media_kind = "post"
-    content_base_id = _threads_media_content_base_id(platform, cid)
-    needs_content_sha = content_base_id == cid and platform == "threads" and _THREADS_SYNTHETIC_MEDIA_ID.match(cid)
-    # DB dedup id stays namespaced so a story/highlight/tagged/profile can't collide.
-    store_cid = _media_store_content_id(media_kind, content_base_id)
-    safe_user = _SAFE.sub("_", username)[:80] or "unknown"
-    # filename kind label (no subfolders anymore — kind is encoded in the name)
-    kindtag = {"story": "story_", "highlight": "hl_", "tagged": "tagged_", "profile": "profile_"}.get(media_kind, "")
-    datestr = _date_prefix(item, platform)
-
-    async def _record_vault_pause(reason: str) -> None:
-        logger.warning(
-            "vault/media unavailable before extension media write platform=%s cid=%s: %s",
-            platform,
-            store_cid,
-            reason,
-        )
-        try:
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    """
-                    INSERT INTO dead_letter_queue (source, entity_id, content_id, error_message)
-                    VALUES ($1, $2, $3, $4)
-                    """,
-                    platform,
-                    safe_user,
-                    store_cid,
-                    f"vault/media unavailable before extension media write: {reason}"[:500],
-                )
-        except Exception:
-            logger.debug(
-                "vault/media unavailable DLQ insert failed for %s/%s",
-                platform,
-                store_cid,
-                exc_info=True,
-            )
-
-    try:
-        # dedup authority is media_items (source, content_id)
-        if not needs_content_sha:
-            async with pool.acquire() as conn:
-                seen = await conn.fetchval(
-                    "SELECT 1 FROM media_items WHERE source=$1 AND content_id=$2", platform, store_cid
-                )
-            if seen:
-                return _reject("duplicate_content_id")
-
-        try:
-            assert_media_write_allowed(
-                Path(MEDIA_ROOT) / platform / f"account_{safe_user}" / ".extension_write_check",
-                media_root=MEDIA_ROOT,
-            )
-        except RuntimeError as exc:
-            await _record_vault_pause(str(exc))
-            return _reject("vault_unavailable", str(exc))
-
-        data_bytes = item.get("data_bytes")
-        data_b64 = item.get("data_b64")
-        if isinstance(data_bytes, memoryview):
-            data = data_bytes.tobytes()
-            ct_header = item.get("mime_type") or item.get("content_type_header")
-        elif isinstance(data_bytes, bytearray):
-            data = bytes(data_bytes)
-            ct_header = item.get("mime_type") or item.get("content_type_header")
-        elif isinstance(data_bytes, bytes):
-            data = data_bytes
-            ct_header = item.get("mime_type") or item.get("content_type_header")
-        elif data_b64:
-            try:
-                encoded = str(data_b64)
-                if len(encoded) > 4 * ((BRIDGE_MEDIA_MAX_BYTES + 2) // 3):
-                    return _reject("media_too_large", f">{BRIDGE_MEDIA_MAX_BYTES} bytes")
-                data = await asyncio.to_thread(base64.b64decode, encoded, validate=True)
-            except Exception as exc:
-                return _reject("bad_uploaded_media", exc.__class__.__name__)
-            ct_header = item.get("mime_type") or item.get("content_type_header")
-        else:
-            try:
-                _validate_media_url(url)
-            except BridgeMediaRejected as exc:
-                return _reject("blocked_url", str(exc))
-            async with session.get(
-                url,
-                headers=_download_headers(platform, url, item),
-                timeout=aiohttp.ClientTimeout(total=60),
-            ) as r:
-                if r.status != 200:
-                    return _reject("http_status", str(r.status))
-                try:
-                    _validate_media_url(str(r.url or url))
-                except BridgeMediaRejected as exc:
-                    return _reject("blocked_url", f"redirect {exc}")
-                ct_header = r.headers.get("content-type")
-                limit = BRIDGE_MEDIA_MAX_BYTES
-                chunks: list[bytes] = []
-                total = 0
-                while True:
-                    chunk = await r.content.read(64 * 1024)
-                    if not chunk:
-                        break
-                    total += len(chunk)
-                    if total > limit:
-                        return _reject("media_too_large", f">{limit} bytes")
-                    chunks.append(chunk)
-                data = b"".join(chunks)
-
-        if len(data) > BRIDGE_MEDIA_MAX_BYTES:
-            return _reject("media_too_large", f">{BRIDGE_MEDIA_MAX_BYTES} bytes")
-
-        # GATE: keep only real PDF/image/video/audio above min size — drop
-        # favicons, thumbnails, tracking pixels, sprite sheets, HTML error pages.
-        ok, ext, mtype, reason, sha = await asyncio.to_thread(_inspect_media_payload, data, ct_header)
-        if not ok:
-            logger.debug("reject %s %s: %s", platform, store_cid, reason)
-            return _reject("invalid_media", reason)
-        if not sha:
-            return _reject("invalid_media", "missing_sha256")
-        if needs_content_sha:
-            content_base_id = _threads_media_content_base_id(platform, cid, sha)
-            store_cid = _media_store_content_id(media_kind, content_base_id)
-            async with pool.acquire() as conn:
-                seen = await conn.fetchval(
-                    "SELECT 1 FROM media_items WHERE source=$1 AND content_id=$2", platform, store_cid
-                )
-            if seen:
-                return _reject("duplicate_content_id")
-        # CONTENT DEDUP: if these exact bytes are already stored for this source
-        # (e.g. the same For-You image re-scraped under a different DOM content_id),
-        # skip — no duplicate file or row. This is what kills the lemon8/tiktok
-        # re-scrape duplication. Needs the (source, sha256) index for speed.
-        async with pool.acquire() as conn:
-            if await conn.fetchval("SELECT 1 FROM media_items WHERE source=$1 AND sha256=$2 LIMIT 1", platform, sha):
-                return _reject("duplicate_sha256")
-        ctype = "video" if mtype == "video" else ("pdf" if mtype == "pdf" else "photo")
-        # Flat layout: /<platform>/account_<user>/<ctype>/  — kind + date live in the
-        # filename: <YYYYMMDD>_<platform>_<user>_<kindtag><cid>.<ext> (sortable by date).
-        dest_dir = Path(MEDIA_ROOT) / platform / f"account_{safe_user}" / ctype
-        raw_cid = _SAFE.sub("_", content_base_id)[:100]
-        dest = dest_dir / f"{datestr}_{platform}_{safe_user}_{kindtag}{raw_cid}.{ext}"
-        try:
-            assert_media_write_allowed(dest, media_root=MEDIA_ROOT)
-        except RuntimeError as exc:
-            await _record_vault_pause(str(exc))
-            return _reject("vault_unavailable", str(exc))
-
-        artifact, sidecar, meta_json, stored_path = await asyncio.to_thread(
-            _write_extension_media_artifacts_sync,
-            platform=platform,
-            safe_user=safe_user,
-            username=username,
-            item=item,
-            data=data,
-            ext=ext,
-            sha=sha,
-            ctype=ctype,
-            media_kind=media_kind,
-            store_cid=store_cid,
-            dest=dest,
-            url=url,
-        )
-        if artifact.path is None:
-            await _record_vault_pause(artifact.error or "artifact write failed")
-            return _reject("artifact_write_failed", artifact.error or "artifact write failed")
-        if sidecar is None or meta_json is None or stored_path is None:
-            await _record_vault_pause("artifact sidecar state incomplete")
-            return _reject("artifact_write_failed", "artifact sidecar state incomplete")
-        async with pool.acquire() as conn:
-            try:
-                await conn.execute(
-                    """
-                    INSERT INTO media_items
-                      (source, entity_id, entity_name, content_type, content_id,
-                       filename, file_path, file_size, sha256, source_url, metadata, kind,
-                       ingest_path, collection_surface)
-                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12,'extension',$13)
-                    ON CONFLICT (source, content_id) DO UPDATE SET
-                       file_path = EXCLUDED.file_path,
-                       file_size = EXCLUDED.file_size,
-                       sha256 = EXCLUDED.sha256,
-                       source_url = EXCLUDED.source_url,
-                       metadata = EXCLUDED.metadata,
-                       kind = EXCLUDED.kind,
-                       ingest_path = 'extension',
-                       collection_surface = CASE WHEN EXCLUDED.collection_surface = 'unknown'
-                                                  THEN media_items.collection_surface
-                                                  ELSE EXCLUDED.collection_surface END
-                    """,
-                    platform, safe_user, item.get("entity_name") or username, ctype, store_cid,
-                    dest.name, str(stored_path), len(data), sha, url, meta_json, media_kind,
-                    collection_surface,
-                )
-            except UniqueViolationError:
-                # A concurrent same-bytes insert won after the advisory hash check.
-                return _reject("duplicate_sha256")
-            if artifact.partial or not artifact.ok:
-                await conn.execute(
-                    """
-                    INSERT INTO dead_letter_queue (source, entity_id, content_id, error_message)
-                    VALUES ($1, $2, $3, $4)
-                    """,
-                    platform,
-                    safe_user,
-                    store_cid,
-                    f"vault artifact partial: {artifact.error}",
-                )
-            if sidecar.enabled and not sidecar.ok:
-                await conn.execute(
-                    """
-                    INSERT INTO dead_letter_queue (source, entity_id, content_id, error_message)
-                    VALUES ($1, $2, $3, $4)
-                    """,
-                    platform,
-                    safe_user,
-                    store_cid,
-                    f"vault sidecar write failed: {sidecar.error}",
-                )
-            try:
-                metadata_payload = json.loads(meta_json) if isinstance(meta_json, str) else meta_json
-            except Exception:
-                metadata_payload = {}
-            enqueue_result = {"status": "stored_only", "reason": "enqueue_not_attempted"}
-            try:
-                from src.notifications import realtime_feed
-                enqueue_result = realtime_feed.enqueue_from_insert(
-                    source=platform,
-                    entity_name=item.get("entity_name") or username,
-                    content_id=store_cid,
-                    file_path=str(stored_path),
-                    source_url=url,
-                    sha256=sha,
-                    metadata=metadata_payload if isinstance(metadata_payload, dict) else {},
-                    kind=media_kind,
-                    content_type=ctype,
-                    file_size=len(data),
-                )
-            except Exception:
-                logger.debug(
-                    "realtime_feed enqueue failed for extension media %s/%s",
-                    platform,
-                    store_cid,
-                    exc_info=True,
-                )
-                enqueue_result = {"status": "stored_only", "reason": "enqueue_failed"}
-            try:
-                from src.notifications import realtime_delivery
-                await realtime_delivery.record_with_conn(
-                    conn,
-                    source=platform,
-                    content_id=store_cid,
-                    status=str(enqueue_result.get("status") or "stored_only"),
-                    reason=enqueue_result.get("reason"),
-                    file_size=len(data),
-                    content_type=ctype,
-                )
-            except Exception:
-                logger.debug(
-                    "realtime delivery enqueue ledger failed for extension media %s/%s",
-                    platform,
-                    store_cid,
-                    exc_info=True,
-                )
-        try:
-            async with pool.acquire() as conn:
-                consistency = await verify_media_item_db_consistency(
-                    conn,
-                    source=platform,
-                    content_id=store_cid,
-                    file_path=str(stored_path),
-                    file_size=len(data),
-                    sha256=sha,
-                    sidecar_path=sidecar.relative_path if sidecar.enabled else None,
-                )
-                consistency_meta = {
-                    "vault_artifact_db_consistency": {
-                        "ok": consistency.ok,
-                        "errors": list(consistency.errors),
-                    }
-                }
-                await conn.execute(
-                    """
-                    UPDATE media_items
-                    SET metadata = COALESCE(metadata, '{}'::jsonb) || $3::jsonb
-                    WHERE source = $1 AND content_id = $2
-                    """,
-                    platform,
-                    store_cid,
-                    json.dumps(consistency_meta, default=str),
-                )
-                if not consistency.ok:
-                    await conn.execute(
-                        """
-                        INSERT INTO dead_letter_queue (source, entity_id, content_id, error_message)
-                        VALUES ($1, $2, $3, $4)
-                        """,
-                        platform,
-                        safe_user,
-                        store_cid,
-                        "vault artifact db consistency failed: "
-                        + "; ".join(consistency.errors),
-                    )
-        except Exception:
-            logger.warning(
-                "vault sidecar status update failed for %s/%s",
-                platform,
-                store_cid,
-                exc_info=True,
-            )
-        return True
-    except Exception as exc:
-        logger.debug("save failed platform=%s cid=%s", platform, cid, exc_info=True)
-        return _reject("exception", f"{exc.__class__.__name__}: {exc}")
-
-
-def _merge_reject_stats(dest: dict, src: dict | None) -> None:
-    if not isinstance(src, dict):
-        return
-    for key, value in src.items():
-        if key == "examples":
-            examples = dest.setdefault("examples", {})
-            if isinstance(examples, dict) and isinstance(value, dict):
-                for reason, detail in value.items():
-                    examples.setdefault(reason, detail)
-            continue
-        try:
-            dest[key] = int(dest.get(key, 0) or 0) + int(value or 0)
-        except (TypeError, ValueError):
-            dest[key] = value
-
-
-async def _drain(
-    app, platform, username, items, extension_version: str | None = None,
-    collection_surface: str = "unknown",
-):
-    """Background download worker — bounded concurrency, never blocks the POST."""
-    pool, session, sem = app["pool"], app["session"], app["sem"]
-    saved = 0
-    reject_stats: dict = {}
-
-    async def one(it):
-        nonlocal saved
-        async with sem:
-            payload = it
-            if extension_version and isinstance(it, dict):
-                payload = dict(it)
-                meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
-                payload["meta"] = {**meta, "extension_version": extension_version}
-            elif isinstance(it, dict):
-                payload = dict(it)
-            if isinstance(payload, dict):
-                payload["collection_surface"] = normalize_collection_surface(
-                    payload.get("collection_surface") or collection_surface
-                )
-            item_stats: dict = {}
-            item_saved = await _download_and_save(pool, session, platform, username, payload, item_stats)
-            _merge_reject_stats(reject_stats, item_stats)
-            if item_saved:
-                saved += 1
-            await _record_browser_media_candidate(
-                pool,
-                platform,
-                username,
-                payload if isinstance(payload, dict) else {},
-                ingest_mode="url",
-                saved=item_saved,
-                reject_stats=item_stats,
-                extension_version=extension_version,
-            )
-
-    await asyncio.gather(*(one(it) for it in items), return_exceptions=True)
-    event_meta = {}
-    if extension_version:
-        event_meta["extension_version"] = extension_version
-    if reject_stats:
-        event_meta["reject_stats"] = reject_stats
-    deduped = _browser_event_duplicate_count({"reject_stats": reject_stats})
-    failed = max(0, len(items) - saved - deduped)
-    failure_buckets = {
-        name: _reject_count(count)
-        for name, count in reject_stats.items()
-        if name not in {"examples", "duplicate_content_id", "duplicate_sha256"}
-    }
-    failure_class = max(failure_buckets, key=failure_buckets.get) if failure_buckets else None
-    await _record_browser_ingest_event(
-        pool,
-        platform,
-        "media",
-        username,
-        observed_count=len(items),
-        stored_count=saved,
-        collection_surface=collection_surface,
-        deduped_count=deduped,
-        failed_count=failed,
-        outcome="partial" if saved and failed else "failed" if failed else "success" if saved or deduped else "empty",
-        error_class=failure_class,
-        metadata=event_meta or None,
-    )
-    if platform == "instagram":
-        try:
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    "UPDATE instagram_spider_targets SET last_scraped_at=now() WHERE username=$1",
-                    username,
-                )
-        except Exception:
-            pass
-    logger.info("ingest[%s] %s: %d/%d saved", platform, username, saved, len(items))
-
-
-async def _record_browser_ingest_event(
-    pool,
-    platform: str,
-    endpoint: str,
-    subject: str | None = None,
-    *,
-    observed_count: int = 0,
-    stored_count: int = 0,
-    collection_surface: str = "unknown",
-    deduped_count: int = 0,
-    failed_count: int = 0,
-    outcome: str | None = None,
-    error_class: str | None = None,
-    metadata: dict | None = None,
-) -> None:
-    try:
-        async with asyncio.timeout(BROWSER_TELEMETRY_WRITE_TIMEOUT_SECONDS):
-            await _write_browser_ingest_event(
-                pool,
-                platform,
-                endpoint,
-                subject,
-                observed_count=observed_count,
-                stored_count=stored_count,
-                collection_surface=collection_surface,
-                deduped_count=deduped_count,
-                failed_count=failed_count,
-                outcome=outcome,
-                error_class=error_class,
-                metadata=metadata,
-            )
-    except TimeoutError:
-        log = logger.debug if endpoint == "browser_heartbeat" else logger.warning
-        log(
-            "browser ingest telemetry timed out after %.2fs platform=%s endpoint=%s subject=%s",
-            BROWSER_TELEMETRY_WRITE_TIMEOUT_SECONDS,
-            platform,
-            endpoint,
-            subject,
-        )
-    except Exception:
-        logger.debug(
-            "browser ingest telemetry insert failed platform=%s endpoint=%s subject=%s",
-            platform,
-            endpoint,
-            subject,
-            exc_info=True,
-        )
-
-
-async def _write_browser_ingest_event(
-    pool,
-    platform: str,
-    endpoint: str,
-    subject: str | None = None,
-    *,
-    observed_count: int = 0,
-    stored_count: int = 0,
-    collection_surface: str = "unknown",
-    deduped_count: int = 0,
-    failed_count: int = 0,
-    outcome: str | None = None,
-    error_class: str | None = None,
-    metadata: dict | None = None,
-) -> None:
-    observed = max(0, int(observed_count or 0))
-    stored = max(0, int(stored_count or 0))
-    deduped = max(0, int(deduped_count or 0))
-    failed = max(0, int(failed_count or 0))
-    surface = normalize_collection_surface(collection_surface)
-    event_outcome = str(outcome or ("partial" if stored and failed else "failed" if failed else "success" if stored or deduped else "empty"))
-    if event_outcome not in {"success", "empty", "partial", "failed", "unknown"}:
-        event_outcome = "unknown"
-    safe_error_class = str(error_class or "").strip()[:64] or None
-    async with pool.acquire() as conn:
-        await conn.execute(
-            """
-            INSERT INTO browser_ingest_events
-              (platform, endpoint, subject, observed_count, stored_count,
-               collection_surface, deduped_count, failed_count, outcome, error_class, metadata)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
-            """,
-            platform,
-            endpoint,
-            subject,
-            observed,
-            stored,
-            surface,
-            deduped,
-            failed,
-            event_outcome,
-            safe_error_class,
-            json.dumps(metadata or {}),
-        )
-        if _browser_event_marks_source_success(platform, endpoint, observed, stored, metadata):
-            await conn.execute(
-                """
-                INSERT INTO source_health
-                  (source, status, last_success_at, last_checked_at, last_error, updated_at)
-                VALUES ($1, 'running', NOW(), NOW(), NULL, NOW())
-                ON CONFLICT (source) DO UPDATE SET
-                  status = 'running',
-                  last_success_at = NOW(),
-                  last_checked_at = NOW(),
-                  last_error = NULL,
-                  updated_at = NOW()
-                """,
-                platform,
-            )
-
-
-def _browser_event_marks_source_success(
-    platform: str,
-    endpoint: str,
-    observed_count: int,
-    stored_count: int,
-    metadata: dict | None = None,
-) -> bool:
-    if not platform or platform == "bridge":
-        return False
-    if endpoint == "browser_heartbeat":
-        if not isinstance(metadata, dict) or not metadata.get("running"):
-            return False
-        return str(metadata.get("health_status") or "").lower() not in {
-            "recoverable_error_shell",
-            "loop_cycle_timeout",
-            "forced_cycle_error",
-        }
-    if endpoint == "media":
-        if stored_count > 0:
-            return True
-        duplicate_count = _browser_event_duplicate_count(metadata)
-        if observed_count > 0 and duplicate_count >= max(1, int(observed_count * 0.8)):
-            return True
-    elif observed_count > 0 or stored_count > 0:
-        return True
-    if not isinstance(metadata, dict):
-        return False
-    probe_reason = str(metadata.get("probe_reason") or "").strip()
-    non_progress_probes = {
-        "manual_backend_probe",
-        "forced_recovery_started",
-        "recoverable_error_shell",
-    }
-    if (
-        platform == "x"
-        and observed_count <= 0
-        and stored_count <= 0
-        and probe_reason in X_ZERO_PROGRESS_PROBES
-    ):
-        return False
-    return bool(probe_reason and probe_reason not in non_progress_probes)
-
-
-def _browser_event_duplicate_count(metadata: dict | None) -> int:
-    if not isinstance(metadata, dict):
-        return 0
-    reject_stats = metadata.get("reject_stats")
-    if not isinstance(reject_stats, dict):
-        return 0
-    total = 0
-    for key in ("duplicate_content_id", "duplicate_sha256"):
-        try:
-            total += max(0, int(reject_stats.get(key) or 0))
-        except (TypeError, ValueError):
-            continue
-    return total
-
-
-async def _ingest(app, platform, body):
-    username = body.get("username") or "unknown"
-    surface = normalize_collection_surface(body.get("collection_surface") or body.get("surface"))
-    items = body.get("items") or []
-    if platform in _VERIFIED_FILTER_PLATFORMS and _explicitly_verified_capture(body):
-        return {
-            "accepted": 0,
-            "queued": False,
-            "stored": 0,
-            "platform": platform,
-            "excluded_verified": True,
-        }
-    if isinstance(items, list):
-        if platform in _VERIFIED_FILTER_PLATFORMS:
-            items = [item for item in items if not _explicitly_verified_capture(item)]
-    if items:
-        task = asyncio.create_task(_drain(
-            app, platform, username, items, body.get("extension_version"), surface,
-        ))
-        app["tasks"].add(task)
-        task.add_done_callback(app["tasks"].discard)
-    elif body.get("record_empty"):
-        meta = {}
-        if body.get("extension_version"):
-            meta["extension_version"] = body.get("extension_version")
-        if body.get("probe_reason"):
-            meta["probe_reason"] = body.get("probe_reason")
-        if isinstance(body.get("probe_meta"), dict):
-            meta["probe_meta"] = body.get("probe_meta")
-        await _record_browser_ingest_event(
-            app["pool"],
-            platform,
-            "media",
-            username,
-            observed_count=0,
-            stored_count=0,
-            collection_surface=surface,
-            outcome="empty",
-            metadata=meta or None,
-        )
-        if (
-            platform == "instagram"
-            and body.get("probe_reason") == "restricted_following_feed_dom_observation"
-        ):
-            await mark_recovery_observation(app["pool"], "instagram", account=username)
-    # Outcome states: queued = drain task scheduled below; stored is always 0
-    # here because _drain persists after this response is already sent.
-    return {
-        "accepted": len(items),
-        "queued": bool(items),
-        "stored": 0,
-        "platform": platform,
-    }
-
-
-async def _ingest_uploaded_media(app, platform, body):
-    username = body.get("username") or "unknown"
-    surface = normalize_collection_surface(body.get("collection_surface") or body.get("surface"))
-    item = body.get("item") or {}
-    if not isinstance(item, dict):
-        item = {}
-    item = dict(item)
-    if platform in _VERIFIED_FILTER_PLATFORMS and (
-        _explicitly_verified_capture(body) or _explicitly_verified_capture(item)
-    ):
-        return {
-            "accepted": 0,
-            "stored": 0,
-            "saved": 0,
-            "deduped": False,
-            "failed": False,
-            "platform": platform,
-            "excluded_verified": True,
-        }
-    item["collection_surface"] = normalize_collection_surface(
-        item.get("collection_surface") or surface
-    )
-    if body.get("data_b64") and not item.get("data_b64"):
-        item["data_b64"] = body.get("data_b64")
-    if body.get("mime_type") and not item.get("mime_type"):
-        item["mime_type"] = body.get("mime_type")
-    if body.get("url") and not item.get("url"):
-        item["url"] = body.get("url")
-    extension_version = body.get("extension_version")
-    meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
-    item["meta"] = {
-        **meta,
-        "extension_version": extension_version,
-        "browser_upload": True,
-        "browser_upload_size": body.get("file_size"),
-        "browser_upload_mime_type": body.get("mime_type"),
-    }
-    reject_stats: dict = {}
-    saved = False
-    save_error: BaseException | None = None
-    try:
-        saved = await _download_and_save(app["pool"], app["session"], platform, username, item, reject_stats)
-    except Exception as exc:
-        # The HTTP response already reported queued=true/stored=0; letting this
-        # raise would die in _schedule_app_task's debug log with no event row,
-        # hiding the failure behind an accepted-as-queued 200.
-        save_error = exc
-        saved = False
-        logger.warning(
-            "browser-upload[%s] %s: save failed: %s",
-            platform,
-            username,
-            exc.__class__.__name__,
-            exc_info=True,
-        )
-    await _record_browser_media_candidate(
-        app["pool"],
-        platform,
-        username,
-        item,
-        ingest_mode="browser_upload",
-        saved=bool(saved),
-        reject_stats=reject_stats,
-        extension_version=extension_version,
-    )
-    dedupe_reasons = {"duplicate_content_id", "duplicate_sha256"}
-    deduped = save_error is None and any(
-        _reject_count(reject_stats.get(reason)) > 0 for reason in dedupe_reasons
-    )
-    accepted = bool(saved or deduped)
-    failed = not accepted
-    reason = None
-    if not accepted and reject_stats:
-        reason = max(reject_stats.items(), key=lambda kv: _reject_count(kv[1]))[0]
-    if save_error is not None:
-        reason = reason or save_error.__class__.__name__
-    event_meta = {
-        "extension_version": extension_version,
-        "ingest_mode": "browser_upload",
-        "accepted": accepted,
-        "saved": bool(saved),
-        "deduped": deduped,
-        "failed": failed,
-    }
-    if save_error is not None:
-        event_meta["error_class"] = save_error.__class__.__name__
-    if item.get("content_id"):
-        event_meta["content_id"] = str(item.get("content_id"))[:200]
-    if body.get("file_size") is not None:
-        event_meta["file_size"] = body.get("file_size")
-    if body.get("mime_type"):
-        event_meta["mime_type"] = body.get("mime_type")
-    if reason:
-        event_meta["reason"] = reason
-    if reject_stats:
-        event_meta["reject_stats"] = reject_stats
-    await _record_browser_ingest_event(
-        app["pool"],
-        platform,
-        "media",
-        username,
-        observed_count=1,
-        stored_count=1 if saved else 0,
-        collection_surface=surface,
-        deduped_count=1 if deduped else 0,
-        failed_count=1 if failed else 0,
-        outcome="success" if accepted else "failed",
-        error_class=None if accepted else str(reason or "media_rejected").split(":", 1)[0],
-        metadata=event_meta,
-    )
-    logger.info(
-        "browser-upload[%s] %s: accepted=%d saved=%d deduped=%d failed=%d reason=%s",
-        platform,
-        username,
-        1 if accepted else 0,
-        1 if saved else 0,
-        1 if deduped else 0,
-        1 if failed else 0,
-        reason or "ok",
-    )
-    # Dedupe is its own terminal state: it never counts as stored.
-    return {
-        "accepted": 1 if accepted else 0,
-        "stored": 1 if saved else 0,
-        "saved": 1 if saved else 0,
-        "deduped": deduped,
-        "failed": failed,
-        "platform": platform,
-        "reason": reason,
-        "reject_stats": reject_stats,
-    }
-
-
-def _queued_browser_upload_response(platform: str, body: dict) -> dict:
-    item = body.get("item") if isinstance(body.get("item"), dict) else {}
-    return {
-        "accepted": 1,
-        "stored": 0,
-        "saved": 0,
-        "deduped": False,
-        "queued": True,
-        "platform": platform,
-        "content_id": str(item.get("content_id") or "")[:200] if item else None,
-    }
-
-
-async def _record_browser_media_candidate_batch(app, platform, username, raw_items, extension_version):
-    recorded = 0
-    candidate_rows = []
-    revisit_rows = []
-    tiktok_candidate_rows = []
-    tiktok_revisit_rows = []
-    for entry in raw_items[:500]:
-        if not isinstance(entry, dict):
-            continue
-        item = entry.get("item") if isinstance(entry.get("item"), dict) else entry
-        result = entry.get("result") if isinstance(entry.get("result"), dict) else {}
-        if not isinstance(item, dict):
-            continue
-        ingest_mode = str(entry.get("ingest_mode") or "browser_upload")[:40]
-        saved = bool(result.get("saved") or result.get("stored"))
-        reject_stats = result.get("reject_stats") if isinstance(result.get("reject_stats"), dict) else None
-        prepared = _prepare_browser_media_candidate(
-            platform,
-            username,
-            item,
-            ingest_mode=ingest_mode,
-            saved=saved,
-            reject_stats=reject_stats,
-            extension_version=extension_version,
-            browser_result=result,
-        )
-        recorded += 1
-        if prepared is not None:
-            candidate_args, revisit_args = prepared
-            candidate_rows.append(candidate_args)
-            if revisit_args is not None:
-                revisit_rows.append(revisit_args)
-        if platform == "tiktok":
-            tiktok_prepared = _prepare_tiktok_browser_candidate(
-                username,
-                item,
-                ingest_mode=ingest_mode,
-                saved=saved,
-                reject_stats=reject_stats,
-                extension_version=extension_version,
-                browser_result=result,
-            )
-            if tiktok_prepared is not None:
-                tiktok_candidate_args, tiktok_revisit_args = tiktok_prepared
-                tiktok_candidate_rows.append(tiktok_candidate_args)
-                if tiktok_revisit_args is not None:
-                    tiktok_revisit_rows.append(tiktok_revisit_args)
-
-    if candidate_rows or revisit_rows or tiktok_candidate_rows or tiktok_revisit_rows:
-        try:
-            async with app["pool"].acquire() as conn:
-                if candidate_rows:
-                    try:
-                        await conn.executemany(_BROWSER_MEDIA_CANDIDATE_UPSERT_SQL, candidate_rows)
-                    except Exception:
-                        logger.debug("browser media candidate batch failed platform=%s count=%d", platform, len(candidate_rows), exc_info=True)
-                        for args in candidate_rows:
-                            try:
-                                await conn.execute(_BROWSER_MEDIA_CANDIDATE_UPSERT_SQL, *args)
-                            except Exception:
-                                logger.debug("browser media candidate record failed platform=%s content_id=%s", platform, args[1], exc_info=True)
-                if revisit_rows:
-                    try:
-                        await conn.executemany(_BROWSER_MEDIA_REVISIT_UPSERT_SQL, revisit_rows)
-                    except Exception:
-                        logger.debug("browser media revisit batch failed platform=%s count=%d", platform, len(revisit_rows), exc_info=True)
-                        for args in revisit_rows:
-                            try:
-                                await conn.execute(_BROWSER_MEDIA_REVISIT_UPSERT_SQL, *args)
-                            except Exception:
-                                logger.debug("browser media revisit record failed platform=%s content_id=%s", platform, args[1], exc_info=True)
-                if tiktok_candidate_rows:
-                    await _executemany_with_fallback(
-                        conn,
-                        _TIKTOK_BROWSER_MEDIA_CANDIDATE_UPSERT_SQL,
-                        tiktok_candidate_rows,
-                        "enqueue TikTok browser media candidates",
-                    )
-                if tiktok_revisit_rows:
-                    await _executemany_with_fallback(
-                        conn,
-                        _TIKTOK_BROWSER_REVISIT_UPSERT_SQL,
-                        tiktok_revisit_rows,
-                        "enqueue TikTok browser revisits",
-                    )
-        except Exception:
-            logger.debug("browser media candidate batch acquire failed platform=%s", platform, exc_info=True)
-    if recorded:
-        logger.info("browser media candidate ledger[%s] %s: recorded=%d", platform, username, recorded)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 # browser_media_candidates moved to .ingest per split step 5.
@@ -2306,1689 +640,93 @@ async def _record_browser_media_candidate_batch(app, platform, username, raw_ite
 # tiktok_revisit_target moved to .revisit / .x_profile per split step 6.
 
 
-def _int(v):
-    try:
-        return int(v) if v is not None else None
-    except (TypeError, ValueError):
-        return None
-
-
-def _num(v):
-    try:
-        return float(v) if v is not None else None
-    except (TypeError, ValueError):
-        return None
-
-
-_HANDLE_RE = re.compile(r"^[A-Za-z0-9._]{2,30}$")
-_X_HANDLE_RE = re.compile(r"^[A-Za-z0-9_]{1,20}$")
-
-
-def _derive_handle_from_caption(caption):
-    """Recover a threads/facebook author handle when the extension left
-    author_username empty but dumped the whole post block into the caption
-    ("<handle>\\n<relative time>\\n<caption>"). Returns the first line only when
-    it's a clean handle (no spaces) — this rejects repost headers like
-    "x reposted 1h ago". Mirrors tmp/backfill_threads_author.py so new posts
-    self-heal instead of landing with NULL author. Returns None if unsure."""
-    if not caption:
-        return None
-    first = caption.split("\n", 1)[0].strip()
-    return first if _HANDLE_RE.match(first) else None
-
-
-def _ig_author_uid(ppid: str) -> str | None:
-    """Recover the Instagram author's numeric user id from a platform_post_id of
-    the shape `<media_id>_<author_uid>` (IDENTITY_KEYS.md). Returns None when the
-    id has no embedded uid (a bare media id / shortcode). This trailing id equals
-    instagram_profiles.platform_user_id."""
-    if not ppid:
-        return None
-    uid = ppid.rsplit("_", 1)[-1] if "_" in ppid else ""
-    return uid if uid.isdigit() else None
-
-
-def _x_handle(value) -> str | None:
-    handle = str(value or "").strip().lstrip("@").lower()
-    return handle if _X_HANDLE_RE.match(handle) else None
-
-
-_LEMON8_HANDLE_RE = re.compile(r"^[A-Za-z0-9_.-]{2,64}$")
-_TIKTOK_HANDLE_RE = re.compile(r"^[A-Za-z0-9._-]{1,30}$")
-
-
-def _tiktok_handle(value) -> str | None:
-    handle = str(value or "").strip().lstrip("@")
-    if not handle or "/" in handle or "?" in handle or "#" in handle:
-        return None
-    lowered = handle.lower()
-    if lowered in {
-        "foryou", "following", "explore", "search", "live", "messages",
-        "login", "signup", "upload", "discover", "tag", "music", "video",
-    }:
-        return None
-    return handle if _TIKTOK_HANDLE_RE.match(handle) else None
-
-
-def _owner_account_for_follow(platform, context, owner):
-    ctx_l = (context or "").lower()
-    if ctx_l not in ("follow", "follower"):
-        return None, None
-    owner_account = None
-    if isinstance(owner, dict):
-        owner_account = (owner.get("username") or owner.get("id") or "") or None
-    elif isinstance(owner, str):
-        owner_account = owner.strip().lstrip("@") or None
-    if owner_account:
-        owner_account = str(owner_account).strip().lstrip("@") or None
-    if not owner_account and platform == "tiktok":
-        owner_account = TIKTOK_FOLLOW_OWNER_FALLBACK
-    direction = "follower" if ctx_l == "follower" else "following"
-    return owner_account, direction
-
-
-async def _executemany_with_fallback(conn, query: str, rows: list[tuple], label: str) -> int:
-    if not rows:
-        return 0
-    try:
-        await conn.executemany(query, rows)
-        return len(rows)
-    except Exception:
-        logger.debug("%s batch failed count=%d; retrying rows", label, len(rows), exc_info=True)
-    written = 0
-    for args in rows:
-        try:
-            await conn.execute(query, *args)
-            written += 1
-        except Exception:
-            logger.debug("%s row failed key=%s", label, args[0], exc_info=True)
-    return written
-
-
-async def _enqueue_tiktok_profile_targets(
-    conn,
-    handles,
-    source: str,
-    priority: int,
-    metadata: dict | None = None,
-) -> int:
-    if not handles:
-        return 0
-    rows = [
-        (handle, source[:50], int(priority))
-        for raw in handles
-        if (handle := _tiktok_handle(raw))
-    ]
-    query = """
-    INSERT INTO tiktok_spider_queue
-        (platform_user_id, username, source, priority, status, collected_at)
-    VALUES ($1, $1, $2, $3, 'pending', now())
-    ON CONFLICT (platform_user_id) DO UPDATE SET
-        username = COALESCE(tiktok_spider_queue.username, EXCLUDED.username),
-        source = CASE
-            WHEN tiktok_spider_queue.source = 'manual'
-                THEN tiktok_spider_queue.source
-            ELSE EXCLUDED.source
-        END,
-        priority = LEAST(
-            COALESCE(tiktok_spider_queue.priority, EXCLUDED.priority),
-            EXCLUDED.priority
-        ),
-        status = CASE
-            WHEN tiktok_spider_queue.status IN ('completed', 'failed')
-                THEN 'pending'
-            ELSE tiktok_spider_queue.status
-        END,
-        collected_at = now()
-    """
-    return await _executemany_with_fallback(conn, query, rows, "enqueue tiktok profile targets")
-
-
-def _lemon8_handle(value) -> str | None:
-    handle = str(value or "").strip().lstrip("@")
-    if not handle or "/" in handle or "?" in handle or "#" in handle:
-        return None
-    lowered = handle.lower()
-    if lowered in {"feed", "foryou", "fashion", "beauty", "food", "travel", "home", "topic", "search"}:
-        return None
-    return handle if _LEMON8_HANDLE_RE.match(handle) else None
-
-
-async def _enqueue_lemon8_profile_targets(
-    conn,
-    handles,
-    source: str,
-    priority: int,
-    metadata: dict | None = None,
-) -> int:
-    if not handles:
-        return 0
-    rows = [
-        (handle, source[:50], int(priority))
-        for raw in handles
-        if (handle := _lemon8_handle(raw))
-    ]
-    query = """
-    INSERT INTO lemon8_spider_queue
-        (platform_user_id, source, priority, status, collected_at)
-    VALUES ($1, $2, $3, 'pending', now())
-    ON CONFLICT (platform_user_id) DO UPDATE SET
-        source = CASE
-            WHEN lemon8_spider_queue.source = 'manual'
-                THEN lemon8_spider_queue.source
-            ELSE EXCLUDED.source
-        END,
-        priority = LEAST(
-            COALESCE(lemon8_spider_queue.priority, EXCLUDED.priority),
-            EXCLUDED.priority
-        ),
-        status = CASE
-            WHEN lemon8_spider_queue.status IN ('completed', 'failed')
-                THEN 'pending'
-            ELSE lemon8_spider_queue.status
-        END,
-        collected_at = now()
-    """
-    return await _executemany_with_fallback(conn, query, rows, "enqueue lemon8 profile targets")
-
-
-def _x_post_url(author: str | None, post_id: str | None, metadata: dict | None = None) -> str | None:
-    metadata = metadata if isinstance(metadata, dict) else {}
-    for key in ("verify_url", "url", "post_url"):
-        url = metadata.get(key)
-        if isinstance(url, str) and url.startswith(("https://x.com/", "https://twitter.com/")):
-            return url
-    author_h = _x_handle(author)
-    if author_h and post_id:
-        return f"https://x.com/{author_h}/status/{post_id}"
-    return None
-
-
-async def _enqueue_x_profile_targets(conn, handles, source: str, priority: int, metadata: dict | None = None) -> int:
-    if not handles:
-        return 0
-    meta_json = json.dumps(metadata or {})
-    rows = [
-        (handle, source[:64], int(priority), meta_json)
-        for raw in handles
-        if (handle := _x_handle(raw))
-    ]
-    query = """
-    INSERT INTO x_profile_targets (username, source, priority, status, metadata)
-    VALUES ($1, $2, $3, 'pending', $4::jsonb)
-    ON CONFLICT (username) DO UPDATE SET
-        priority = GREATEST(x_profile_targets.priority, EXCLUDED.priority),
-        source = CASE
-            WHEN x_profile_targets.source = 'manual' THEN x_profile_targets.source
-            ELSE EXCLUDED.source
-        END,
-        status = CASE
-            WHEN x_profile_targets.status IN ('unavailable', 'failed') THEN 'pending'
-            ELSE x_profile_targets.status
-        END,
-        next_visit_at = LEAST(x_profile_targets.next_visit_at, now()),
-        metadata = x_profile_targets.metadata || EXCLUDED.metadata,
-        updated_at = now()
-    """
-    return await _executemany_with_fallback(conn, query, rows, "enqueue x profile targets")
-
-
-async def _record_x_edge(
-    conn,
-    *,
-    source_username: str | None,
-    target_username: str,
-    post_id: str | None,
-    edge_type: str,
-    strength: int,
-    evidence_url: str | None,
-    metadata: dict | None = None,
-) -> None:
-    target = _x_handle(target_username)
-    if not target:
-        return
-    source = _x_handle(source_username) if source_username else None
-    try:
-        await conn.execute(
-            """
-            INSERT INTO x_edges
-                (source_username, target_username, post_id, edge_type, strength, evidence_url, metadata)
-            VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
-            ON CONFLICT DO NOTHING
-            """,
-            source,
-            target,
-            str(post_id) if post_id else None,
-            str(edge_type or "seen")[:64],
-            int(strength),
-            evidence_url,
-            json.dumps(metadata or {}),
-        )
-    except Exception:
-        logger.debug("record x edge failed %s -> %s", source, target, exc_info=True)
-
-
-async def _record_x_post_graph(conn, post_id: str, post: dict) -> None:
-    author = _x_handle(post.get("author_username"))
-    mentions = [_x_handle(m) for m in (post.get("mentions") or [])]
-    mentions = [m for m in mentions if m and m != author]
-    metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
-    evidence_url = _x_post_url(author, post_id, metadata)
-    enqueue = []
-    if author:
-        enqueue.append(author)
-        await _record_x_edge(
-            conn,
-            source_username=None,
-            target_username=author,
-            post_id=post_id,
-            edge_type="seen_author",
-            strength=20,
-            evidence_url=evidence_url,
-            metadata={"source": "x_post_ingest"},
-        )
-    enqueue.extend(mentions)
-    if enqueue:
-        await _enqueue_x_profile_targets(
-            conn,
-            enqueue,
-            "x_post",
-            75,
-            {"source": "x_posts_ingest", "post_id": post_id},
-        )
-    for mention in mentions:
-        await _record_x_edge(
-            conn,
-            source_username=author,
-            target_username=mention,
-            post_id=post_id,
-            edge_type="mention",
-            strength=70,
-            evidence_url=evidence_url,
-            metadata={"source": "x_post_mentions"},
-        )
-    relation_specs = (
-        ("reply", post.get("in_reply_to_screen_name") or metadata.get("in_reply_to_screen_name"), 80),
-        ("quote", post.get("quoted_author_username") or metadata.get("quoted_author_username"), 75),
-        ("repost", post.get("retweeted_author_username") or metadata.get("retweeted_author_username"), 60),
-    )
-    for edge_type, target, strength in relation_specs:
-        target_h = _x_handle(target)
-        if target_h:
-            await _enqueue_x_profile_targets(
-                conn,
-                [target_h],
-                f"x_{edge_type}",
-                max(70, strength),
-                {"source": "x_posts_relation", "post_id": post_id, "edge_type": edge_type},
-            )
-            await _record_x_edge(
-                conn,
-                source_username=author,
-                target_username=target_h,
-                post_id=post_id,
-                edge_type=edge_type,
-                strength=strength,
-                evidence_url=evidence_url,
-                metadata={"source": "x_post_relation"},
-            )
-
-
-async def _ensure_ig_profile(conn, ppid: str, p: dict) -> str | None:
-    """Resolve (or create a minimal stub for) the instagram_profiles row for a
-    post's author, keyed on the numeric uid embedded in platform_post_id, and
-    return its id (uuid). This is the root-cause fix for the recurring NULL-FK
-    bug: this ingest path historically OMITTED profile_id, so ~19k posts landed
-    with NULL profile_id and were invisible to every consumer that joins
-    instagram_posts.profile_id -> instagram_profiles.id (analyzer timelines,
-    /geo). We now attach the FK at insert time.
-
-    A stub is created (ON CONFLICT DO NOTHING) when the author profile hasn't
-    been collected yet, so spidered-from-post authors still get a stable FK; the
-    real profile collector later enriches the same row (unique platform_user_id).
-    Returns None only when the uid can't be recovered (bare media id) — those
-    posts remain genuinely unattributable, same as before."""
-    uid = _ig_author_uid(ppid)
-    if not uid:
-        return None
-    row = await conn.fetchrow(
-        "SELECT id FROM instagram_profiles WHERE platform_user_id = $1", uid
-    )
-    if row:
-        return str(row["id"])
-    # No profile row yet — create a minimal stub keyed on the uid. Use any author
-    # username the extension happened to send; the profile collector fills the
-    # rest later (matched on the unique platform_user_id).
-    username = (p.get("author_username") or p.get("username") or None)
-    new_id = await conn.fetchval(
-        """
-        INSERT INTO instagram_profiles (platform_user_id, username)
-        VALUES ($1, $2)
-        ON CONFLICT (platform_user_id) DO UPDATE SET
-            username = COALESCE(instagram_profiles.username, EXCLUDED.username)
-        RETURNING id
-        """,
-        uid, username,
-    )
-    return str(new_id) if new_id else None
-
-
-# ---------------------------------------------------------------------------
-# structured post + comment metadata (captions/likes/comments threads)
-# ---------------------------------------------------------------------------
-async def _save_posts(pool, platform, posts, collection_surface: str = "unknown") -> int:
-    """Upsert post metadata (caption, engagement, hashtags, mentions) into the
-    platform's posts table. instagram_posts has the richest schema; threads_posts
-    and facebook_posts mirror the essentials. tiktok/lemon8 posts are owned by
-    their headless collectors, so we don't double-write them here."""
-    if platform not in ("instagram", "threads", "facebook", "x"):
-        return 0
-    n = 0
-    default_surface = normalize_collection_surface(collection_surface)
-    async with pool.acquire() as conn:
-        for p in posts:
-            if platform in _VERIFIED_FILTER_PLATFORMS and _explicitly_verified_capture(p):
-                continue
-            ppid = str(p.get("platform_post_id") or "")
-            if not ppid:
-                continue
-            post_metadata = p.get("metadata") if isinstance(p.get("metadata"), dict) else {}
-            post_surface = normalize_collection_surface(
-                p.get("collection_surface") or post_metadata.get("collection_surface") or default_surface
-            )
-            # stamp a canonical, openable verification URL + correct shortcode into
-            # metadata (overrides any wrong/long "code" the extension may have sent).
-            vurl = _verify_url(platform, ppid)
-            if vurl:
-                _md = p.get("metadata")
-                if not isinstance(_md, dict):
-                    _md = {}
-                _md["verify_url"] = vurl
-                _md["shortcode"] = vurl.rstrip("/").rsplit("/", 1)[-1]
-                p["metadata"] = _md
-            try:
-                if platform == "instagram":
-                    # Root-cause fix (NULL-FK bug): resolve/create the author
-                    # profile and attach profile_id at insert time so the post is
-                    # never orphaned. COALESCE on UPDATE so a later collection that
-                    # already set profile_id is never clobbered back to NULL.
-                    profile_id = await _ensure_ig_profile(conn, ppid, p)
-                    await conn.execute(
-                        """
-                        INSERT INTO instagram_posts
-                          (id, platform_post_id, profile_id, media_type, caption, hashtags, mentions,
-                           location_name, location_lat, location_lng, music_title, music_author,
-                           likes_count, comments_count, video_duration,
-                           platform_created_at, collected_at, metadata, collection_surface)
-                        VALUES (gen_random_uuid(),$1,$2::uuid,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,
-                                to_timestamp($15), now(), $16::jsonb, $17)
-                        ON CONFLICT (platform_post_id) DO UPDATE SET
-                           profile_id=COALESCE(instagram_posts.profile_id, EXCLUDED.profile_id),
-                           caption=EXCLUDED.caption, likes_count=EXCLUDED.likes_count,
-                           comments_count=EXCLUDED.comments_count, hashtags=EXCLUDED.hashtags,
-                           mentions=EXCLUDED.mentions, location_name=EXCLUDED.location_name,
-                           location_lat=COALESCE(EXCLUDED.location_lat, instagram_posts.location_lat),
-                           location_lng=COALESCE(EXCLUDED.location_lng, instagram_posts.location_lng),
-                           music_title=COALESCE(EXCLUDED.music_title, instagram_posts.music_title),
-                           music_author=COALESCE(EXCLUDED.music_author, instagram_posts.music_author),
-                           collected_at=now(), metadata=EXCLUDED.metadata,
-                           collection_surface=CASE WHEN EXCLUDED.collection_surface='unknown'
-                                                   THEN instagram_posts.collection_surface
-                                                   ELSE EXCLUDED.collection_surface END
-                        """,
-                        ppid, profile_id, p.get("media_type"), p.get("caption"),
-                        p.get("hashtags") or [], p.get("mentions") or [],
-                        p.get("location"), _num(p.get("location_lat")), _num(p.get("location_lng")),
-                        p.get("music_title"), p.get("music_author"),
-                        _int(p.get("likes_count")), _int(p.get("comments_count")),
-                        _int(p.get("video_duration")), _num(p.get("taken_at")),
-                        json.dumps(p.get("metadata") or {}), post_surface,
-                    )
-                elif platform == "x":
-                    await conn.execute(
-                        """
-                        INSERT INTO x_posts
-                          (platform_post_id, author_username, caption, hashtags, mentions,
-                           likes_count, comments_count, reposts_count, quote_count, views_count,
-                           media_type, platform_created_at, collected_at, metadata, collection_surface)
-                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,to_timestamp($12),now(),$13::jsonb,$14)
-                        ON CONFLICT (platform_post_id) DO UPDATE SET
-                           caption=EXCLUDED.caption, likes_count=EXCLUDED.likes_count,
-                           comments_count=EXCLUDED.comments_count, reposts_count=EXCLUDED.reposts_count,
-                           quote_count=EXCLUDED.quote_count, views_count=EXCLUDED.views_count,
-                           hashtags=EXCLUDED.hashtags, mentions=EXCLUDED.mentions,
-                           media_type=COALESCE(EXCLUDED.media_type, x_posts.media_type),
-                           platform_created_at=COALESCE(EXCLUDED.platform_created_at, x_posts.platform_created_at),
-                           collected_at=now(), metadata=x_posts.metadata || EXCLUDED.metadata,
-                           collection_surface=CASE WHEN EXCLUDED.collection_surface='unknown'
-                                                   THEN x_posts.collection_surface
-                                                   ELSE EXCLUDED.collection_surface END
-                        """,
-                        ppid, p.get("author_username"), p.get("caption"),
-                        p.get("hashtags") or [], p.get("mentions") or [],
-                        _int(p.get("likes_count")), _int(p.get("comments_count")), _int(p.get("reposts_count")),
-                        _int(p.get("quote_count")), _int(p.get("views_count")), p.get("media_type"),
-                        _num(p.get("taken_at")), json.dumps(p.get("metadata") or {}), post_surface,
-                    )
-                    await _record_x_post_graph(conn, ppid, p)
-                else:  # threads / facebook
-                    table = "threads_posts" if platform == "threads" else "facebook_posts"
-                    extra_col = "reposts_count" if platform == "threads" else "shares_count"
-                    # Self-heal: the threads/facebook extension scraper sometimes
-                    # leaves author_username empty and puts "<handle>\n<time>\n..."
-                    # in the caption. Recover the handle so the row isn't orphaned
-                    # (was ~56% of threads posts). See _derive_handle_from_caption.
-                    if not p.get("author_username"):
-                        _h = _derive_handle_from_caption(p.get("caption"))
-                        if _h:
-                            p["author_username"] = _h
-                    await conn.execute(
-                        f"""
-                        INSERT INTO {table}
-                          (platform_post_id, author_username, caption, hashtags, mentions,
-                           likes_count, comments_count, {extra_col}, media_type,
-                           platform_created_at, collected_at, metadata, collection_surface)
-                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,to_timestamp($10),now(),$11::jsonb,$12)
-                        ON CONFLICT (platform_post_id) DO UPDATE SET
-                           author_username=COALESCE(NULLIF(EXCLUDED.author_username, ''), {table}.author_username),
-                           caption=EXCLUDED.caption, likes_count=EXCLUDED.likes_count,
-                           comments_count=EXCLUDED.comments_count,
-                           {extra_col}=EXCLUDED.{extra_col}, collected_at=now(),
-                           metadata=EXCLUDED.metadata,
-                           collection_surface=CASE WHEN EXCLUDED.collection_surface='unknown'
-                                                   THEN {table}.collection_surface
-                                                   ELSE EXCLUDED.collection_surface END
-                        """,
-                        ppid, p.get("author_username"), p.get("caption"),
-                        p.get("hashtags") or [], p.get("mentions") or [],
-                        _int(p.get("likes_count")), _int(p.get("comments_count")),
-                        _int(p.get("reposts_count") if platform == "threads" else p.get("shares_count")),
-                        p.get("media_type"), _num(p.get("taken_at")),
-                        json.dumps(p.get("metadata") or {}), post_surface,
-                    )
-                n += 1
-            except Exception:
-                logger.debug("save post failed %s/%s", platform, ppid, exc_info=True)
-    return n
-
-
-async def _save_comments(pool, platform, post_pid, comments) -> int:
-    """Upsert comment threads into instagram_comments, linked to their post."""
-    if platform != "instagram":
-        return 0
-    n = 0
-    async with pool.acquire() as conn:
-        for c in comments:
-            cpid = str(c.get("platform_comment_id") or "")
-            if not cpid:
-                continue
-            try:
-                await conn.execute(
-                    """
-                    INSERT INTO instagram_comments
-                      (id, platform_comment_id, post_id, author_username, author_platform_id,
-                       text, like_count, parent_comment_id, is_reply, platform_created_at, collected_at)
-                    VALUES (gen_random_uuid(),$1,
-                       (SELECT id FROM instagram_posts WHERE platform_post_id=$2),
-                       $3,$4,$5,$6,$7,$8,to_timestamp($9),now())
-                    ON CONFLICT (platform_comment_id) DO UPDATE SET
-                       text = EXCLUDED.text, like_count = EXCLUDED.like_count, collected_at = now()
-                    """,
-                    cpid, str(post_pid or ""), c.get("author_username"), c.get("author_platform_id"),
-                    c.get("text"), _int(c.get("like_count")), c.get("parent_comment_id"),
-                    bool(c.get("is_reply")), _num(c.get("created_at")),
-                )
-                n += 1
-            except Exception:
-                logger.debug("save comment failed %s", cpid, exc_info=True)
-    return n
-
-
-# ---------------------------------------------------------------------------
-# universal user registry — every user/id we encounter anywhere (follows graph,
-# comment authors, tagged users, post authors, reactors) lands in social_users.
-# ---------------------------------------------------------------------------
-# A Threads handle IS the same Meta account's Instagram handle. So real people we
-# see on Threads (your Following feed, comment authors, etc.) are scrapeable on
-# Instagram — which IS target/profile-driven. Cross-seed them into the IG spider
-# queue. Gated to non-"foryou" contexts so we don't import algorithmic brand spam.
-async def _cross_seed_instagram(conn, usernames, source) -> int:
-    clean = sorted({
-        (uname or "").strip().lstrip("@")
-        for uname in usernames
-        if (uname or "").strip().lstrip("@") and len((uname or "").strip().lstrip("@")) <= 30
-    })
-    if not clean:
-        return 0
-    try:
-        added = int(await conn.fetchval(
-            """
-            WITH input(username) AS (
-                SELECT DISTINCT unnest($1::text[])
-            ),
-            inserted AS (
-                INSERT INTO instagram_spider_targets (username, hop, discovered_from)
-                SELECT username, 1, $2
-                FROM input
-                ON CONFLICT (username) DO NOTHING
-                RETURNING 1
-            )
-            SELECT count(*) FROM inserted
-            """,
-            clean,
-            source,
-        ) or 0)
-    except Exception:
-        logger.debug("cross-seed ig target batch failed", exc_info=True)
-        added = 0
-        for uname in clean:
-            try:
-                res = await conn.execute(
-                    """
-                    INSERT INTO instagram_spider_targets (username, hop, discovered_from)
-                    VALUES ($1, 1, $2)
-                    ON CONFLICT (username) DO NOTHING
-                    """,
-                    uname, source,
-                )
-                if res.endswith("1"):
-                    added += 1
-            except Exception:
-                logger.debug("cross-seed ig target failed %s", uname, exc_info=True)
-    if added:
-        logger.info("cross-seed instagram <- %s: +%d real handles", source, added)
-    return added
-
-
-_SOCIAL_USERS_UPSERT_SQL = """
-INSERT INTO social_users (platform, uid, platform_user_id, username, display_name, profile_photo_url, contexts)
-VALUES ($1,$2,$3,$4,$5,$6,$7)
-ON CONFLICT (platform, uid) DO UPDATE SET
-   last_seen = now(),
-   times_seen = social_users.times_seen + 1,
-   username = COALESCE(EXCLUDED.username, social_users.username),
-   platform_user_id = COALESCE(EXCLUDED.platform_user_id, social_users.platform_user_id),
-   display_name = COALESCE(EXCLUDED.display_name, social_users.display_name),
-   profile_photo_url = COALESCE(EXCLUDED.profile_photo_url, social_users.profile_photo_url),
-   contexts = (SELECT array_agg(DISTINCT c) FROM unnest(social_users.contexts || EXCLUDED.contexts) AS c)
-"""
-
-_FOLLOW_EDGES_UPSERT_SQL = """
-INSERT INTO follow_edges
-    (platform, owner_account, target_uid, direction, target_username, first_seen, last_seen)
-VALUES ($1, $2, $3, $4, $5, now(), now())
-ON CONFLICT (platform, owner_account, target_uid, direction) DO UPDATE SET
-    last_seen = now(),
-    target_username = COALESCE(EXCLUDED.target_username, follow_edges.target_username)
-"""
-
-
-async def _record_users(pool, platform, users, context, owner=None) -> int:
-    if not users:
-        return 0
-    rows = []
-    context_value = str(context or "seen")[:64]
-    cross_handles = []  # threads handles to push into the IG spider queue
-    # PER-ACCOUNT follow graph: when the extension sends an owner (the logged-in
-    # account) with a follow/follower context, also record a directional edge in
-    # follow_edges so each of your accounts' graphs is distinct (multi-account).
-    owner_account, direction = _owner_account_for_follow(platform, context, owner)
-    owner_account = str(owner_account) if owner_account else None
-    for u in users:
-        if isinstance(u, str):
-            u = {"username": u}
-        if not isinstance(u, dict):
-            continue
-        if platform in _VERIFIED_FILTER_PLATFORMS and _explicitly_verified_capture(u):
-            continue
-        user_id = u.get("user_id") or u.get("pk") or u.get("id")
-        username = (u.get("username") or "").strip().lstrip("@") or None
-        uid = str(user_id) if user_id else username
-        if not uid:
-            continue
-        rows.append({
-            "uid": uid,
-            "user_id": str(user_id) if user_id else None,
-            "username": username,
-            "display_name": u.get("display_name") or u.get("full_name") or None,
-            "profile_photo_url": (
-                u.get("profile_pic_url")
-                or u.get("profile_photo_url")
-                or u.get("avatar_url")
-                or None
-            ),
-            "source_record_id": str(
-                u.get("source_record_id") or u.get("post_id")
-                or u.get("comment_id") or ""
-            ).strip() or None,
-        })
-    if not rows:
-        return 0
-
-    user_args = [
-        (
-            platform,
-            r["uid"],
-            r["user_id"],
-            r["username"],
-            r["display_name"],
-            r["profile_photo_url"],
-            [context_value],
-        )
-        for r in rows
-    ]
-    edge_args = [
-        (platform, owner_account, r["uid"], direction, r["username"])
-        for r in rows
-        if owner_account and direction
-    ]
-    n = 0
-    async with pool.acquire() as conn:
-        successful_rows = rows
-        try:
-            await conn.executemany(_SOCIAL_USERS_UPSERT_SQL, user_args)
-            n = len(rows)
-        except Exception:
-            logger.debug("record users batch failed %s/%d", platform, len(rows), exc_info=True)
-            successful_rows = []
-            for r, args in zip(rows, user_args, strict=False):
-                try:
-                    await conn.execute(_SOCIAL_USERS_UPSERT_SQL, *args)
-                    successful_rows.append(r)
-                    n += 1
-                except Exception:
-                    logger.debug("record user failed %s", r["uid"], exc_info=True)
-        if edge_args:
-            try:
-                await conn.executemany(_FOLLOW_EDGES_UPSERT_SQL, edge_args)
-            except Exception:
-                logger.debug("record follow edges batch failed %s/%d", platform, len(edge_args), exc_info=True)
-                for args in edge_args:
-                    try:
-                        await conn.execute(_FOLLOW_EDGES_UPSERT_SQL, *args)
-                    except Exception:
-                        logger.debug("record follow edge failed %s", args[2], exc_info=True)
-            if edge_args and owner_account and direction:
-                try:
-                    from src.core.spider_graph_store import shared_spider_enabled
-
-                    if shared_spider_enabled(platform):
-                        graph_args = [
-                            (
-                                platform,
-                                owner_account,
-                                r["uid"],
-                                direction,
-                                "browser_visible_follow",
-                                0,
-                                json.dumps({"target_username": r["username"]}),
-                            )
-                            for r in rows
-                        ]
-                        await conn.executemany(
-                            """
-                            INSERT INTO spider_graph_edges (
-                                platform, source_node_id, target_node_id, edge_type,
-                                discovery_type, hop_distance, source_metadata,
-                                first_seen_at, last_seen_at
-                            ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, NOW(), NOW())
-                            ON CONFLICT (platform, source_node_id, target_node_id, edge_type)
-                            DO UPDATE SET
-                                discovery_type = EXCLUDED.discovery_type,
-                                source_metadata = spider_graph_edges.source_metadata || EXCLUDED.source_metadata,
-                                last_seen_at = NOW()
-                            """,
-                            graph_args,
-                        )
-                except Exception:
-                    logger.debug(
-                        "record normalized visible graph failed platform=%s",
-                        platform,
-                        exc_info=True,
-                    )
-        usernames = [r["username"] for r in successful_rows if r["username"]]
-        ctx = re.sub(r"[\s_-]+", "", context_value.lower())
-        target_metadata = {
-            "source": "social_users",
-            "context": context_value,
-            "owner_account": owner_account,
-        }
-        try:
-            if platform == "x" and usernames:
-                if ctx == "follow":
-                    source, priority = "following", 95
-                elif ctx == "follower":
-                    source, priority = "follower", 85
-                elif ctx == "author":
-                    source, priority = "author", 75
-                else:
-                    source, priority = ctx[:64], 60
-                await _enqueue_x_profile_targets(conn, usernames, source, priority, target_metadata)
-            elif platform == "tiktok" and usernames:
-                if ctx in {"follow", "following"}:
-                    source, priority = "following", 2
-                elif ctx == "follower":
-                    source, priority = "follower", 3
-                elif ctx in {"author", "profile", "post"}:
-                    source, priority = ctx, 3
-                else:
-                    source, priority = ctx[:50], 4
-                await _enqueue_tiktok_profile_targets(conn, usernames, source, priority, target_metadata)
-            elif platform == "lemon8" and usernames:
-                if ctx in {"author", "profile", "post"}:
-                    source, priority = ctx, 2
-                elif ctx in {"follow", "following"}:
-                    source, priority = "following", 2
-                elif ctx == "follower":
-                    source, priority = "follower", 3
-                else:
-                    source, priority = ctx[:50], 4
-                await _enqueue_lemon8_profile_targets(conn, usernames, source, priority, target_metadata)
-        except Exception:
-            logger.debug("post-user enqueue failed platform=%s context=%s", platform, context_value, exc_info=True)
-        if platform in {"x", "threads", "facebook"} and successful_rows:
-            try:
-                from src.core.spider_discovery_store import persist_discovery_target
-                from src.core.spider_graph_store import shared_spider_enabled, bounded_limit
-
-                if shared_spider_enabled(platform):
-                    max_targets = bounded_limit(
-                        "SOCIAL_SHARED_DISCOVERY_MAX_PER_CAPTURE", 50, maximum=100
-                    )
-                    confidence_by_context = {
-                        "follow": 0.95,
-                        "following": 0.95,
-                        "follower": 0.95,
-                        "profile": 0.9,
-                        "author": 0.75,
-                        "comment": 0.65,
-                        "foryou": 0.6,
-                    }
-                    context_key = ctx
-                    discovery_type = (
-                        "browser_foryou_author"
-                        if context_key == "foryou"
-                        else f"browser_{context_key}_account"
-                    )[:64]
-                    post_tables = {
-                        "x": "x_posts",
-                        "threads": "threads_posts",
-                        "facebook": "facebook_posts",
-                    }
-                    for r in successful_rows[:max_targets]:
-                        target_id = r["user_id"] or r["username"]
-                        if not target_id:
-                            continue
-                        source_record_id = r.get("source_record_id")
-                        source_table = post_tables[platform] if source_record_id else "social_users"
-                        if not source_record_id:
-                            source_record_id = f"{platform}:{r['uid']}"
-                        await persist_discovery_target(
-                            conn,
-                            platform,
-                            str(target_id),
-                            target_type="account",
-                            discovery_type=discovery_type,
-                            source_table=source_table,
-                            source_record_id=source_record_id,
-                            confidence=confidence_by_context.get(context_key, 0.55),
-                            priority=60,
-                            source_metadata={
-                                "capture_context": context_value,
-                                "owner_account": owner_account,
-                                "username": r["username"],
-                            },
-                            max_pending=bounded_limit(
-                                f"{platform.upper()}_SHARED_SPIDER_MAX_PENDING",
-                                300,
-                                maximum=3000,
-                            ),
-                        )
-            except Exception:
-                logger.debug(
-                    "browser shared discovery write skipped platform=%s context=%s",
-                    platform,
-                    context_value,
-                    exc_info=True,
-                )
-        if platform == "threads" and ctx != "foryou":
-            cross_handles.extend(usernames)
-        if cross_handles:
-            await _cross_seed_instagram(conn, cross_handles, "threads:" + (context_value or "feed"))
-    return n
-
-
-async def _legacy_users_handler(request):
-    body = await _safe_json(request)
-    platform = _norm_platform(body.get("platform"))
-    n = await _record_users(request.app["pool"], platform, body.get("users") or [],
-                            body.get("context") or "seen", owner=body.get("owner"))
-    return _cors(web.json_response({"recorded": n}))
-
-
-async def _save_profile(pool, platform, p) -> bool:
-    """Upsert a full profile. Instagram is API-rich; X/Facebook are browser DOM
-    best-effort profiles keyed on the visible handle."""
-    if platform not in ("instagram", "x", "facebook", "tiktok", "snapchat") or (
-        platform in _VERIFIED_FILTER_PLATFORMS and _explicitly_verified_capture(p)
-    ):
-        return False
-    uname = (p.get("username") or "").strip().lstrip("@")
-    if not uname:
-        return False
-    pic = p.get("profile_pic_url")
-    if platform == "snapchat":
-        metadata = p.get("metadata") if isinstance(p.get("metadata"), dict) else {}
-        bitmoji_url = str(p.get("bitmoji_url") or "").strip()
-        page_url = str(metadata.get("page_url") or "")
-        page = urlparse(page_url)
-        expected_path = f"/add/{uname}"
-        if (
-            metadata.get("source") != "snapchat_public_profile_dom_canary"
-            or page.scheme != "https"
-            or (page.hostname or "").lower() not in {"snapchat.com", "www.snapchat.com"}
-            or page.path.rstrip("/") != expected_path
-            or not approved_profile_image_url(bitmoji_url, ("sc-cdn.net", "snapchat.com", "snapchatcdn.com"))
-        ):
-            return False
-        async with pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO snapchat_profiles (username, bitmoji_url, raw_payload, probed_at)
-                VALUES ($1,$2,$3::jsonb,now())
-                ON CONFLICT (username) DO UPDATE SET
-                   bitmoji_url=EXCLUDED.bitmoji_url,
-                   raw_payload=EXCLUDED.raw_payload,
-                   probed_at=now()
-                """,
-                uname, bitmoji_url, json.dumps({"metadata": metadata}),
-            )
-        await _record_profile_capability_receipts(pool, platform)
-        return True
-    if platform == "tiktok":
-        async with pool.acquire() as conn:
-            pid = str(p.get("platform_user_id") or p.get("user_id") or uname).strip().lstrip("@")
-            await conn.execute(
-                """
-                INSERT INTO tiktok_profiles
-                  (id, platform_user_id, username, nickname, avatar_url, bio, followers_count, updated_at)
-                VALUES (gen_random_uuid(),$1,$2,$3,$4,$5,$6,now())
-                ON CONFLICT (platform_user_id) DO UPDATE SET
-                   username=COALESCE(NULLIF(EXCLUDED.username, ''), tiktok_profiles.username),
-                   nickname=COALESCE(EXCLUDED.nickname, tiktok_profiles.nickname),
-                   avatar_url=COALESCE(EXCLUDED.avatar_url, tiktok_profiles.avatar_url),
-                   bio=COALESCE(EXCLUDED.bio, tiktok_profiles.bio),
-                   followers_count=COALESCE(EXCLUDED.followers_count, tiktok_profiles.followers_count),
-                   updated_at=now()
-                """,
-                pid, uname, p.get("display_name") or p.get("full_name"), pic, p.get("bio"),
-                _int(p.get("followers_count")),
-            )
-        await _record_users(pool, platform, [{"user_id": pid, "username": uname,
-                                              "display_name": p.get("display_name") or p.get("full_name"),
-                                              "profile_pic_url": pic}], "profile")
-        await _record_profile_capability_receipts(pool, platform)
-        return True
-    if platform == "x":
-        async with pool.acquire() as conn:
-            # Preserve the exact handle casing already present in x_posts when
-            # possible; entity_platform_links for X were historically keyed on
-            # x_posts.author_username.
-            canonical = await conn.fetchval(
-                """
-                SELECT author_username
-                FROM x_posts
-                WHERE lower(author_username) = lower($1)
-                ORDER BY collected_at DESC NULLS LAST
-                LIMIT 1
-                """,
-                uname,
-            )
-            pid = str(p.get("platform_user_id") or p.get("user_id") or canonical or uname).strip().lstrip("@")
-            username = str(canonical or uname).strip().lstrip("@")
-            await conn.execute(
-                """
-                INSERT INTO x_profiles
-                  (id, platform_user_id, username, display_name, bio, followers_count,
-                   following_count, posts_count, is_verified, is_private, profile_pic_url,
-                   external_url, location, joined_text, collected_at, updated_at, metadata)
-                VALUES (gen_random_uuid(),$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,now(),now(),$14::jsonb)
-                ON CONFLICT (platform_user_id) DO UPDATE SET
-                   username=COALESCE(NULLIF(EXCLUDED.username, ''), x_profiles.username),
-                   display_name=COALESCE(EXCLUDED.display_name, x_profiles.display_name),
-                   bio=COALESCE(EXCLUDED.bio, x_profiles.bio),
-                   followers_count=COALESCE(EXCLUDED.followers_count, x_profiles.followers_count),
-                   following_count=COALESCE(EXCLUDED.following_count, x_profiles.following_count),
-                   posts_count=COALESCE(EXCLUDED.posts_count, x_profiles.posts_count),
-                   is_verified=COALESCE(EXCLUDED.is_verified, x_profiles.is_verified),
-                   is_private=COALESCE(EXCLUDED.is_private, x_profiles.is_private),
-                   profile_pic_url=COALESCE(EXCLUDED.profile_pic_url, x_profiles.profile_pic_url),
-                   external_url=COALESCE(EXCLUDED.external_url, x_profiles.external_url),
-                   location=COALESCE(EXCLUDED.location, x_profiles.location),
-                   joined_text=COALESCE(EXCLUDED.joined_text, x_profiles.joined_text),
-                   metadata=x_profiles.metadata || EXCLUDED.metadata,
-                   updated_at=now()
-                """,
-                pid, username, p.get("display_name") or p.get("full_name"), p.get("bio"),
-                _int(p.get("followers_count")), _int(p.get("following_count")), _int(p.get("posts_count")),
-                bool(p.get("is_verified")) if p.get("is_verified") is not None else None,
-                bool(p.get("is_private")) if p.get("is_private") is not None else None,
-                pic, p.get("external_url"), p.get("location"), p.get("joined_text"),
-                json.dumps(p.get("metadata") or {}),
-            )
-        await _record_users(pool, platform, [{"user_id": pid, "username": username,
-                                              "display_name": p.get("display_name") or p.get("full_name"),
-                                              "profile_pic_url": pic}], "profile")
-        await _record_profile_capability_receipts(pool, platform)
-        return True
-    if platform == "facebook":
-        async with pool.acquire() as conn:
-            pid = str(p.get("platform_user_id") or p.get("user_id") or uname).strip().lstrip("@")
-            await conn.execute(
-                """
-                INSERT INTO facebook_profiles
-                  (id, platform_user_id, username, display_name, bio, followers_count,
-                   following_count, friends_count, is_person, profile_pic_url, external_url,
-                   collected_at, updated_at, metadata)
-                VALUES (gen_random_uuid(),$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now(),now(),$11::jsonb)
-                ON CONFLICT (platform_user_id) DO UPDATE SET
-                   username=COALESCE(NULLIF(EXCLUDED.username, ''), facebook_profiles.username),
-                   display_name=COALESCE(EXCLUDED.display_name, facebook_profiles.display_name),
-                   bio=COALESCE(EXCLUDED.bio, facebook_profiles.bio),
-                   followers_count=COALESCE(EXCLUDED.followers_count, facebook_profiles.followers_count),
-                   following_count=COALESCE(EXCLUDED.following_count, facebook_profiles.following_count),
-                   friends_count=COALESCE(EXCLUDED.friends_count, facebook_profiles.friends_count),
-                   is_person=COALESCE(EXCLUDED.is_person, facebook_profiles.is_person),
-                   profile_pic_url=COALESCE(EXCLUDED.profile_pic_url, facebook_profiles.profile_pic_url),
-                   external_url=COALESCE(EXCLUDED.external_url, facebook_profiles.external_url),
-                   metadata=facebook_profiles.metadata || EXCLUDED.metadata,
-                   updated_at=now()
-                """,
-                pid, uname, p.get("display_name") or p.get("full_name"), p.get("bio"),
-                _int(p.get("followers_count")), _int(p.get("following_count")), _int(p.get("friends_count")),
-                bool(p.get("is_person")) if p.get("is_person") is not None else None,
-                pic, p.get("external_url"), json.dumps(p.get("metadata") or {}),
-            )
-        await _record_users(pool, platform, [{"user_id": pid, "username": uname,
-                                              "display_name": p.get("display_name") or p.get("full_name"),
-                                              "profile_pic_url": pic}], "profile")
-        await _record_profile_capability_receipts(pool, platform)
-        return True
-    # Tier 4 change-history: snapshot the row BEFORE the upsert so we can diff
-    # old -> new and log bio/username/follower/etc. changes. Best-effort.
-    prev_row = None
-    if UserChangeTracker is not None:
-        try:
-            async with pool.acquire() as conn:
-                prev_row = await conn.fetchrow(
-                    "SELECT username, full_name, bio, followers_count, following_count, "
-                    "posts_count, is_verified, is_private, profile_pic_url, external_url "
-                    "FROM instagram_profiles WHERE platform_user_id = $1",
-                    str(p.get("user_id") or uname),
-                )
-        except Exception:
-            logger.debug("ig change-tracker prev-row fetch failed for %s", uname, exc_info=True)
-    try:
-        async with pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO instagram_profiles
-                  (id, platform_user_id, username, full_name, bio, followers_count,
-                   following_count, posts_count, is_verified, is_private, profile_pic_url,
-                   external_url, collected_at, updated_at)
-                VALUES (gen_random_uuid(),$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now(),now())
-                ON CONFLICT (platform_user_id) DO UPDATE SET
-                   username=EXCLUDED.username, full_name=EXCLUDED.full_name, bio=EXCLUDED.bio,
-                   followers_count=EXCLUDED.followers_count, following_count=EXCLUDED.following_count,
-                   posts_count=EXCLUDED.posts_count, is_verified=EXCLUDED.is_verified,
-                   is_private=EXCLUDED.is_private, profile_pic_url=COALESCE(EXCLUDED.profile_pic_url, instagram_profiles.profile_pic_url),
-                   external_url=EXCLUDED.external_url, updated_at=now()
-                """,
-                str(p.get("user_id") or uname), uname, p.get("full_name"), p.get("bio"),
-                _int(p.get("followers_count")), _int(p.get("following_count")), _int(p.get("posts_count")),
-                bool(p.get("is_verified")), bool(p.get("is_private")), pic, p.get("external_url"),
-            )
-    except Exception:
-        logger.debug("save profile failed %s", uname, exc_info=True)
-    await _track_ig_profile_change(pool, p, uname, prev_row)
-    await _record_users(pool, platform, [{"user_id": p.get("user_id"), "username": uname,
-                                          "display_name": p.get("full_name"), "profile_pic_url": pic}], "profile")
-    return True
-
-
-async def _record_profile_capability_receipts(pool, platform: str) -> None:
-    """Make browser profile fields usable only after their own row readback."""
-    if platform not in {"x", "facebook", "tiktok", "snapchat"}:
-        return
-    try:
-        from src.core.capability_receipts import record_profile_field_receipts
-        async with pool.acquire() as conn:
-            await record_profile_field_receipts(conn, platform)
-    except Exception:
-        logger.debug("profile capability receipt failed for %s", platform, exc_info=True)
-
-
-async def _track_ig_profile_change(pool, p, uname, prev_row) -> None:
-    """Diff the prior instagram_profiles row against the incoming extension
-    payload and log field changes into instagram_user_changes (Tier 4). Maps the
-    extension's field names onto INSTAGRAM_TRACKED_FIELDS. Best-effort — never
-    breaks ingest."""
-    if UserChangeTracker is None or INSTAGRAM_TRACKED_FIELDS is None:
-        return
-    try:
-        pk_val = int(p.get("user_id") or 0)
-    except (TypeError, ValueError):
-        pk_val = 0
-    if not pk_val:
-        return
-    try:
-        current_normalized = None
-        if prev_row is not None:
-            pr = dict(prev_row)
-            current_normalized = {
-                "username": pr.get("username"), "full_name": pr.get("full_name"),
-                "biography": pr.get("bio"), "is_verified": pr.get("is_verified"),
-                "is_private": pr.get("is_private"), "profile_pic_url": pr.get("profile_pic_url"),
-                "follower_count": pr.get("followers_count"),
-                "following_count": pr.get("following_count"),
-                "post_count": pr.get("posts_count"), "external_url": pr.get("external_url"),
-            }
-        new_snapshot = {
-            "username": p.get("username"), "full_name": p.get("full_name"),
-            "biography": p.get("bio"), "is_verified": bool(p.get("is_verified")),
-            "is_private": bool(p.get("is_private")), "profile_pic_url": p.get("profile_pic_url"),
-            "follower_count": _int(p.get("followers_count")),
-            "following_count": _int(p.get("following_count")),
-            "post_count": _int(p.get("posts_count")), "external_url": p.get("external_url"),
-        }
-        await UserChangeTracker(pool).detect_and_log(
-            table="instagram_user_changes", pk_col="user_id", pk_val=pk_val,
-            current_row=current_normalized, new_row=new_snapshot,
-            fields=INSTAGRAM_TRACKED_FIELDS,
-        )
-    except Exception:
-        logger.debug("ig change-tracker detect_and_log failed for %s", uname, exc_info=True)
-
-
-async def _record_ig_access(pool, target_username, owner, profile) -> None:
-    """Record that ``owner`` (the extension's logged-in IG account) could see
-    ``target_username`` into profile_access_{summary,attempts} — the follow-aware
-    selector (Phase 0). Because the extension is the live IG path (the headless
-    collector is 429'd), this is where the routing data actually accumulates.
-
-    A successful profile ingest means the owner CAN access the target. A private
-    profile that still yielded data implies the owner FOLLOWS it (private data is
-    only visible to followers). Best-effort — never breaks ingest.
-    """
-    if ProfileAccessRepository is None or not pool or not target_username:
-        return
-    account = None
-    if isinstance(owner, dict):
-        account = (owner.get("username") or owner.get("id") or "") or None
-    elif isinstance(owner, str):
-        account = owner.strip() or None
-    # Fallback label when the extension didn't send which account it used: still
-    # records the public/private signal, but won't match a routable cookie
-    # account (so it can't mis-route — routing only trusts real account names).
-    if not account:
-        account = "ig_extension"
-    _priv = profile.get("is_private")
-    is_private = bool(_priv) if _priv is not None else None
-    _fbv = profile.get("followed_by_viewer")
-    is_followed = bool(_fbv) if _fbv is not None else bool(is_private)
-    try:
-        repo = ProfileAccessRepository(pool)
-        await repo.record_attempt(
-            source="instagram",
-            target_id=str(target_username).lstrip("@"),
-            account=str(account),
-            can_access=True,
-            is_public=(None if is_private is None else (not is_private)),
-            is_followed=is_followed,
-        )
-    except Exception:
-        logger.debug("ig access-record failed for %s", target_username, exc_info=True)
-
-
-def _browser_capture_subject(endpoint: str, body: dict) -> str:
-    if endpoint == "profile":
-        profile = body.get("profile") if isinstance(body.get("profile"), dict) else {}
-        return str(
-            profile.get("username")
-            or profile.get("user_id")
-            or profile.get("platform_user_id")
-            or "profile"
-        ).lstrip("@")
-    if endpoint == "posts":
-        posts = body.get("posts") if isinstance(body.get("posts"), list) else []
-        first = posts[0] if posts and isinstance(posts[0], dict) else {}
-        return str(first.get("platform_post_id") or first.get("content_id") or f"{len(posts)}_posts")
-    if endpoint == "comments":
-        return str(body.get("post_id") or "comments")
-    if endpoint == "strava_streams":
-        return str(body.get("activity_id") or body.get("platform_activity_id") or "strava_streams")
-    return endpoint
-
-
-async def _archive_browser_capture(pool, platform: str, endpoint: str, body: dict) -> None:
-    """Best-effort vault raw archive for extension/browser evidence.
-
-    Do not call this for credential endpoints. Cookies stay in credential files,
-    never in raw payloads or sidecars.
-    """
-    if endpoint == "cookies":
-        return
-    if not isinstance(body, dict):
-        return
-    source = _norm_platform(platform)
-    if source not in KNOWN_PLATFORMS:
-        return
-    subject = _SAFE.sub("_", _browser_capture_subject(endpoint, body))[:96] or endpoint
-    artifact_id = f"extension/{endpoint}/{subject}/{time.time_ns()}"
-    owner = body.get("owner")
-    if isinstance(owner, dict):
-        collection_account = owner.get("username") or owner.get("id")
-    else:
-        collection_account = owner if isinstance(owner, str) else None
-    metadata = {
-        "ingest_path": "extension",
-        "endpoint": endpoint,
-        "platform": source,
-        "collection_account": collection_account,
-        "extension_version": body.get("extension_version"),
-        "request_url": body.get("request_url") or body.get("url"),
-        "http_status": body.get("http_status"),
-        "body_keys": sorted(str(k) for k in body.keys()),
-    }
-    target_tables = _BROWSER_CAPTURE_TARGET_TABLES.get(endpoint, {}).get(source, [])
-    result = write_raw_payload(
-        source=source,
-        artifact_id=artifact_id,
-        payload=body,
-        metadata=metadata,
-        target_tables=target_tables,
-        extension="json.gz" if endpoint in _BROWSER_CAPTURE_COMPRESSED_ENDPOINTS else "json",
-    )
-    if result.ok:
-        try:
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    """
-                    DELETE FROM dead_letter_queue
-                    WHERE source = $1
-                      AND entity_id = $2
-                      AND status IN ('pending', 'in_progress')
-                      AND error_message LIKE 'browser raw archive failed:%'
-                    """,
-                    source,
-                    subject,
-                )
-        except Exception:
-            logger.debug(
-                "browser raw archive stale-DLQ cleanup failed platform=%s endpoint=%s subject=%s",
-                source,
-                endpoint,
-                subject,
-                exc_info=True,
-            )
-        return
-    logger.warning(
-        "browser raw archive failed platform=%s endpoint=%s artifact=%s: %s",
-        source,
-        endpoint,
-        artifact_id,
-        result.error,
-    )
-    try:
-        async with pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO dead_letter_queue (source, entity_id, content_id, error_message)
-                VALUES ($1, $2, $3, $4)
-                """,
-                source,
-                subject,
-                artifact_id,
-                f"browser raw archive failed: {result.error}"[:500],
-            )
-    except Exception:
-        logger.debug(
-            "browser raw archive DLQ insert failed platform=%s endpoint=%s",
-            source,
-            endpoint,
-            exc_info=True,
-        )
-
-
-def _stream_values(container, key: str) -> list:
-    """Extract a Strava stream array from web or API-shaped payloads."""
-    if not container:
-        return []
-    if isinstance(container, dict):
-        raw = container.get(key)
-        if isinstance(raw, list):
-            return raw
-        if isinstance(raw, dict) and isinstance(raw.get("data"), list):
-            return raw["data"]
-    if isinstance(container, list):
-        for item in container:
-            if not isinstance(item, dict):
-                continue
-            if item.get("type") == key or item.get("name") == key or item.get("key") == key:
-                data = item.get("data")
-                return data if isinstance(data, list) else []
-    return []
-
-
-def _json_array_or_none(value: list | None) -> str | None:
-    return json.dumps(value) if isinstance(value, list) and value else None
-
-
-async def _upsert_strava_browser_stream(pool, body: dict) -> dict:
-    """Persist a Strava route stream observed by the browser extension."""
-    if not pool:
-        return {"stored": 0, "point_count": 0, "reason": "no_pool"}
-    raw_activity_id = body.get("activity_id") or body.get("platform_activity_id")
-    try:
-        activity_id = int(raw_activity_id)
-    except (TypeError, ValueError):
-        return {"stored": 0, "point_count": 0, "reason": "bad_activity_id"}
-
-    streams = body.get("streams") if isinstance(body.get("streams"), (dict, list)) else body
-    latlng = _stream_values(streams, "latlng")
-    point_count = len(latlng) if isinstance(latlng, list) else 0
-    if point_count < 2:
-        if _browser_http_status(body) == 200:
-            return await _record_empty_strava_browser_stream(pool, activity_id, body, point_count)
-        return {"stored": 0, "point_count": point_count, "reason": "no_route_points"}
-
-    async with pool.acquire() as conn:
-        await conn.execute(
-            """
-            INSERT INTO strava_activities (platform_activity_id, metadata, collected_at)
-            VALUES (
-                $1,
-                jsonb_build_object(
-                    'browser_stream_stub', TRUE,
-                    'browser_stream_first_seen_at', now(),
-                    'browser_stream_request_url', $2::text
-                ),
-                now()
-            )
-            ON CONFLICT (platform_activity_id) DO NOTHING
-            """,
-            activity_id,
-            body.get("request_url") or body.get("url"),
-        )
-        act_row = await conn.fetchrow(
-            """
-            SELECT id, start_latlng, end_latlng
-            FROM strava_activities
-            WHERE platform_activity_id = $1
-            """,
-            activity_id,
-        )
-        if not act_row:
-            return {"stored": 0, "point_count": point_count, "reason": "activity_missing"}
-
-        await conn.execute(
-            """
-            INSERT INTO strava_gps_streams (
-                activity_id, latlng, altitude, distance, time, heartrate,
-                cadence, watts, speed, grade_smooth, collected_at
-            )
-            VALUES (
-                $1, $2::jsonb, $3::jsonb, $4::jsonb, $5::jsonb, $6::jsonb,
-                $7::jsonb, $8::jsonb, $9::jsonb, $10::jsonb, now()
-            )
-            ON CONFLICT (activity_id) DO UPDATE SET
-                latlng = EXCLUDED.latlng,
-                altitude = COALESCE(EXCLUDED.altitude, strava_gps_streams.altitude),
-                distance = COALESCE(EXCLUDED.distance, strava_gps_streams.distance),
-                time = COALESCE(EXCLUDED.time, strava_gps_streams.time),
-                heartrate = COALESCE(EXCLUDED.heartrate, strava_gps_streams.heartrate),
-                cadence = COALESCE(EXCLUDED.cadence, strava_gps_streams.cadence),
-                watts = COALESCE(EXCLUDED.watts, strava_gps_streams.watts),
-                speed = COALESCE(EXCLUDED.speed, strava_gps_streams.speed),
-                grade_smooth = COALESCE(EXCLUDED.grade_smooth, strava_gps_streams.grade_smooth),
-                collected_at = now()
-            """,
-            act_row["id"],
-            json.dumps(latlng),
-            _json_array_or_none(_stream_values(streams, "altitude")),
-            _json_array_or_none(_stream_values(streams, "distance")),
-            _json_array_or_none(_stream_values(streams, "time")),
-            _json_array_or_none(_stream_values(streams, "heartrate")),
-            _json_array_or_none(_stream_values(streams, "cadence")),
-            _json_array_or_none(_stream_values(streams, "watts")),
-            _json_array_or_none(_stream_values(streams, "speed")),
-            _json_array_or_none(_stream_values(streams, "grade_smooth")),
-        )
-
-        fields = _derive_gps_route_fields(
-            act_row["start_latlng"],
-            act_row["end_latlng"],
-            latlng,
-        )
-        await conn.execute(
-            """
-            UPDATE strava_activities
-            SET start_latlng = COALESCE(start_latlng, $1),
-                end_latlng = COALESCE(end_latlng, $2),
-                stream_status = 'ok',
-                privacy_zone_start = $3,
-                privacy_zone_end = $4,
-                truncation_point_start = COALESCE(truncation_point_start, $5),
-                truncation_point_end = COALESCE(truncation_point_end, $6),
-                summary_polyline = COALESCE(NULLIF(summary_polyline, ''), $7),
-                metadata = (COALESCE(metadata, '{}'::jsonb)
-                    - 'browser_stream_empty_count'
-                    - 'browser_stream_empty_at'
-                    - 'browser_stream_empty_defer_until') || jsonb_build_object(
-                    'browser_stream_last_seen_at', now(),
-                    'browser_stream_extension_version', $8::text,
-                    'browser_stream_request_url', $9::text,
-                    'browser_stream_point_count', $10::int
-                ),
-                collected_at = COALESCE(collected_at, now())
-            WHERE id = $11
-            """,
-            fields["start_latlng"],
-            fields["end_latlng"],
-            fields["privacy_zone_start"],
-            fields["privacy_zone_end"],
-            fields["truncation_point_start"],
-            fields["truncation_point_end"],
-            fields["summary_polyline"] or None,
-            body.get("extension_version"),
-            body.get("request_url") or body.get("url"),
-            point_count,
-            act_row["id"],
-        )
-    return {"stored": 1, "point_count": point_count, "activity_id": activity_id}
-
-
-async def _record_empty_strava_browser_stream(pool, activity_id: int, body: dict, point_count: int) -> dict:
-    """Defer one empty browser stream, then stop retrying documented empties."""
-    async with pool.acquire() as conn:
-        await conn.execute(
-            """
-            INSERT INTO strava_activities (platform_activity_id, metadata, collected_at)
-            VALUES ($1, jsonb_build_object('browser_stream_stub', TRUE), now())
-            ON CONFLICT (platform_activity_id) DO NOTHING
-            """,
-            activity_id,
-        )
-        row = await conn.fetchrow(
-            """
-            UPDATE strava_activities
-            SET stream_status = CASE
-                    WHEN COALESCE(NULLIF(metadata->>'browser_stream_empty_count', '')::int, 0) + 1 >= 2
-                    THEN 'truncated_empty'
-                    ELSE stream_status
-                END,
-                metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
-                    'browser_stream_empty_count', COALESCE(NULLIF(metadata->>'browser_stream_empty_count', '')::int, 0) + 1,
-                    'browser_stream_empty_at', now(),
-                    'browser_stream_empty_defer_until', CASE
-                        WHEN COALESCE(NULLIF(metadata->>'browser_stream_empty_count', '')::int, 0) + 1 >= 2 THEN NULL
-                        ELSE now() + interval '24 hours'
-                    END,
-                    'browser_stream_request_url', $2::text,
-                    'browser_stream_http_status', 200
-                ),
-                collected_at = COALESCE(collected_at, now())
-            WHERE platform_activity_id = $1
-            RETURNING COALESCE(NULLIF(metadata->>'browser_stream_empty_count', '')::int, 0) AS empty_count,
-                      stream_status
-            """,
-            activity_id,
-            body.get("request_url") or body.get("url"),
-        )
-    empty_count = int(row["empty_count"] or 0) if row else 0
-    terminal = bool(row and row["stream_status"] == "truncated_empty")
-    return {
-        "stored": 0,
-        "point_count": point_count,
-        "activity_id": activity_id,
-        "reason": "truncated_empty" if terminal else "empty_stream_deferred",
-        "empty_count": empty_count,
-    }
-
-
-def _browser_http_status(body: dict) -> int | None:
-    for key in ("http_status", "status_code"):
-        try:
-            value = body.get(key)
-            if value is not None:
-                return int(value)
-        except (TypeError, ValueError):
-            continue
-    return None
-
-
-def _browser_account_label(body: dict, *, fallback: str = "extension") -> str:
-    owner = body.get("owner") or body.get("owner_account") or body.get("account")
-    if isinstance(owner, dict):
-        owner = owner.get("username") or owner.get("id")
-    text = str(owner or fallback).strip() or fallback
-    return text[:128]
-
-
-async def _record_strava_stream_http_event(pool, body: dict) -> bool:
-    status = _browser_http_status(body)
-    if status not in {401, 403, 429}:
-        return False
-    activity_id = str(body.get("activity_id") or body.get("platform_activity_id") or "unknown")
-    account = _browser_account_label(body)
-    if await _touch_recent_strava_stream_http_event(pool, account, activity_id, status, body):
-        return False
-    cooldown = None
-    dynamic_metadata = {}
-    if status == 429:
-        state = await record_dynamic_cooldown(
-            pool,
-            source="strava",
-            scope="gps_streams",
-            account=account,
-            base_seconds=STRAVA_BROWSER_429_COOLDOWN_SECONDS,
-            max_seconds=STRAVA_BROWSER_429_MAX_COOLDOWN_SECONDS,
-            memory_seconds=STRAVA_BROWSER_429_MEMORY_SECONDS,
-            write_source_cursor=True,
-        )
-        cooldown = state.seconds_remaining
-        dynamic_metadata = {
-            "dynamic_cooldown_service": state.service,
-            "dynamic_cooldown_streak": state.streak,
-        }
-    await record_rate_limit_event(
-        pool,
-        source="strava",
-        account=account,
-        scope="browser_strava_streams",
-        status_code=status,
-        cooldown_seconds=cooldown,
-        reason=f"browser Strava stream HTTP {status} for {activity_id}",
-        metadata={
-            "activity_id": activity_id,
-            "request_url": body.get("request_url") or body.get("url"),
-            "extension_version": body.get("extension_version"),
-            "point_count": body.get("point_count"),
-            "browser_capture": True,
-            **dynamic_metadata,
-        },
-    )
-    return True
-
-
-async def _touch_recent_strava_stream_http_event(
-    pool,
-    account: str,
-    activity_id: str,
-    status: int,
-    body: dict,
-) -> bool:
-    """Fold duplicate browser stream HTTP failures into the newest recent row."""
-    try:
-        async with pool.acquire() as conn:
-            return bool(await conn.fetchval(
-                """
-                WITH latest AS (
-                    SELECT id
-                    FROM rate_limit_events
-                    WHERE source = 'strava'
-                      AND account IS NOT DISTINCT FROM $1
-                      AND scope = 'browser_strava_streams'
-                      AND status_code = $3
-                      AND metadata->>'activity_id' = $2
-                      AND created_at >= now() - interval '6 hours'
-                    ORDER BY created_at DESC
-                    LIMIT 1
-                )
-                UPDATE rate_limit_events r
-                SET metadata = r.metadata || jsonb_build_object(
-                    'duplicate_suppressed_count',
-                    COALESCE((r.metadata->>'duplicate_suppressed_count')::int, 0) + 1,
-                    'duplicate_last_seen_at',
-                    now(),
-                    'latest_request_url',
-                    $4::text,
-                    'latest_extension_version',
-                    $5::text,
-                    'latest_point_count',
-                    $6::int
-                )
-                FROM latest
-                WHERE r.id = latest.id
-                RETURNING 1
-                """,
-                account,
-                activity_id,
-                status,
-                body.get("request_url") or body.get("url"),
-                body.get("extension_version"),
-                body.get("point_count"),
-            ))
-    except Exception:
-        logger.debug(
-            "recent Strava stream HTTP event touch failed account=%s activity=%s status=%s",
-            account,
-            activity_id,
-            status,
-            exc_info=True,
-        )
-        return False
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 # strava_streams_handler moved to .strava per split step 8.
 
 
-def _strava_stream_response_status(result: dict, *, http_event_recorded: bool = False) -> int:
-    """Return HTTP status for an accepted browser route-stream observation."""
-    if result.get("stored") or http_event_recorded:
-        return 200
-    reason = result.get("reason")
-    if reason == "no_route_points":
-        return 200
-    if reason == "bad_activity_id":
-        return 400
-    if reason == "no_pool":
-        return 503
-    return 422
 
 
 # strava_route_queue_handler moved to .strava per split step 8.
 
 
-async def _browser_content_recovery_hint(pool, platform: str) -> dict:
-    if (
-        not pool
-        or not platform
-        or platform == "bridge"
-        or platform in BROWSER_HEARTBEAT_ONLY_PLATFORMS
-    ):
-        return {}
-    now = time.monotonic()
-    cached = _BROWSER_CONTENT_HINT_CACHE.get(platform)
-    if cached and now - cached[0] < BROWSER_CONTENT_HINT_TTL_SECONDS:
-        return dict(cached[1])
-    if platform in _BROWSER_CONTENT_HINT_INFLIGHT:
-        return {"force_cycle": False, "force_reason": "content_age_check_pending"}
-    _BROWSER_CONTENT_HINT_INFLIGHT.add(platform)
-    try:
-        async with asyncio.timeout(1.0):
-            async with pool.acquire() as conn:
-                row = await conn.fetchrow(
-                    """
-                    SELECT EXTRACT(EPOCH FROM (NOW() - created_at))::int AS age_seconds
-                    FROM browser_ingest_events
-                    WHERE platform = $1
-                      AND endpoint <> 'browser_heartbeat'
-                      AND (
-                        observed_count > 0
-                        OR stored_count > 0
-                        OR (
-                          metadata ? 'probe_reason'
-                          AND COALESCE(metadata->>'probe_reason', '')
-                              NOT IN ('manual_backend_probe', 'forced_recovery_started', 'recoverable_error_shell')
-                          AND NOT (
-                            $1 = 'x'
-                            AND observed_count <= 0
-                            AND stored_count <= 0
-                            AND COALESCE(metadata->>'probe_reason', '') = ANY($2::text[])
-                          )
-                        )
-                      )
-                      AND (
-                        stored_count > 0
-                        OR endpoint IN ('posts', 'profile', 'strava_route_visit', 'strava_streams')
-                        OR (
-                          metadata ? 'probe_reason'
-                          AND COALESCE(metadata->>'probe_reason', '')
-                              NOT IN ('manual_backend_probe', 'forced_recovery_started', 'recoverable_error_shell')
-                          AND NOT (
-                            $1 = 'x'
-                            AND observed_count <= 0
-                            AND stored_count <= 0
-                            AND COALESCE(metadata->>'probe_reason', '') = ANY($2::text[])
-                          )
-                        )
-                      )
-                    ORDER BY created_at DESC
-                    LIMIT 1
-                    """,
-                    platform,
-                    sorted(X_ZERO_PROGRESS_PROBES),
-                )
-        age = row["age_seconds"] if row else None
-        if age is None or int(age) > BROWSER_CONTENT_STALE_SECONDS:
-            hint = {
-                "force_cycle": True,
-                "force_reason": "browser_content_stale",
-                "content_age_seconds": int(age) if age is not None else None,
-                "stale_after_seconds": BROWSER_CONTENT_STALE_SECONDS,
-            }
-            _BROWSER_CONTENT_HINT_CACHE[platform] = (now, hint)
-            return dict(hint)
-        _BROWSER_CONTENT_HINT_CACHE[platform] = (now, {})
-    except TimeoutError:
-        return _browser_content_timeout_hint(platform, "content_age_check_timeout")
-    except Exception:
-        logger.debug("browser content recovery hint failed platform=%s", platform, exc_info=True)
-    finally:
-        _BROWSER_CONTENT_HINT_INFLIGHT.discard(platform)
-    return {}
 
 
-def _browser_content_timeout_hint(platform: str, reason: str) -> dict:
-    if platform in _BROWSER_CONTENT_HINT_FAIL_ACTIVE_PLATFORMS:
-        return {
-            "force_cycle": True,
-            "force_reason": reason,
-            "content_age_seconds": None,
-            "stale_after_seconds": BROWSER_CONTENT_STALE_SECONDS,
-        }
-    return {"force_cycle": False, "force_reason": reason}
 
 
 def _normalize_extension_version(value) -> str:
@@ -4031,189 +769,14 @@ def _extension_reload_hint(extension_version) -> dict:
 # browser_heartbeat_handler moved to .cookies / .telemetry per split step 9.
 
 
-async def _legacy_seed_handler(request):
-    """Seed the spider from the user's own followers/following as hop-0 targets."""
-    body = await _safe_json(request)
-    platform = _norm_platform(body.get("platform"))
-    raw_users = body.get("users") or []
-    users = [u for u in raw_users if not _explicitly_verified_capture(u)] if isinstance(raw_users, list) else []
-    added = 0
-    if platform == "instagram":
-        pool = request.app["pool"]
-        async with pool.acquire() as conn:
-            for u in users:
-                uname = (u.get("username") if isinstance(u, dict) else str(u) or "").strip().lstrip("@")
-                if not uname:
-                    continue
-                res = await conn.execute(
-                    """
-                    INSERT INTO instagram_spider_targets (username, hop, discovered_from)
-                    VALUES ($1, 0, 'self') ON CONFLICT (username) DO NOTHING
-                    """,
-                    uname,
-                )
-                if res.endswith("1"):
-                    added += 1
-        await _record_users(request.app["pool"], platform, users, "follow")
-    return _cors(web.json_response({"added": added}))
 
 
-async def _legacy_profile_handler(request):
-    body = await _safe_json(request)
-    platform = _norm_platform(body.get("platform"))
-    p = body.get("profile") or {}
-    if platform in _VERIFIED_FILTER_PLATFORMS and (
-        _explicitly_verified_capture(body) or _explicitly_verified_capture(p)
-    ):
-        return _cors(web.json_response({"ok": True, "excluded_verified": True}))
-    await _archive_browser_capture(request.app["pool"], platform, "profile", body)
-    saved = await _save_profile(request.app["pool"], platform, p)
-    await _record_browser_ingest_event(
-        request.app["pool"],
-        platform,
-        "profile",
-        (p.get("username") or body.get("username") or "").strip().lstrip("@") or None,
-        observed_count=1 if p else 0,
-        stored_count=1 if saved else 0,
-    )
-    # Follow-aware access recording (Phase 0): the extension just successfully
-    # fetched this profile with its logged-in account (body["owner"]) — so that
-    # account CAN see the target. Populates profile_access for the selector.
-    if platform == "instagram":
-        await _record_ig_access(
-            request.app["pool"], (p.get("username") or "").strip().lstrip("@"),
-            body.get("owner"), p,
-        )
-    # download the profile photo as a kind=profile media item
-    pic = p.get("profile_pic_url")
-    uname = (p.get("username") or "").strip().lstrip("@")
-    # Browser profile canaries only persist fields and receipts. Their images
-    # stay disabled until a provider-authorized qualified-media path exists.
-    if platform == "instagram" and saved and pic and uname:
-        await _ingest(request.app, platform, {"username": uname, "items": [
-            {"url": pic, "content_id": str(p.get("user_id") or uname), "content_type": "photo",
-             "kind": "profile", "entity_name": uname}]})
-    return _cors(web.json_response({"ok": True}))
 
 
-async def _legacy_posts_handler(request):
-    body = await _safe_json(request)
-    platform = _norm_platform(body.get("platform"))
-    raw_posts = body.get("posts") or []
-    if not isinstance(raw_posts, list):
-        raw_posts = []
-    if platform in _VERIFIED_FILTER_PLATFORMS and _explicitly_verified_capture(body):
-        return _cors(web.json_response({
-            "ok": True,
-            "queued": False,
-            "observed": len(raw_posts),
-            "excluded_verified": len(raw_posts),
-            "excluded_verified_target": True,
-            "saved": 0,
-        }))
-    posts = (
-        [post for post in raw_posts if not _explicitly_verified_capture(post)]
-        if platform in _VERIFIED_FILTER_PLATFORMS else raw_posts
-    )
-    body = {**body, "posts": posts}
-    _schedule_app_task(
-        request.app,
-        _posts_ingest_background(request.app, platform, body),
-        "browser_posts_ingest",
-    )
-    return _cors(web.json_response({
-        "ok": True,
-        "queued": True,
-        "observed": len(raw_posts),
-        "excluded_verified": len(raw_posts) - len(posts),
-        "saved": 0,
-    }))
 
 
-async def _posts_ingest_background(app, platform: str, body: dict) -> None:
-    if platform in _VERIFIED_FILTER_PLATFORMS and _explicitly_verified_capture(body):
-        return
-    posts = body.get("posts") or []
-    if not isinstance(posts, list):
-        posts = []
-    else:
-        if platform in _VERIFIED_FILTER_PLATFORMS:
-            posts = [post for post in posts if not _explicitly_verified_capture(post)]
-            body = {**body, "posts": posts}
-    sem = app.get("structured_sem")
-    if sem is None:
-        sem = asyncio.Semaphore(SOCIAL_INGEST_STRUCTURED_BACKGROUND_CONCURRENCY)
-        app["structured_sem"] = sem
-    surface = normalize_collection_surface(body.get("collection_surface") or body.get("surface"))
-    async with sem:
-        await _archive_browser_capture(app["pool"], platform, "posts", body)
-        n = await _save_posts(app["pool"], platform, posts, surface)
-        await _record_browser_ingest_event(
-            app["pool"],
-            platform,
-            "posts",
-            body.get("username") or body.get("owner"),
-            observed_count=len(posts),
-            stored_count=n,
-            collection_surface=surface,
-            failed_count=max(0, len(posts) - n),
-            outcome="partial" if n and n < len(posts) else "failed" if posts and not n else "success" if n else "empty",
-            error_class="post_row_not_saved" if n < len(posts) else None,
-        )
-        # post authors (threads/facebook carry author_username) count as seen users
-        authors = [
-            {
-                "username": p.get("author_username"),
-                "source_record_id": p.get("platform_post_id") or p.get("post_id") or p.get("id"),
-            }
-            for p in posts
-            if isinstance(p, dict) and p.get("author_username")
-        ]
-        await _record_users(app["pool"], platform, authors, "author")
 
 
-async def _legacy_comments_handler(request):
-    body = await _safe_json(request)
-    platform = _norm_platform(body.get("platform"))
-    raw_comments = body.get("comments") or []
-    comments = raw_comments if isinstance(raw_comments, list) else []
-    if platform in _VERIFIED_FILTER_PLATFORMS and _explicitly_verified_capture(body):
-        return _cors(web.json_response({
-            "ok": True,
-            "observed": len(comments),
-            "saved": 0,
-            "excluded_verified": len(comments),
-            "excluded_verified_target": True,
-        }))
-    if platform in _VERIFIED_FILTER_PLATFORMS:
-        comments = [comment for comment in comments if not _explicitly_verified_capture(comment)]
-    body = {**body, "comments": comments}
-    await _archive_browser_capture(request.app["pool"], platform, "comments", body)
-    n = await _save_comments(request.app["pool"], platform, body.get("post_id"), comments)
-    await _record_browser_ingest_event(
-        request.app["pool"],
-        platform,
-        "comments",
-        body.get("post_id"),
-        observed_count=len(comments),
-        stored_count=n,
-        collection_surface=normalize_collection_surface(body.get("collection_surface")),
-        failed_count=max(0, len(comments) - n),
-        outcome="partial" if n and n < len(comments) else "failed" if comments and not n else "success" if n else "empty",
-        error_class="comment_row_not_saved" if n < len(comments) else None,
-    )
-    # every commenter is a user we've seen
-    authors = [
-        {
-            "username": c.get("author_username"),
-            "user_id": c.get("author_platform_id"),
-            "source_record_id": c.get("comment_id") or c.get("id"),
-        }
-        for c in comments
-        if c.get("author_username") or c.get("author_platform_id")
-    ]
-    await _record_users(request.app["pool"], platform, authors, "comment")
-    return _cors(web.json_response({"saved": n}))
 
 
 # ingest moved to .ingest per split step 5.
@@ -4222,15 +785,6 @@ async def _legacy_comments_handler(request):
 # sw_crash_handler moved to .cookies / .telemetry per split step 9.
 
 
-async def _safe_json(request):
-    if request.get("_json_cache") is not None:
-        return request["_json_cache"]
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    request["_json_cache"] = body
-    return body
 
 
 async def health(request):
