@@ -91,6 +91,16 @@ async def rotate_browser_schedules(
     active_set = set(active)
     paused = [s for s in sources if s not in active_set]
 
+    # The control plane may predate a newly-added browser source.  Seed a
+    # disabled row first so absent sources cannot fail open in scrape-config.
+    if sources:
+        await conn.execute(
+            "INSERT INTO collection_schedules (source, interval_hours, enabled, next_run) "
+            "SELECT source, 24, false, $2 FROM unnest($1::text[]) AS source "
+            "ON CONFLICT (source) DO NOTHING",
+            sources,
+            now,
+        )
     if active:
         await conn.execute(
             "UPDATE collection_schedules SET enabled = true, next_run = $2 "

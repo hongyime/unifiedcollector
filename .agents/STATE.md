@@ -1,6 +1,6 @@
 # Intimate network filter rollout (2026-11-24)
 
-- Implemented and live-applied the requested scraper filters, six-tab residency configuration, rotator/pacing settings, and static regressions. Phase 1 verified zero corporate/malformed targets and zero capped YouTube media/videos; 477 capped channels are marked `subscriber_cap`. The extension/dashboard/scheduler/YouTube services were restarted. Focused dashboard/core/extension tests pass; preserve the two user-owned YouTube sidecar edits and untracked live-matrix HTML.
+- Implemented and live-applied the requested scraper filters, six-tab residency configuration, rotator/pacing settings, and static regressions. Phase 1 verified zero corporate/malformed targets and zero capped YouTube media/videos; 477 capped channels are marked `subscriber_cap`. The extension/dashboard/scheduler/YouTube services were restarted. The rotator now seeds missing rotation-source schedule rows disabled before selecting the active pair, preventing the scrape-config fail-open path from exceeding the six-tab budget. Focused dashboard/core/extension tests pass; preserve the two user-owned YouTube sidecar edits and untracked live-matrix HTML.
 
 # Live extension recovery and polish-repo completion (2026-11-23)
 

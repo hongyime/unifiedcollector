@@ -45,11 +45,14 @@ async def test_rotate_activates_slot_and_pauses_rest():
 
     assert res["active"] == ["instagram", "x"]
     assert res["paused"] == ["facebook", "threads"]
-    # First execute enables the active pair, second disables the rest.
-    assert "enabled = true" in calls[0][0]
-    assert set(calls[0][1][0]) == {"x", "instagram"}
-    assert "enabled = false" in calls[1][0]
-    assert calls[1][1][0] == ["facebook", "threads"]
+    # First execute seeds missing rows, then enables the active pair and
+    # disables the rest.
+    assert "ON CONFLICT (source) DO NOTHING" in calls[0][0]
+    assert set(calls[0][1][0]) == set(sources)
+    assert "enabled = true" in calls[1][0]
+    assert set(calls[1][1][0]) == {"x", "instagram"}
+    assert "enabled = false" in calls[2][0]
+    assert calls[2][1][0] == ["facebook", "threads"]
 
 
 @pytest.mark.asyncio
