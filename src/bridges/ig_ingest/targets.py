@@ -155,27 +155,55 @@ async def _targets_for(pool, platform):
         if _refresh_on_request:
             await _refresh_target_side_caches(pool)
         async with pool.acquire() as conn:
-            seeds = await conn.fetch(
-                """
-                SELECT ct.target_id, ct.priority
-                FROM collection_targets ct
-                WHERE ct.source = $1
-                ORDER BY
-                    ct.priority DESC,
-                    ct.created_at ASC
-                """,
-                platform,
-            )
-            for r in seeds:
-                u = r["target_id"]
-                if u and u not in seen:
-                    seen.add(u)
-                    out.append({"username": u, "hop": 0})
+            if platform == "instagram":
+                seeds = await conn.fetch(
+                    """
+                    SELECT ct.target_id, ct.priority, ct.metadata, ip.is_private
+                    FROM collection_targets ct
+                    LEFT JOIN instagram_profiles ip ON lower(ct.target_id) = lower(ip.username)
+                    WHERE ct.source = $1
+                    ORDER BY
+                        ct.priority DESC,
+                        ct.created_at ASC
+                    """,
+                    platform,
+                )
+                for r in seeds:
+                    u = r["target_id"]
+                    if u and u not in seen:
+                        seen.add(u)
+                        is_priv = bool(r["is_private"]) if r["is_private"] is not None else (
+                            bool(r["metadata"].get("is_private")) if r.get("metadata") and isinstance(r["metadata"], dict) and "is_private" in r["metadata"] else False
+                        )
+                        out.append({
+                            "username": u,
+                            "hop": 0,
+                            "priority": int(r["priority"] or 0),
+                            "is_private": is_priv,
+                        })
+            else:
+                seeds = await conn.fetch(
+                    """
+                    SELECT ct.target_id, ct.priority
+                    FROM collection_targets ct
+                    WHERE ct.source = $1
+                    ORDER BY
+                        ct.priority DESC,
+                        ct.created_at ASC
+                    """,
+                    platform,
+                )
+                for r in seeds:
+                    u = r["target_id"]
+                    if u and u not in seen:
+                        seen.add(u)
+                        out.append({"username": u, "hop": 0, "priority": int(r["priority"] or 0)})
             if platform == "instagram":
                 spider = await conn.fetch(
                     """
-                    SELECT s.username, s.hop
+                    SELECT s.username, s.hop, ip.is_private
                     FROM instagram_spider_targets s
+                    LEFT JOIN instagram_profiles ip ON lower(s.username) = lower(ip.username)
                     WHERE s.status='active' AND s.hop <= $1
                     ORDER BY
                         s.hop ASC,
@@ -190,7 +218,11 @@ async def _targets_for(pool, platform):
                     u = r["username"]
                     if u and u not in seen:
                         seen.add(u)
-                        out.append({"username": u, "hop": int(r["hop"])})
+                        out.append({
+                            "username": u,
+                            "hop": int(r["hop"]),
+                            "is_private": bool(r["is_private"]) if r["is_private"] is not None else False,
+                        })
             elif platform == "threads":
                 # REVERSE cross-pollination: a Threads handle IS an Instagram handle,
                 # so the real people we know on Instagram (your follow graph + spider)

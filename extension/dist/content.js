@@ -4250,8 +4250,9 @@
       },
       async runCycle() {
         const entity = this.entity();
+        const isFeed = entity === "feed" || /^\/(home)?\/?$/.test(location.pathname);
         const person = this._isPerson();
-        if (!person) {
+        if (!person && !isFeed) {
           clog("info", "skip non-person Facebook surface " + entity, "facebook");
           await facebookReportPageHealth("healthy", "facebook_non_person_skipped", { entity, person: false });
           return { targets: 1, saved: 0, discovered: 0 };
