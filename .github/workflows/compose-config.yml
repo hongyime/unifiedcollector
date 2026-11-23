@@ -1,8 +1,8 @@
 name: Compose Config
 
 # Reject a broken production compose file before it reaches the host.
-# TELEGRAM_SPIDER_ACCOUNTS is the only required interpolation. CI has no
-# private .env, so the job supplies a placeholder and does not start containers.
+# CI has no private .env, so the job supplies non-secret placeholders for every
+# required Compose interpolation and does not start containers.
 
 on:
   pull_request:
@@ -39,5 +39,8 @@ jobs:
 
       - name: Validate production compose
         env:
+          BRIDGE_SHARED_SECRET: ci-placeholder
+          RABBITMQ_PASSWORD: ci-placeholder
+          REDIS_PASSWORD: ci-placeholder
           TELEGRAM_SPIDER_ACCOUNTS: ci-placeholder
         run: docker compose -f docker/docker-compose.yml config --quiet
