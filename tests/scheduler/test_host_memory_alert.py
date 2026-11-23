@@ -11,7 +11,6 @@ Three scenarios:
 """
 from __future__ import annotations
 
-import asyncio
 import time as _time
 from unittest.mock import AsyncMock, MagicMock, patch
 

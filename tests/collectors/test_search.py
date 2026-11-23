@@ -34,7 +34,6 @@ import httpx
 import pytest
 
 from src.collectors import search as search_mod
-from src.collectors.search.bucket_crawler import expand_dorks
 from src.collectors.search import SearchCollector
 
 

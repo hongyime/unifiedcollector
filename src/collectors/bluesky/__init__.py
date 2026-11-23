@@ -6,7 +6,6 @@ and queues the returned DID. This collector calls
 """
 from __future__ import annotations
 
-import json
 import logging
 import re
 from datetime import datetime, timezone

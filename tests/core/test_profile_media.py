@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import pytest
 
 from src.core.profile_media import (
     approved_profile_image_url,

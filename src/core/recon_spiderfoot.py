@@ -25,7 +25,6 @@ from src.core.recon_rollout import (
     AdmissionPolicyError,
     admission_snapshot,
     commit_claim,
-    halt_admission,
     load_policy,
     release_claim,
     reserve_claim,

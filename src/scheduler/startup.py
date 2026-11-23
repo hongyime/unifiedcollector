@@ -12,7 +12,6 @@ still work because the instance-method wrappers on the class remain.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 from typing import TYPE_CHECKING

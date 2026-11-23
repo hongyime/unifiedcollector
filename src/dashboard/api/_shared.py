@@ -20,7 +20,6 @@ import logging
 import os
 import re
 import time
-import uuid as _uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -29,8 +28,6 @@ from src.core.whatsapp_bridge_health import (
     fetch_whatsapp_bridge_health,
     summarize_whatsapp_bridge_health,
 )
-from src.core.vault import VAULT_ROOT
-from fastapi import HTTPException, Response
 from src.dashboard.api.helpers import (
     _BEEPER_SUBSOURCE_CONTENT_CACHE,
     _BEEPER_SUBSOURCE_CONTENT_TTL_SECONDS,

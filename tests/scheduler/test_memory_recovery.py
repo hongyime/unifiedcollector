@@ -7,7 +7,6 @@ import pytest
 
 from src.scheduler.handlers import memory_recovery
 from src.scheduler.handlers.memory_recovery import MemoryRecoveryHandler, _available_pct
-from src import control_executor
 
 
 class _DB:

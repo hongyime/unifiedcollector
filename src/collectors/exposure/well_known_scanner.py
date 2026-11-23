@@ -27,9 +27,6 @@ import json
 import logging
 import os
 import re
-import time
-from typing import Iterable, Optional
-from urllib.parse import urlparse
 from xml.etree import ElementTree as ET
 
 import httpx

@@ -1609,7 +1609,7 @@ class TelegramCollector(
                     "[spider w=%d] processing chat %s (%s) [attempt %d/%d]",
                     worker.worker_id, chat_id, title, claim_number, claim_budget,
                 )
-                written = await self._collect_chat(worker, chat_id)
+                await self._collect_chat(worker, chat_id)
                 partial = chat_id in self._history_windowed_chats
                 async with self.pool.acquire() as conn:
                     await conn.execute(

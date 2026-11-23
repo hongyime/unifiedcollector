@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from src.core import recon_seed
-from src.scheduler.handlers import recon_seed as recon_seed_handler
 from src.scheduler.handlers.recon_seed import ReconSeedHandler
 
 

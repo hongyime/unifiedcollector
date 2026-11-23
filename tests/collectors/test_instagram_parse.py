@@ -6,7 +6,6 @@ extracted (require a watched live login cycle).
 import os
 import tempfile
 import json
-from pathlib import Path
 
 from src.collectors.instagram import InstagramCollector
 
