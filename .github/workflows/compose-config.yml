@@ -41,7 +41,9 @@ jobs:
         env:
           BRIDGE_SHARED_SECRET: ci-placeholder
           CONTROL_EXECUTOR_SECRET: ci-placeholder
+          POSTGRES_PASSWORD: ci-placeholder
           RABBITMQ_PASSWORD: ci-placeholder
           REDIS_PASSWORD: ci-placeholder
           TELEGRAM_SPIDER_ACCOUNTS: ci-placeholder
+          WHATSAPP_MEDIA_BRIDGE_SECRET: ci-placeholder
         run: docker compose -f docker/docker-compose.yml config --quiet
