@@ -663,9 +663,9 @@
   var _mainWorldHookHostRe = /(^|\.)((instagram|tiktok|strava)\.com|threads\.com|x\.com|twitter\.com|facebook\.com)$/i;
   var SCRAPER_TABS_PINNED_KEY = "ucPinScraperTabs";
   var AUTO_SCRAPER_PLATFORM_IDS = /* @__PURE__ */ new Set(["instagram", "threads", "tiktok", "lemon8", "x", "facebook", "strava", "pinterest", "snapchat", "airbnb", "bluesky", "youtube"]);
-  var BROWSER_RESIDENT_TAB_LIMIT = 4;
+  var BROWSER_RESIDENT_TAB_LIMIT = 6;
   var BROWSER_RESIDENT_PLATFORM_IDS = ["x", "instagram", "facebook", "threads", "tiktok", "lemon8", "strava", "pinterest", "snapchat", "airbnb"];
-  var BROWSER_ROTATION_PLATFORM_IDS = ["x", "instagram", "facebook", "threads", "tiktok", "lemon8", "strava"];
+  var BROWSER_ROTATION_PLATFORM_IDS = ["lemon8", "threads", "pinterest", "snapchat", "airbnb", "x"];
   var BROWSER_RESIDENT_FALLBACK_IDS = ["x", "instagram"];
   var SCRAPER_TAB_FAILOVER_KEY = "ucScraperTabFailover";
   var SCRAPER_TAB_QUARANTINE_MS = 30 * 60 * 1e3;

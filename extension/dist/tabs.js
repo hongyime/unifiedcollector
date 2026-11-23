@@ -119,7 +119,7 @@
       });
     });
     const scrapers = platforms.filter((p) => p.scraper).map((p) => p.label).join(", ") || "none yet";
-    $("note").innerHTML = `<b>Scrapers available:</b> ${scrapers}. A listed scraper runs only while its matching tab is open; a platform with no tab is paused. Availability does not mean it is collecting right now. Session badges check only for a first-party session cookie; Bluesky may be session-unverified when it keeps login outside that store. Collection receipts are separate evidence. At most four scheduler-selected social tabs stay open.`;
+    $("note").innerHTML = `<b>Scrapers available:</b> ${scrapers}. A listed scraper runs only while its matching tab is open; a platform with no tab is paused. Availability does not mean it is collecting right now. Session badges check only for a first-party session cookie; Bluesky may be session-unverified when it keeps login outside that store. Collection receipts are separate evidence. Six resident social tabs stay open: four permanent and two rotating.`;
     maybeAutoProbe(backgroundError);
   }
   function renderDiagnostics(backgroundError) {

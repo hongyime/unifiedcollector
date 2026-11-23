@@ -29,13 +29,12 @@ from typing import Any
 # Browser-group collectors that share the one CDP Chrome. Order defines the
 # round-robin sequence.
 DEFAULT_BROWSER_SOURCES = [
-    "x",
-    "instagram",
-    "facebook",
-    "threads",
-    "tiktok",
     "lemon8",
-    "strava",
+    "threads",
+    "pinterest",
+    "snapchat",
+    "airbnb",
+    "x",
 ]
 
 

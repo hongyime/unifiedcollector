@@ -8,6 +8,10 @@ SOURCES = ["x", "instagram", "facebook", "threads", "tiktok", "lemon8", "strava"
 IV = 1800
 
 
+def test_default_sources_are_the_rotating_social_group():
+    assert br.DEFAULT_BROWSER_SOURCES == ["lemon8", "threads", "pinterest", "snapchat", "airbnb", "x"]
+
+
 def _at(slot):
     return datetime.fromtimestamp(slot * IV, tz=timezone.utc)
 

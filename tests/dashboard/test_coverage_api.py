@@ -767,8 +767,8 @@ async def test_social_scrape_config_prioritizes_manual_pause_over_recovery(monke
     assert profile["tab_eligible"] is False
     assert profile["tab_block_reason"] == "manually_paused"
     assert profile["recovery_profiles"] == []
-    assert profile["cycle_rest_min_ms"] == 180_000
-    assert profile["cycle_rest_max_ms"] == 360_000
+    assert profile["cycle_rest_min_ms"] == 240_000
+    assert profile["cycle_rest_max_ms"] == 300_000
 
 
 @pytest.mark.asyncio

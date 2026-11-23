@@ -1,3 +1,7 @@
+# Intimate network filter rollout (2026-11-24)
+
+- Implemented and live-applied the requested scraper filters, six-tab residency configuration, rotator/pacing settings, and static regressions. Phase 1 verified zero corporate/malformed targets and zero capped YouTube media/videos; 477 capped channels are marked `subscriber_cap`. The extension/dashboard/scheduler/YouTube services were restarted. Focused dashboard/core/extension tests pass; preserve the two user-owned YouTube sidecar edits and untracked live-matrix HTML.
+
 # Live extension recovery and polish-repo completion (2026-11-23)
 
 - 2026-11-23 DLQ recovery & UI controls: implemented operator controls for DLQ in `src/dashboard/api/ops.py` (`POST /dlq/{id}/retry`, `POST /dlq/redrive-pending`, `POST /dlq/archive-failed`); added frontend mutations and UI buttons in `DLQPage.tsx` and `api.ts` (Re-drive Pending button, Archive Failed button, and per-row Retry button). In PostgreSQL, safely archived 6,958 unreplayable historical failed DLQ items while waking up 10 pending Telegram rows with `next_retry_at = NOW()`. Verified backend endpoints (live and with `tests/dashboard/test_dlq_ops.py`), frontend build (`tsc && vite build`), and 11 Vitest tests. All 10 collector sources report `state="HEALTHY"` and all UC containers are Docker-healthy.

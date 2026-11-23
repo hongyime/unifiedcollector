@@ -887,12 +887,73 @@ function hasVisibleVerifiedBadge(root) {
   }));
 }
 
-function hasVerifiedCreator(value, platform) {
-  if (platform !== "tiktok") return false;
+const INTIMATE_MAX_POST_LIKES = 500;
+const INTIMATE_MAX_PROFILE_FOLLOWERS = 2500;
+
+function countValue(value) {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  return compactCount(value);
+}
+
+function objectCount(value, keys) {
+  if (!value || typeof value !== "object") return null;
+  for (const key of keys) {
+    const count = countValue(value[key]);
+    if (count !== null) return count;
+  }
+  return null;
+}
+
+function embeddedPostExceedsEngagementLimit(value) {
+  const stats = value && (value.statistics || value.stats || value.statistic) || {};
+  const likes = objectCount(value, ["likeCount", "like_count", "likes_count", "diggCount", "digg_count", "likes"])
+    ?? objectCount(stats, ["likeCount", "like_count", "likes_count", "diggCount", "digg_count", "likes"]);
+  return likes !== null && likes > INTIMATE_MAX_POST_LIKES;
+}
+
+function postEngagementExceedsLimit(root) {
+  if (!root) return false;
+  try {
+    const text = (root.innerText || root.textContent || "").replace(/,/g, "");
+    const match = text.match(/([\d.]+\s*[KMB]?)\s+(?:likes?|reactions?)/i);
+    return !!match && (compactCount(match[1]) || 0) > INTIMATE_MAX_POST_LIKES;
+  } catch (e) {
+    return false;
+  }
+}
+
+function hasTikTokMerchantFlag(value) {
   if (!value || typeof value !== "object") return false;
-  if ((value.uniqueId || value.unique_id || value.username || value.handle) && hasExplicitVerifiedFlag(value)) return true;
+  return ["is_merchant", "isMerchant", "merchant", "merchant_account", "is_business_account", "isBusinessAccount"]
+    .some((key) => value[key] === true || value[key] === 1 ||
+      (typeof value[key] === "string" && /^(true|1|yes)$/i.test(value[key].trim())));
+}
+
+function hasVisibleTikTokMerchantTag(root) {
+  try {
+    return /\b(?:merchant|shop)\b/i.test(root && (root.innerText || root.textContent || ""));
+  } catch (e) {
+    return false;
+  }
+}
+
+function creatorExcludedByIntimateProfile(value, platform) {
+  if (!value || typeof value !== "object") return false;
+  const candidates = [value, value.author, value.user, value.creator, value.profile].filter(Boolean);
+  return candidates.some((creator) => {
+    const followers = objectCount(creator, ["followerCount", "followers_count", "follower_count", "followers"]);
+    if (followers !== null && followers > INTIMATE_MAX_PROFILE_FOLLOWERS) return true;
+    return platform === "tiktok" && (hasExplicitVerifiedFlag(creator) || hasTikTokMerchantFlag(creator));
+  });
+}
+
+function hasVerifiedCreator(value, platform) {
+  if (platform !== "tiktok" && platform !== "lemon8") return false;
+  if (!value || typeof value !== "object") return false;
+  if ((value.uniqueId || value.unique_id || value.username || value.handle) && creatorExcludedByIntimateProfile(value, platform)) return true;
   // `owner` can refer to the logged-in account rather than the creator of this item.
-  return [value.author, value.user, value.creator, value.profile].some(hasExplicitVerifiedFlag);
+  return [value.author, value.user, value.creator, value.profile]
+    .some((creator) => creatorExcludedByIntimateProfile(creator, platform));
 }
 
 function deepCollectMedia(obj, sink, entity, depth = 0, platform = "") {
@@ -903,6 +964,7 @@ function deepCollectMedia(obj, sink, entity, depth = 0, platform = "") {
   }
   if (typeof obj !== "object") return;
   if (hasVerifiedCreator(obj, platform)) return;
+  if ((platform === "tiktok" || platform === "lemon8") && embeddedPostExceedsEngagementLimit(obj)) return;
   // Full video node (TikTok). These URLs usually 403 outside Chrome, so send
   // them through the browser-upload path rather than the server URL fetcher.
   const vid = obj.video || obj.Video;
@@ -1110,7 +1172,7 @@ const IG_MAX_ITEMS = 180;               // cap media pages per profile
 function igStorySweepCap() { return lsBoundedInt("ucIgStorySweepCap", 6, 5, 8); }
 function igDeepProfileCap() { return lsBoundedInt("ucIgDeepProfileCap", 3, 2, 5); }
 function igRestWindowMs() { return lsBoundedInt("ucIgRestWindowMinutes", 10, 8, 22) * 60000; }
-function igFamousFollowerCap() { return lsBoundedInt("ucIgFamousFollowerCap", 3000, 1000, 5000); }
+function igFamousFollowerCap() { return lsBoundedInt("ucIgFamousFollowerCap", 2500, 500, 2500); }
 function igRevisitHourlyCap() { return lsBoundedInt("ucIgRevisitHourlyCap", 1, 0, 3); }
 // Per-cycle target budget: a human checks a HANDFUL of profiles, not 257.
 // Randomised each cycle; the rest are picked up on later cycles (round-robin).
@@ -1212,6 +1274,7 @@ const instagram = {
   extractMedia(node, username) {
     const out = [];
     const meta = this.postMeta(node);
+    if (meta.likes_count !== null && meta.likes_count > INTIMATE_MAX_POST_LIKES) return out;
     const push = (n, cid) => {
       let url = null, type = "photo";
       if (n.video_url) { url = n.video_url; type = "video"; }
@@ -1230,6 +1293,7 @@ const instagram = {
   // the instagram_posts table. Hashtags/mentions parsed from the caption text.
   buildPost(n) {
     const m = this.postMeta(n);
+    if (m.likes_count !== null && m.likes_count > INTIMATE_MAX_POST_LIKES) return null;
     const cap = m.caption || "";
     return {
       platform_post_id: String(n.id || n.pk || n.code),
@@ -1250,14 +1314,14 @@ const instagram = {
   async scrapeUserMedia(user, username, maxItems = IG_MAX_ITEMS) {
     const media = [], posts = [];
     const tl = user.edge_owner_to_timeline_media;
-    if (tl && tl.edges) tl.edges.forEach((e) => { media.push(...this.extractMedia(e.node, username)); posts.push(this.buildPost(e.node)); });
+    if (tl && tl.edges) tl.edges.forEach((e) => { media.push(...this.extractMedia(e.node, username)); const post = this.buildPost(e.node); if (post) posts.push(post); });
     let maxId = tl && tl.page_info && tl.page_info.end_cursor;
     let hasNext = tl && tl.page_info && tl.page_info.has_next_page;
     while (hasNext && media.length < maxItems) {
       await hsleep(4000);
       const url = "https://www.instagram.com/api/v1/feed/user/" + user.id + "/?count=33" + (maxId ? "&max_id=" + maxId : "");
       const j = await fetchJson(url, { headers: this.headers(), credentials: "include" });
-      (j.items || []).forEach((it) => { media.push(...this.extractMedia(it, username)); posts.push(this.buildPost(it)); });
+      (j.items || []).forEach((it) => { media.push(...this.extractMedia(it, username)); const post = this.buildPost(it); if (post) posts.push(post); });
       maxId = j.next_max_id;
       hasNext = j.more_available && !!maxId;
     }
@@ -1487,11 +1551,13 @@ const instagram = {
     try { resp = (await send({ type: "getTargets", platform: "instagram" })) || []; } catch (e) {}
     const pool = (Array.isArray(resp) ? resp : [])
       .map((t) => (typeof t === "string" ? { username: t, hop: 0 } : t))
-      .filter((t) => t && t.username);
+      .filter((t) => t && t.username)
+      .sort((a, b) => Number(b.is_private === true || b.is_private === "true" || (b.metadata && b.metadata.is_private === true) || (b.metadata && b.metadata.is_private === "true")) - Number(a.is_private === true || a.is_private === "true" || (a.metadata && a.metadata.is_private === true) || (a.metadata && a.metadata.is_private === "true")));
     if (!pool.length) return { targets: 0, saved: 0, discovered: 0 };
     const cache = new Map();
     const getUser = async (u) => { if (cache.has(u)) return cache.get(u); const p = await this.getProfile(u); cache.set(u, p); return p; };
     const okProfile = (user) => user && user.is_verified !== true &&
+      user.is_business_account !== true && user.is_professional_account !== true &&
       ((user.edge_followed_by && user.edge_followed_by.count) || 0) <= igFamousFollowerCap();
     let saved = 0, discovered = 0, visited = 0;
 
@@ -2191,7 +2257,9 @@ const tiktok = {
         profile_pic_url: avatar && (avatar.currentSrc || avatar.src) || null,
         metadata: { source: "tiktok_profile_dom_canary", page_url: location.href },
       };
-      if (profile.bio || profile.followers_count != null || profile.profile_pic_url) {
+      if (!hasVisibleVerifiedBadge(document.body) && !hasVisibleTikTokMerchantTag(document.body) &&
+          (profile.followers_count === null || profile.followers_count <= INTIMATE_MAX_PROFILE_FOLLOWERS) &&
+          (profile.bio || profile.followers_count != null || profile.profile_pic_url)) {
         sendSideEffect({ type: "profile", platform: "tiktok", profile }, "tiktok", `TikTok @${entity} profile canary`, { timeoutMs: 12000 });
       }
     }
@@ -2209,7 +2277,7 @@ const tiktok = {
       const card = v.closest(
         '[data-e2e="recommend-list-item-container"], [data-e2e="user-post-item"], [data-e2e="browse-video"], [data-e2e="video-card"], article'
       ) || v.parentElement;
-      if (hasVisibleVerifiedBadge(card)) return;
+      if (hasVisibleVerifiedBadge(card) || hasVisibleTikTokMerchantTag(card) || postEngagementExceedsLimit(card)) return;
       videoUrlsFromElement(v).forEach((u, sourceIndex) => {
         sink.add({
           content_id: "dom_video_" + urlId(u) + "_" + sourceIndex,
@@ -2242,7 +2310,7 @@ const tiktok = {
       const card = im.closest(
         '[data-e2e="recommend-list-item-container"], [data-e2e="user-post-item"], [data-e2e="browse-video"], [data-e2e="video-card"], article'
       ) || im.parentElement;
-      if (hasVisibleVerifiedBadge(card)) return;
+      if (hasVisibleVerifiedBadge(card) || hasVisibleTikTokMerchantTag(card) || postEngagementExceedsLimit(card)) return;
       const w = im.naturalWidth || im.width || 0;
       const h = im.naturalHeight || im.height || 0;
       if ((w && w < 160) || (h && h < 160)) return;
@@ -2409,6 +2477,7 @@ function lemon8CollectDomMedia(sink, pageEntity) {
     if (contentType === "photo" && el && imageLooksTooSmall(el, 160)) return;
     if (/avatar/i.test(url) && role !== "video_poster") return;
     const card = lemon8CardForElement(el || document.body);
+    if (postEngagementExceedsLimit(card)) return;
     const link = card && (card.matches && card.matches("a[href]") ? card : card.querySelector && card.querySelector('a[href*="/@"]'));
     const href = link ? (link.getAttribute("href") || link.href || "") : "";
     const author = lemon8HandleFromHref(href) || (/^(feed|foryou|fashion)$/i.test(pageEntity) ? "" : pageEntity);
@@ -2465,6 +2534,14 @@ const lemon8 = {
   },
   async runCycle() {
     const entity = this.entity();
+    if (/^\/@[^/?#]+\/?$/.test(location.pathname || "")) {
+      const match = (document.body.innerText || "").match(/([\d.,]+\s*[KMB]?)\s+followers?/i);
+      const followers = match && compactCount(match[1]);
+      if (followers !== null && followers > INTIMATE_MAX_PROFILE_FOLLOWERS) {
+        clog("info", "skip Lemon8 profile " + entity + ": follower cap", "lemon8");
+        return { targets: 1, saved: 0, discovered: 0 };
+      }
+    }
     const forcedRecovery = forcedRecoveryMode("lemon8");
     const mediaRevisit = await maybeStartBrowserMediaRevisit("lemon8", entity);
     if (mediaRevisit && mediaRevisit.navigating) return { targets: 1, saved: 0, discovered: 0 };
@@ -2607,7 +2684,10 @@ function harvestXPosts(entity, feed) {
       const caption = textEl ? (textEl.innerText || "").trim().slice(0, 2000) : null;
       const grp = art.querySelector('[role="group"][aria-label]');
       const al = grp ? (grp.getAttribute("aria-label") || "") : "";
-      const num = (re) => { const x = al.match(re); return x ? parseInt(x[1].replace(/[,.\s]/g, ""), 10) : null; };
+      const num = (re) => { const x = al.match(re); return x ? compactCount(x[1]) : null; };
+      const likes_count = num(/([\d,.]+\s*[KMB]?)\s+like/i);
+      const reposts_count = num(/([\d,.]+\s*[KMB]?)\s+repost/i);
+      if ((likes_count && likes_count > INTIMATE_MAX_POST_LIKES) || (reposts_count && reposts_count > 50)) return;
       const timeEl = art.querySelector("time[datetime]");
       const takenAtMs = timeEl ? Date.parse(timeEl.getAttribute("datetime") || "") : NaN;
       const allText = (art.innerText || "").trim();
@@ -2628,8 +2708,7 @@ function harvestXPosts(entity, feed) {
       })();
       posts.push({
         platform_post_id: pid, author_username: author, caption: caption || null,
-        comments_count: num(/([\d,.]+)\s+repl/i), reposts_count: num(/([\d,.]+)\s+repost/i),
-        likes_count: num(/([\d,.]+)\s+like/i), views_count: num(/([\d,.]+)\s+view/i),
+        comments_count: num(/([\d,.]+\s*[KMB]?)\s+repl/i), reposts_count, likes_count, views_count: num(/([\d,.]+\s*[KMB]?)\s+view/i),
         media_type: "tweet",
         taken_at: Number.isFinite(takenAtMs) ? Math.floor(takenAtMs / 1000) : null,
         hashtags: caption ? (caption.match(/#[\w]+/g) || []).map((s) => s.slice(1)) : [],
@@ -2650,6 +2729,22 @@ function harvestXPosts(entity, feed) {
     } catch (e) {}
   });
   return posts;
+}
+
+function xPostExceedsEngagementLimit(root) {
+  try {
+    const group = root && root.querySelector && root.querySelector('[role="group"][aria-label]');
+    const label = group ? (group.getAttribute("aria-label") || "") : "";
+    const count = (re) => {
+      const match = label.match(re);
+      return match ? compactCount(match[1]) : null;
+    };
+    const likes_count = count(/([\d,.]+\s*[KMB]?)\s+like/i);
+    const reposts_count = count(/([\d,.]+\s*[KMB]?)\s+repost/i);
+    return (likes_count && likes_count > INTIMATE_MAX_POST_LIKES) || (reposts_count && reposts_count > 50);
+  } catch (e) {
+    return false;
+  }
 }
 
 function allowForYouFeedPass(platform) {
@@ -2781,13 +2876,16 @@ function addXVideoCandidate(sink, u, entity, role, context = {}) {
 function xCollectMediaFromRoot(root, sink, entity, context = {}) {
   if (!root || !root.querySelectorAll) return;
   if (xVerifiedBadge(root)) return;
+  if (xPostExceedsEngagementLimit(root)) return;
   root.querySelectorAll('img[src*="pbs.twimg.com"], img[srcset*="pbs.twimg.com"]').forEach((im) => {
-    if (xVerifiedBadge(im.closest('article[data-testid="tweet"], article[role="article"], div[data-testid="cellInnerDiv"]'))) return;
+    const tweet = im.closest('article[data-testid="tweet"], article[role="article"], div[data-testid="cellInnerDiv"]');
+    if (xVerifiedBadge(tweet) || xPostExceedsEngagementLimit(tweet)) return;
     if (imageLooksTooSmall(im, 120)) return;
     imageUrlsFromElement(im).forEach((u) => addXMediaCandidate(sink, u, entity, "img", context));
   });
   root.querySelectorAll('picture source[srcset*="pbs.twimg.com"], source[srcset*="pbs.twimg.com"]').forEach((src) => {
-    if (xVerifiedBadge(src.closest('article[data-testid="tweet"], article[role="article"], div[data-testid="cellInnerDiv"]'))) return;
+    const tweet = src.closest('article[data-testid="tweet"], article[role="article"], div[data-testid="cellInnerDiv"]');
+    if (xVerifiedBadge(tweet) || xPostExceedsEngagementLimit(tweet)) return;
     try {
       const srcset = src.getAttribute("srcset") || "";
       srcset.split(",").forEach((part) => {
@@ -2797,14 +2895,16 @@ function xCollectMediaFromRoot(root, sink, entity, context = {}) {
     } catch (e) {}
   });
   root.querySelectorAll("video").forEach((v) => {
-    if (xVerifiedBadge(v.closest('article[data-testid="tweet"], article[role="article"], div[data-testid="cellInnerDiv"]'))) return;
+    const tweet = v.closest('article[data-testid="tweet"], article[role="article"], div[data-testid="cellInnerDiv"]');
+    if (xVerifiedBadge(tweet) || xPostExceedsEngagementLimit(tweet)) return;
     addXMediaCandidate(sink, v.poster, entity, "poster", context);
     const u = v.currentSrc || v.src || (v.querySelector("source") && v.querySelector("source").src);
     addXVideoCandidate(sink, u, entity, "video", context);
     v.querySelectorAll("source[src]").forEach((source) => addXVideoCandidate(sink, source.src, entity, "video_source", context));
   });
   root.querySelectorAll("[style]").forEach((el) => {
-    if (xVerifiedBadge(el.closest('article[data-testid="tweet"], article[role="article"], div[data-testid="cellInnerDiv"]'))) return;
+    const tweet = el.closest('article[data-testid="tweet"], article[role="article"], div[data-testid="cellInnerDiv"]');
+    if (xVerifiedBadge(tweet) || xPostExceedsEngagementLimit(tweet)) return;
     if (elementLooksTooSmall(el, 120)) return;
     try {
       urlsFromCssValue(el.getAttribute("style") || "").forEach((u) => addXMediaCandidate(sink, u, entity, "css_bg", context));
@@ -3217,11 +3317,14 @@ function domPostUrlForElement(el, platform) {
 // ===========================================================================
 function harvestDom(entity, { imgRe, junkRe, platform }) {
   const sink = makeSink();
+  const exceedsPostEngagement = (node) => (platform === "facebook" || platform === "threads") &&
+    postEngagementExceedsLimit(node && node.closest && node.closest('[data-pressable-container],[role="article"],article'));
   const insideVerifiedThreadPost = (node) => platform === "threads" && threadsVerifiedBadge(
     node && node.closest && node.closest('[data-pressable-container],[role="article"],article')
   );
   document.querySelectorAll("img").forEach((im) => {
     if (insideVerifiedThreadPost(im)) return;
+    if (exceedsPostEngagement(im)) return;
     if (imageLooksTooSmall(im, 120)) return;
     imageUrlsFromElement(im).forEach((u) => {
       if (u && imgRe.test(u) && !junkRe.test(u))
@@ -3240,6 +3343,7 @@ function harvestDom(entity, { imgRe, junkRe, platform }) {
   });
   document.querySelectorAll('[style*="url("]').forEach((el) => {
     if (insideVerifiedThreadPost(el)) return;
+    if (exceedsPostEngagement(el)) return;
     if (elementLooksTooSmall(el, 140)) return;
     const values = [
       el.getAttribute && el.getAttribute("style"),
@@ -3260,6 +3364,7 @@ function harvestDom(entity, { imgRe, junkRe, platform }) {
   });
   document.querySelectorAll("video").forEach((v) => {
     if (insideVerifiedThreadPost(v)) return;
+    if (exceedsPostEngagement(v)) return;
     if (v.poster && /https?:/.test(v.poster) && !junkRe.test(v.poster))
       sink.add({
         content_id: "poster_" + urlId(v.poster),
@@ -3298,6 +3403,7 @@ function harvestPermalinkPosts(linkRe, idFrom, platform = "") {
     if (!pid || byId.has(pid)) return;
     const box = a.closest('[data-pressable-container],[role="article"],article') || a.parentElement;
     if (platform === "threads" && threadsVerifiedBadge(box)) return;
+    if ((platform === "threads" || platform === "facebook") && postEngagementExceedsLimit(box)) return;
     let caption = "";
     try { caption = (box && box.innerText || "").trim().slice(0, 2200); } catch (e) {}
     if (!caption) return;                       // skip empties / UI chrome
@@ -3631,7 +3737,8 @@ function harvestFacebookPosts(entity) {
   const byId = new Map();
   harvestPermalinkPosts(
     /\/(?:posts\/|permalink\.php\?story_fbid=|[^/]+\/posts\/)?(pfbid[\w]+|\d{6,})/,
-    (m) => m[1]
+    (m) => m[1],
+    "facebook"
   ).forEach((p) => byId.set(p.platform_post_id, {
     ...p,
     author_username: p.author_username || (entity !== "feed" ? entity : null),
@@ -3645,6 +3752,7 @@ function harvestFacebookPosts(entity) {
         .trim();
       if (text.length < 50) return;
       if (/^(what['’]?s on your mind|create story|add to your post)\b/i.test(text)) return;
+      if (postEngagementExceedsLimit(art)) return;
       const hrefs = [...art.querySelectorAll("a[href]")].map((a) => a.getAttribute("href") || "");
       const linkId = hrefs.map(facebookPostIdFromHref).find(Boolean);
       const pid = linkId || ("fbdom_" + urlId(`${entity}|${location.pathname}|${text.slice(0, 800)}`));
@@ -3725,6 +3833,11 @@ const facebook = {
   async runCycle() {
     const entity = this.entity();
     const person = this._isPerson();
+    if (!person) {
+      clog("info", "skip non-person Facebook surface " + entity, "facebook");
+      await facebookReportPageHealth("healthy", "facebook_non_person_skipped", { entity, person: false });
+      return { targets: 1, saved: 0, discovered: 0 };
+    }
     const forcedRecovery = forcedRecoveryMode("facebook");
     const mediaRevisit = await maybeStartBrowserMediaRevisit("facebook", facebookLoggedInOwner());
     if (mediaRevisit && mediaRevisit.navigating) return { targets: 1, saved: 0, discovered: 0 };
@@ -3735,14 +3848,9 @@ const facebook = {
     });
     let saved = 0;
     const profile = scrapeFacebookProfile(entity, person);
-    // MEDIA — capture rendered feed/profile media broadly. The bridge/file gate
-    // drops UI chrome and tiny avatars; collector policy now favors completeness
-    // over the older person-profile-only restriction.
     const sink = harvestDom(entity, { imgRe: /fbcdn\.net/, junkRe: /rsrc\.php|emoji|static|\/s\d+x\d+\/|profile|sprite/, platform: "facebook" });
     const activeMediaRevisit = currentBrowserMediaRevisit("facebook");
     markBrowserMediaRevisitItems("facebook", sink, activeMediaRevisit);
-    // POSTS (captions) + USERS — captured EVERYWHERE incl. pages/groups, for the
-    // user registry + spidering (user: "when spider we can use either").
     const posts = harvestFacebookPosts(entity);
     if (person) posts.forEach((p) => { if (!p.author_username) p.author_username = entity; });
     const fu = collectPermalinkAuthors(

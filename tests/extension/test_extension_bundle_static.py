@@ -250,7 +250,7 @@ def test_x_is_auto_managed_by_scraper_tab_recovery():
     assert "globalThis.UC_PLATFORMS" not in open_all_block
     assert "const p = platformById(id);" in reload_intent_block
     assert 'const expandedOverride = params.get("expanded")' not in tabs_js
-    assert "At most four scheduler-selected social tabs" in tabs_js
+    assert "Six resident social tabs stay open: four permanent and two rotating" in tabs_js
 
 
 def test_lemon8_runs_as_visible_scraper_alongside_headless_collector():
@@ -289,9 +289,9 @@ def test_scraper_tabs_are_limited_to_scheduler_selected_platforms():
     )[0]
     assert "return platform && platform.id ? platform.id : null;" in background
     assert "const allowed = 1;" in budget_block
-    assert "const BROWSER_RESIDENT_TAB_LIMIT = 4;" in background
+    assert "const BROWSER_RESIDENT_TAB_LIMIT = 6;" in background
     assert 'const BROWSER_RESIDENT_PLATFORM_IDS = ["x", "instagram", "facebook", "threads", "tiktok", "lemon8", "strava", "pinterest", "snapchat", "airbnb"];' in background
-    assert 'const BROWSER_ROTATION_PLATFORM_IDS = ["x", "instagram", "facebook", "threads", "tiktok", "lemon8", "strava"];' in background
+    assert 'const BROWSER_ROTATION_PLATFORM_IDS = ["lemon8", "threads", "pinterest", "snapchat", "airbnb", "x"];' in background
     assert "async function scraperTabSelection()" in background
     assert "resident_scraper_tab_budget_exceeded" in budget_block
     assert "inactive_scraper_tab_open" in budget_block
@@ -304,7 +304,7 @@ def test_scraper_tabs_are_limited_to_scheduler_selected_platforms():
     assert "ucOpenExpandedPlatformTabs" not in tabs_js
     assert 'id="expandedTabs"' not in tabs_html
     assert "Open scheduled tabs" in tabs_html
-    assert "At most four scheduler-selected social tabs" in tabs_js
+    assert "Six resident social tabs stay open: four permanent and two rotating" in tabs_js
     assert "closeDuplicateControlTabs" in tabs_js
     assert 'chrome.tabs.create({ url, pinned: false })' in _read("extension/popup.js")
 
@@ -642,6 +642,22 @@ def test_x_scraper_accepts_modern_timeline_cells():
     assert "xTweetRoots().forEach((art)" in x_block
 
 
+def test_intimate_network_filters_are_applied_before_content_is_emitted():
+    content = _read("extension/content.js")
+    source = (ROOT / "extension/src/content.ts").read_text(encoding="utf-8")
+
+    assert "const INTIMATE_MAX_POST_LIKES = 500;" in content
+    assert "const INTIMATE_MAX_PROFILE_FOLLOWERS = 2500;" in content
+    assert "user.is_business_account !== true && user.is_professional_account !== true" in content
+    assert "meta.likes_count > INTIMATE_MAX_POST_LIKES" in content
+    assert "facebook_non_person_skipped" in content
+    assert "threadsVerifiedBadge(box)" in content
+    assert "xPostExceedsEngagementLimit" in content
+    assert "hasVisibleTikTokMerchantTag" in content
+    assert "skip Lemon8 profile" in content
+    assert 'igFamousFollowerCap() { return lsBoundedInt("ucIgFamousFollowerCap", 2500, 500, 2500); }' in source
+
+
 def test_x_threads_following_feed_is_default_and_for_you_is_opt_in():
     content = _read("extension/content.js")
     x_block = content.split("const x = {", 1)[1].split(
@@ -866,7 +882,7 @@ def test_instagram_tuning_knobs_are_bounded_and_explicit():
     assert 'lsBoundedInt("ucIgStorySweepCap", 6, 5, 8)' in content
     assert 'lsBoundedInt("ucIgDeepProfileCap", 3, 2, 5)' in content
     assert 'lsBoundedInt("ucIgRestWindowMinutes", 10, 8, 22)' in content
-    assert 'lsBoundedInt("ucIgFamousFollowerCap", 3000, 1000, 5000)' in content
+    assert 'lsBoundedInt("ucIgFamousFollowerCap", 2500, 500, 2500)' in content
     assert 'lsBoundedInt("ucIgRevisitHourlyCap", 1, 0, 3)' in content
     assert 'lsBoundedInt("ucIg429CooldownMinutes", DEFAULT_THROTTLE_BACKOFF_MINS.instagram, 45, 180)' in content
     assert "consumeInstagramRevisitBudget()" in content
