@@ -959,6 +959,32 @@ async def test_spider_success_records_limiter_success(monkeypatch):
     c._upsert_page.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+async def test_spider_domain_heartbeats_source_health(monkeypatch):
+    c = WebsiteCollector()
+    c._respect_robots = False
+    c._use_playwright = False
+    c._url_filter = MagicMock()
+    c._url_filter.is_allowed = MagicMock(return_value=(True, ""))
+
+    resp = MagicMock(status_code=200)
+    resp.headers = {"content-type": "text/html"}
+    resp.text = "<html><head><title>t</title></head><body>ok</body></html>"
+    fake_client = MagicMock()
+    fake_client.get = AsyncMock(return_value=resp)
+    fake_client.aclose = AsyncMock()
+    monkeypatch.setattr(c, "_build_client", lambda domain: fake_client)
+    monkeypatch.setattr(c, "wait_rate_limit", AsyncMock())
+    monkeypatch.setattr(c, "_record_domain_pacing_event", AsyncMock())
+    monkeypatch.setattr(c, "_upsert_page", AsyncMock())
+    monkeypatch.setattr(c, "download_media", AsyncMock())
+    c.heartbeat_source_health = AsyncMock()
+
+    await c.spider_domain("https://example.com", max_depth=1, max_pages=1)
+    assert c.upstream_check_succeeded is True
+    c.heartbeat_source_health.assert_awaited()
+
+
 # ── cleanup / module exports ──────────────────────────────────────────────
 
 

@@ -248,16 +248,16 @@ class DLQConsumer:
             max_backoff_seconds=self.max_backoff_seconds,
         )
         await self._pool.execute(
-            f"""
+            """
             UPDATE dead_letter_queue
             SET status = 'pending',
                 retry_count = $2,
                 error_message = $3,
                 last_attempt_at = NOW(),
-                next_retry_at = NOW() + INTERVAL '1 second' * {delay:.6f}
+                next_retry_at = NOW() + $4 * INTERVAL '1 second'
             WHERE id = $1
             """,
-            row["id"], new_count, error_message[:8000],
+            row["id"], new_count, error_message[:8000], delay,
         )
         self.stats["retried"] += 1
         logger.info(

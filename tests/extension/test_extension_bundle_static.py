@@ -104,6 +104,23 @@ def test_fast_message_reply_closes_the_response_channel():
     assert 'return false;' in fast_path
 
 
+def test_async_message_router_keeps_response_channel_open():
+    source = (ROOT / "extension/src/background.ts").read_text(encoding="utf-8")
+    router = source.split('chrome.runtime.onMessage.addListener', 1)[1].split('async function scrapeNow', 1)[0]
+
+    assert router.rstrip().endswith('return true; // async\n});')
+
+
+def test_tabs_on_removed_listener_cleans_kick_and_reconciles_scrapers():
+    source = (ROOT / "extension/src/background.ts").read_text(encoding="utf-8")
+
+    assert "chrome.tabs.onRemoved.addListener" in source
+    listener = source.split("chrome.tabs.onRemoved.addListener", 1)[1].split("async function tabForPlatform", 1)[0]
+    assert "delete lastKick[tabId]" in listener
+    assert 'ensureScraperTabsOpen("tab-removed")' in listener
+
+
+
 def test_extension_endpoints_reject_remote_http_before_sending_the_bridge_secret():
     source = (ROOT / "extension/src/shared/ingest_client.ts").read_text(encoding="utf-8")
 

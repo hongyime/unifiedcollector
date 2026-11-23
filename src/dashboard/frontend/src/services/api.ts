@@ -8,6 +8,7 @@ import type {
   CollectorDetail,
   SourceCollectionMatrix,
   SourceRecoveryProfile,
+  SourceControlRow,
   MediaItem,
   MediaStats,
   RealtimeFeedStatus,
@@ -128,6 +129,7 @@ export const api = {
     put(`/collectors/feed-controls/${encodeURIComponent(platform)}`, { enabled, interval_hours }),
   sourceMatrix: () => get<SourceCollectionMatrix>("/collectors/source-matrix"),
   sourceRecovery: () => get<SourceRecoveryProfile[]>("/api/source-recovery"),
+  sourceControls: () => get<SourceControlRow[]>("/api/source-controls"),
   collectorDetail: (source: string) => get<CollectorDetail>(`/collectors/${source}`),
 
   media: (source?: string, limit = 50) => {
@@ -155,10 +157,22 @@ export const api = {
   thumbnailUrl: (id: string) => `${API_BASE}/media/${id}/thumbnail`,
   fileUrl: (id: string) => `${API_BASE}/media/${id}/file`,
 
-  dlq: (source?: string, limit = 50) => {
+  dlq: (source?: string, status?: string, limit = 50) => {
     const params = new URLSearchParams({ limit: String(limit) });
     if (source) params.set("source", source);
+    if (status) params.set("status", status);
     return get<DLQItem[]>(`/dlq?${params}`);
+  },
+  retryDLQ: (id: number) =>
+    post<{ ok: boolean; id: number; status: string }>(`/dlq/${id}/retry`, {}),
+  redrivePendingDLQ: (source?: string) => {
+    const params = source ? `?source=${encodeURIComponent(source)}` : "";
+    return post<{ ok: boolean; redriven: number }>(`/dlq/redrive-pending${params}`, {});
+  },
+  archiveFailedDLQ: (source?: string, purge = false) => {
+    const params = new URLSearchParams({ purge: String(purge) });
+    if (source) params.set("source", source);
+    return post<{ ok: boolean; action: string; count: number }>(`/dlq/archive-failed?${params}`, {});
   },
 
   socialNetwork: () => get<NetworkStat[]>("/social/network"),

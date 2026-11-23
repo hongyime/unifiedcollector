@@ -260,7 +260,7 @@ async def social_scrape_config(_user: dict = Depends(require_role("viewer"))):
             pass
         try:
             health_rows = await optional_rows(
-                """SELECT source, status, last_success_at, last_checked_at, blocker
+                """SELECT source, status, last_error, last_success_at, last_checked_at, blocker
                    FROM source_health WHERE source = ANY($1::text[])"""
             )
             for health in health_rows:
@@ -277,9 +277,15 @@ async def social_scrape_config(_user: dict = Depends(require_role("viewer"))):
                 # a later health write.
                 if profile["mode"] == "manually_paused":
                     continue
+                last_err = str(health.get("last_error") or "").lower()
+                is_browser_stall = (
+                    "browser capture stalled:" in last_err
+                    or "browser content progress is" in last_err
+                ) and "watchdog" in last_err
                 if (
                     health.get("status") in {"degraded", "dead", "auth_paused"}
                     and source not in expired_rate_limits
+                    and not is_browser_stall
                 ):
                     profile.update(
                         tab_eligible=False,

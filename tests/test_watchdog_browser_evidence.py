@@ -40,3 +40,35 @@ async def test_unknown_capture_evidence_neither_alarms_nor_clears_health(
     recovered_browser.assert_not_awaited()
     recovered_native.assert_not_awaited()
     notify.assert_not_awaited()
+
+
+async def test_rotator_paused_source_clears_browser_and_stale_watchdog_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgres://test:test@localhost/test")
+    from src.watchdog import freshness
+
+    monkeypatch.setattr(freshness, "BROWSER_SOURCE_WATCH_SOURCES", {"instagram"})
+    monkeypatch.setattr(freshness, "_rotator_paused_sources", AsyncMock(return_value={"instagram"}))
+    monkeypatch.setattr(source_freshness, "compute_liveness", AsyncMock(return_value=[{
+        "source": "instagram", "status": "degraded", "age_seconds": 5000,
+        "browser_heartbeat_age_seconds": 5000,
+        "browser_content_stale": True, "detail": "browser capture stalled: no check in 3600s",
+    }]))
+    degraded = AsyncMock()
+    recovered_browser = AsyncMock()
+    recovered_native = AsyncMock()
+    notify = AsyncMock()
+    monkeypatch.setattr(freshness, "_mark_degraded_browser_source", degraded)
+    monkeypatch.setattr(freshness, "_mark_running_if_browser_watchdog", recovered_browser)
+    monkeypatch.setattr(freshness, "_mark_running_if_stale_watchdog", recovered_native)
+    monkeypatch.setattr(freshness, "_notify", notify)
+
+    fake_conn = AsyncMock(spec=asyncpg.Connection)
+    await freshness._browser_source_tick(fake_conn)
+
+    degraded.assert_not_awaited()
+    recovered_browser.assert_awaited_once_with(fake_conn, "instagram")
+    recovered_native.assert_awaited_once_with(fake_conn, "instagram")
+    notify.assert_not_awaited()
+

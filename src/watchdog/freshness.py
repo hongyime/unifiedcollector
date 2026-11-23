@@ -878,6 +878,8 @@ async def _browser_source_tick(db: asyncpg.Connection) -> None:
         if source in paused:
             # Rotated off by the activity rotator: quiet is expected, not a stall.
             log.info("%s browser source rotator-paused; skipping stall check", source)
+            await _mark_running_if_browser_watchdog(db, source)
+            await _mark_running_if_stale_watchdog(db, source)
             continue
         status = row.get("status")
         if status == "unknown":

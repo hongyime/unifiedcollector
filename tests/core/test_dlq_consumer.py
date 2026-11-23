@@ -159,9 +159,12 @@ async def test_handler_timeout_reschedules_row():
     assert consumer.stats["retried"] == 1
     query, args, _kwargs = pool.execute_calls[0]
     assert "SET status = 'pending'" in query
+    assert "$4 * INTERVAL '1 second'" in query
     assert args[0] == 42
     assert args[1] == 1
     assert "TimeoutError" in args[2]
+    assert isinstance(args[3], (int, float))
+    assert args[3] > 0
 
 
 @pytest.mark.asyncio

@@ -45,3 +45,57 @@ def test_resolve_media_path_rejects_missing_path():
         api._resolve_media_path("")
 
     assert exc.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_media_thumbnail_handles_rgba_image(monkeypatch, tmp_path):
+    import uuid
+    import io
+    from PIL import Image
+    from fastapi.responses import StreamingResponse
+    from src.dashboard.api import media as media_module
+
+    drive_root = tmp_path / "drive"
+    vault_root = tmp_path / "vault"
+    blob = vault_root / "media" / "blobs" / "test.png"
+    drive_root.mkdir()
+    blob.parent.mkdir(parents=True)
+
+    # Save a transparent RGBA image
+    im = Image.new("RGBA", (400, 400), (255, 0, 0, 128))
+    im.save(blob, format="PNG")
+
+    monkeypatch.setattr("src.core.drive_check.DRIVE_PATH", str(drive_root))
+    monkeypatch.setattr(api, "VAULT_ROOT", vault_root)
+
+    test_uuid = uuid.uuid4()
+
+    class _FakeConn:
+        async def fetchrow(self, query, *args):
+            return {"file_path": str(blob), "content_type": "image"}
+
+    class _FakePool:
+        def acquire(self):
+            return self
+        async def __aenter__(self):
+            return _FakeConn()
+        async def __aexit__(self, *args):
+            return False
+
+    async def _fake_get_pool():
+        return _FakePool()
+
+    monkeypatch.setattr(media_module, "get_pool", _fake_get_pool)
+
+    resp = await media_module.media_thumbnail(str(test_uuid))
+
+    # Must be a StreamingResponse with JPEG thumbnail, NOT a FileResponse fallback
+    assert isinstance(resp, StreamingResponse)
+    assert resp.media_type == "image/jpeg"
+
+    # Verify the thumbnail body
+    body = b"".join([chunk async for chunk in resp.body_iterator])
+    thumb = Image.open(io.BytesIO(body))
+    assert thumb.size == (300, 300)
+    assert thumb.mode == "RGB"
+

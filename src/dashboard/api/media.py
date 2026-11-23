@@ -301,6 +301,13 @@ async def media_thumbnail(media_id: str, _user: dict = Depends(require_role("vie
             if img.width * img.height > MAX_THUMBNAIL_PIXELS:
                 return dashboard_api._thumbnail_placeholder("image", "preview too large")
             img.thumbnail((300, 300))
+            if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
+                rgba = img.convert("RGBA")
+                bg = Image.new("RGB", rgba.size, (255, 255, 255))
+                bg.paste(rgba, mask=rgba.split()[-1])
+                img = bg
+            elif img.mode != "RGB":
+                img = img.convert("RGB")
             buf = io.BytesIO()
             img.save(buf, format="JPEG", quality=80)
         buf.seek(0)

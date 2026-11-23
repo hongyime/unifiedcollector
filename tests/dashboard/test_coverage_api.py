@@ -830,6 +830,38 @@ async def test_social_scrape_config_retries_expired_rate_limit_despite_stale_hea
 
 
 @pytest.mark.asyncio
+async def test_social_scrape_config_keeps_browser_stall_watchdog_tab_eligible(monkeypatch):
+    now = datetime.now(timezone.utc)
+
+    class _Conn:
+        async def fetch(self, query, *_args, **_kwargs):
+            if "collection_schedules" in query:
+                return [{"source": "instagram", "enabled": True}]
+            if "source_health" in query:
+                return [{
+                    "source": "instagram",
+                    "status": "degraded",
+                    "last_error": "browser capture stalled: no eligible upstream check in 3600 seconds (watchdog)",
+                    "last_success_at": now - timedelta(hours=1),
+                    "last_checked_at": now - timedelta(hours=1),
+                    "blocker": None,
+                }]
+            return []
+
+    async def fake_get_pool():
+        return _Pool(_Conn())
+
+    monkeypatch.setattr(dashboard_api, "get_pool", fake_get_pool)
+    res = await dashboard_api.social_scrape_config()
+
+    profile = res["profiles"]["instagram"]
+    assert profile["tab_eligible"] is True
+    assert profile["tab_block_reason"] is None
+    assert profile["health_status"] == "degraded"
+
+
+
+@pytest.mark.asyncio
 async def test_social_scrape_config_exposes_explicit_tab_failover_blocks(monkeypatch):
     now = datetime.now(timezone.utc)
 

@@ -20,7 +20,7 @@ import os
 import sys
 import asyncio
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 
 from src.db.connection import get_pool
 from src.core.dlq_status import list_dead_letter_queue
@@ -73,10 +73,90 @@ router = APIRouter()
 
 
 @router.get("/dlq")
-async def list_dlq(source: str | None = None, limit: int = 50,
+async def list_dlq(source: str | None = None, status: str | None = None, limit: int = 50,
                    _user: dict = Depends(require_role("viewer"))):
     pool = await _get_pool()
-    return await list_dead_letter_queue(pool, source=source, limit=limit)
+    try:
+        return await list_dead_letter_queue(pool, source=source, status=status, limit=limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/dlq/{dlq_id}/retry", dependencies=[Depends(require_role("operator"))])
+async def retry_dlq_item(dlq_id: int):
+    pool = await _get_pool()
+    async with pool.acquire() as conn:
+        res = await conn.execute(
+            """
+            UPDATE dead_letter_queue
+            SET status = 'pending',
+                next_retry_at = NOW(),
+                retry_count = 0,
+                last_attempt_at = NULL
+            WHERE id = $1
+            """,
+            dlq_id,
+        )
+        if res == "UPDATE 0":
+            raise HTTPException(status_code=404, detail="DLQ item not found")
+    return {"ok": True, "id": dlq_id, "status": "pending"}
+
+
+@router.post("/dlq/redrive-pending", dependencies=[Depends(require_role("operator"))])
+async def redrive_pending_dlq(source: str | None = None):
+    source = (source or "").strip().lower() or None
+    pool = await _get_pool()
+    async with pool.acquire() as conn:
+        if source:
+            res = await conn.execute(
+                """
+                UPDATE dead_letter_queue
+                SET next_retry_at = NOW()
+                WHERE status = 'pending' AND source = $1
+                """,
+                source,
+            )
+        else:
+            res = await conn.execute(
+                """
+                UPDATE dead_letter_queue
+                SET next_retry_at = NOW()
+                WHERE status = 'pending'
+                """
+            )
+        count = int(res.split(" ")[-1]) if " " in res else 0
+    return {"ok": True, "redriven": count}
+
+
+@router.post("/dlq/archive-failed", dependencies=[Depends(require_role("operator"))])
+async def archive_failed_dlq(source: str | None = None, purge: bool = False):
+    source = (source or "").strip().lower() or None
+    pool = await _get_pool()
+    async with pool.acquire() as conn:
+        if purge:
+            if source:
+                res = await conn.execute(
+                    "DELETE FROM dead_letter_queue WHERE status = 'failed' AND source = $1",
+                    source,
+                )
+            else:
+                res = await conn.execute(
+                    "DELETE FROM dead_letter_queue WHERE status = 'failed'"
+                )
+            action = "purged"
+        else:
+            if source:
+                res = await conn.execute(
+                    "UPDATE dead_letter_queue SET status = 'archived' WHERE status = 'failed' AND source = $1",
+                    source,
+                )
+            else:
+                res = await conn.execute(
+                    "UPDATE dead_letter_queue SET status = 'archived' WHERE status = 'failed'"
+                )
+            action = "archived"
+        count = int(res.split(" ")[-1]) if " " in res else 0
+    return {"ok": True, "action": action, "count": count}
 
 
 @router.get("/domain-pacing/status")

@@ -387,6 +387,18 @@ export interface SourceRecoveryProfile {
   active?: boolean;
 }
 
+export interface SourceControlRow {
+  source_name: string;
+  state: string;
+  enabled: boolean;
+  last_success: string | null;
+  last_attempt: string | null;
+  blocked_until: string | null;
+  stop_reason: string | null;
+  consecutive_failures: number;
+  updated_at: string | null;
+}
+
 export interface RunIngestionCounts {
   records: number;
   messages: number;
@@ -545,6 +557,9 @@ export interface DLQItem {
   content_id: string | null;
   error_message: string | null;
   retry_count: number;
+  status?: string | null;
+  next_retry_at?: string | null;
+  last_attempt_at?: string | null;
   created_at: string;
 }
 

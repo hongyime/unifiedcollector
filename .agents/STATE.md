@@ -1,3 +1,7 @@
+# Live extension recovery and polish-repo completion (2026-11-23)
+
+- 2026-11-23 DLQ recovery & UI controls: implemented operator controls for DLQ in `src/dashboard/api/ops.py` (`POST /dlq/{id}/retry`, `POST /dlq/redrive-pending`, `POST /dlq/archive-failed`); added frontend mutations and UI buttons in `DLQPage.tsx` and `api.ts` (Re-drive Pending button, Archive Failed button, and per-row Retry button). In PostgreSQL, safely archived 6,958 unreplayable historical failed DLQ items while waking up 10 pending Telegram rows with `next_retry_at = NOW()`. Verified backend endpoints (live and with `tests/dashboard/test_dlq_ops.py`), frontend build (`tsc && vite build`), and 11 Vitest tests. All 10 collector sources report `state="HEALTHY"` and all UC containers are Docker-healthy.
+
 # Live extension recovery and fleet acceptance (2026-11-18)
 
 - 2026-11-21 worktree cleanup: removed the clean, merged `security/security-findings` worktree. Retained the clean `recovery/security-aligned` worktree because it is not merged into `main`.
@@ -969,3 +973,40 @@ Telegram remains behind four active FloodWaits through 06:22:07 UTC. At 01:33 UT
 2026-11-21 live acceptance verification: verified live collector container status after commit 0a7a9961 rollout. Confirmed `unifiedcollector_collector_strava` has been running continuously healthy with 0 crashes since restart (previously crashed at 11:10 UTC on `FeatureNotSupportedError: FOR UPDATE is not allowed with aggregate functions`; 0 errors in 1.5+ hours post-restart). Synchronized `src/core/recon_egress_guard.py` into `unifiedcollector_recon_egress_guard` (which does not mount `./src`) and restarted it; confirmed `try...except (ConnectionResetError, BrokenPipeError)` is active in-container and guard is Docker-healthy. All 35 stack containers are Docker-healthy; PostgreSQL connections are at 55/200; `source-matrix` reports 28 operational sources normal. Focused test suites pass (281 tests passed).
 
 2026-11-21 fleet rollout completion: Completed full graceful restart across all remaining long-running collectors and services (YouTube, TikTok, Telegram, WhatsApp, Lemon8, Beeper, Instagram, Pinterest, Threads, Facebook, X, Bluesky, Snapchat, Airbnb, Exposure, Watchdog, Realtime Feed, Control Bot, Control Executor, Browser Cookie Vault, Scheduler, Onboard Bot, and Browser Ingest post-6b5e8236). Resolved Telegram health report timeouts caused by connection pool starvation; Telegram connection count dropped from 10 to 2 and source health updated to running with crash_count=0. Permanently bind-mounted `../src:/app/src:ro` into `unifiedcollector_recon_egress_guard` in `docker/docker-compose.yml` (and synced `test_compose_storage_root_hash.py`), eliminating container drift on recreation. Added disconnect test in `test_recon_egress_guard.py` verifying `ConnectionResetError` and `BrokenPipeError` handling. All 35 containers are Docker-healthy, PostgreSQL connections at 69/200, and all endpoints verified healthy.
+
+2026-11-22 MV3 Extension & Website Collector Recovery:
+- Fixed MV3 extension background worker message routing: in `extension/src/background.ts`, `chrome.runtime.onMessage.addListener` erroneously returned `false` after dispatching asynchronous handlers (like `getPlatforms`, `diagnostics`, `getTargets`, `nativeScrape`, etc.), while synchronously returning `true` inside `fastReplyTypes`. Returning `false` caused Chrome to immediately tear down the message channel before asynchronous callbacks could execute `sendResponse`, triggering 'The message port closed before a response was received.' and showing 'Background worker unreachable' on `tabs.html` and `popup.html`.
+- Replaced the returns so `fastReplyTypes` returns `false` (after immediate synchronous `sendResponse`) and the outer async router returns `true; // async`. Rebuilt the extension bundle (`npm run build`) and reloaded the unpacked extension worker (v1.23.126) via CDP. Verified with CDP evaluate from `tabs.html`: `getPlatforms` returned 12 platforms and `diagnostics` succeeded; tabs page diagnostic status is green ('worker active; last activity 10s ago; bridge heartbeat ok').
+- Added static regression `test_async_message_router_keeps_response_channel_open` in `tests/extension/test_extension_bundle_static.py`.
+- Fixed `WebsiteCollector` stale upstream health: in `src/collectors/website/__init__.py`, multi-target multi-hour crawling never called `record_upstream_check()` or `heartbeat_source_health()` during in-progress page/asset fetching or upon target timeout deferrals, causing `last_checked_at` to exceed the 3600s SLA and marking the collector `degraded` in source matrix. Added `record_upstream_check()` and `await self.heartbeat_source_health()` when pages and media are fetched and on target completions. Verified with unit test in `tests/collectors/test_website.py` (51 tests passed). Updated DB source_health to `running` and restarted `unifiedcollector_collector_website` cleanly.
+- Live verification: All 35 UC containers are Docker-healthy. `/collectors/source-matrix` reports 0 degraded collectors (`degraded_count: 0`). Active collections this hour: 687+ records, 194+ messages, 67+ media items, 0 access errors. Live browser tabs (Threads, Facebook, Snapchat, Pinterest) actively streaming into `browser_ingest` with 200 OK.
+
+2026-11-22 Follow-up Audit — Watchdog & Scrape-Config Deadlock Resolution:
+- Identified that while `WebsiteCollector` was fixed, `instagram` was left degraded in `source_health` with `browser capture stalled: no eligible upstream check in 3600 seconds... (watchdog)` because `_browser_source_tick` in `src/watchdog/freshness.py` skipped paused browser sources with `continue` without invoking `_mark_running_if_browser_watchdog` or `_mark_running_if_stale_watchdog`. When the scheduler rotated Instagram off, the false-positive watchdog degradation persisted.
+- Identified recovery deadlock in `src/dashboard/api/social.py`: `/social/scrape-config` marked any source with degraded `source_health` as `tab_eligible = False`. If a browser source had stalled, the extension evicted the tab and refused to open it when its rotation turn arrived, permanently preventing content capture or heartbeat emission. Added `not is_browser_stall` exception so browser stall warnings allow the tab to launch and resolve the stall.
+- Added regression tests in `tests/test_watchdog_browser_evidence.py` (`test_rotator_paused_source_clears_browser_and_stale_watchdog_rows`) and `tests/dashboard/test_coverage_api.py` (`test_social_scrape_config_keeps_browser_stall_watchdog_tab_eligible`).
+- Cleared the stale watchdog stall row in `source_health` for Instagram, restarted `unifiedcollector_watchdog` and `unifiedcollector_dashboard`. Verified live: Instagram source health is `running`, tabs page diagnostics report active worker, and source matrix shows 28 sources with only TikTok in scheduled provider 429 backoff.
+
+2026-11-23 Polish-repo Candidate 1 (DLQ recovery & persistence):
+- Implemented status validation and filtering in `src/core/dlq_status.py` and `src/dashboard/api/ops.py`: validated against `ALLOWED_DLQ_STATUSES` (`pending`, `in_progress`, `failed`, `archived`) and rejected invalid values with 400 Bad Request.
+- Parameterized delay interval in `DLQConsumer._on_retry` in `src/core/dlq_consumer.py` (`$4 * INTERVAL '1 second'`).
+- Updated frontend types (`src/dashboard/frontend/src/services/types.ts`) to expose `status`, `next_retry_at`, and `last_attempt_at`. Forwarded status filter in `src/dashboard/frontend/src/services/api.ts`.
+- Enhanced `DLQPage.tsx` with a Status filter dropdown, `StatusBadge` indicators (`pending` = warning, `in_progress` = processing, `failed` = error, `archived` = idle), and a Next Retry column with relative formatting.
+- Verification: 10 focused DLQ tests pass (`tests/core/test_dlq_status.py` and `tests/core/test_dlq_consumer.py`); 203 core/dashboard pytest tests pass; Vite production build and 11 Vitest tests pass. Live `/dlq?status=pending` returns 200 OK with formatted records.
+
+2026-11-23 Polish-repo Candidate 2 (Browser-source liveness & tab lifecycle):
+- Added `chrome.tabs.onRemoved.addListener` in `extension/src/background.ts` to clear `lastKick[tabId]` and schedule a 1000ms debounced `ensureScraperTabsOpen("tab-removed")` reconciliation sweep.
+- Rebuilt extension bundle via `npm run build` cleanly (all 6 bundles generated).
+- Reloaded active extension in Chrome CDP (`scripts/force_reload_ext.py`). Verified 4 resident tabs remain healthy (TikTok, Lemon8, Pinterest, Snapchat) totaling 204.2 MB JS heap.
+- Regression verification: 58 static bundle tests pass (`test_tabs_on_removed_listener_cleans_kick_and_reconciles_scrapers`).
+
+2026-11-23 Polish-repo Candidates 3 & 4 (Dashboard controls & media vault delivery):
+- Resolved RGBA thumbnail rendering failure in `src/dashboard/api/media.py`: normalized non-RGB image modes (RGBA, LA, palette with transparency) to RGB with white alpha background compositing before JPEG buffer serialization, preventing Pillow `cannot write mode RGBA as JPEG` OSError and avoiding silent fallback to multi-megabyte raw file responses.
+- Added regression test `test_media_thumbnail_handles_rgba_image` in `tests/dashboard/test_media_path_resolver.py`.
+- Added `SourceControlRow` interface in `src/dashboard/frontend/src/services/types.ts` and `sourceControls()` helper in `src/dashboard/frontend/src/services/api.ts`.
+- Rebuilt frontend production bundle (`tsc && vite build`) and verified all 11 Vitest tests.
+- Recreated/restarted `unifiedcollector_dashboard` container; verified live `GET /api/source-controls` returns 200 OK with all 10 sources HEALTHY.
+- Regression verification: 194 dashboard pytest tests pass cleanly.
+
+
+

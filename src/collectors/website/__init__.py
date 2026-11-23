@@ -704,12 +704,15 @@ class WebsiteCollector(BaseCollector):
                 )
                 if int(stats.get("pages") or 0):
                     self.record_upstream_check()
+                await self.heartbeat_source_health()
                 await save_checkpoint(seed)
             except asyncio.TimeoutError:
                 msg = f"target exceeded {self._target_timeout:.0f}s wall-clock cap"
                 logger.info("Deferred website/%s: %s", seed, msg)
                 await self._defer_target(url, seed, msg)
                 await self._record_target_attempt(url, failure_class="timeout")
+                if self.upstream_check_succeeded:
+                    await self.heartbeat_source_health()
                 await save_checkpoint(seed)
             except Exception as e:
                 logger.error("Failed website/%s: %s", seed, e)
@@ -899,6 +902,8 @@ class WebsiteCollector(BaseCollector):
                                     if await self._stream_video(client, url, domain):
                                         self._domain_pacing.count("videos_found")
                                         stats["videos"] += 1
+                                        self.record_upstream_check()
+                                        await self.heartbeat_source_health()
                         except RuntimeError as e:
                             text = str(e)
                             if "status 403" in text or "status 429" in text:
@@ -941,6 +946,8 @@ class WebsiteCollector(BaseCollector):
                         await self._handle_pdf(resp.content, url, domain)
                         self._domain_pacing.count("pdfs_found")
                         stats["pdfs"] += 1
+                        self.record_upstream_check()
+                        await self.heartbeat_source_health()
                     continue
 
                 # Office documents (word/ppt/excel/text). Detect by extension or
@@ -952,6 +959,8 @@ class WebsiteCollector(BaseCollector):
                     await self._handle_document(resp.content, url, domain)
                     self._domain_pacing.count("docs_found")
                     stats["docs"] += 1
+                    self.record_upstream_check()
+                    await self.heartbeat_source_health()
                     continue
 
                 if "text/html" not in ct and "application/xhtml" not in ct:
@@ -982,6 +991,8 @@ class WebsiteCollector(BaseCollector):
                     internal_links=[l for l in links if _same_domain(l, url)],
                     external_links=[l for l in links if not _same_domain(l, url)],
                 )
+                self.record_upstream_check()
+                await self.heartbeat_source_health()
 
                 if self._download_images:
                     for img in images:
