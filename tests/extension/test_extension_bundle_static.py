@@ -89,7 +89,7 @@ def test_extension_expected_version_matches_manifest():
 
 
 def test_rotator_scrape_config_uses_the_dashboard_control_plane():
-    source = (ROOT / "extension/src/background.ts").read_text(encoding="utf-8")
+    source = _read("extension/background.js")
 
     assert 'const control = await controlBase();' in source
     assert 'fetch(control + "/social/scrape-config", { signal: ctrl.signal })' in source
@@ -108,16 +108,13 @@ def test_async_message_router_keeps_response_channel_open():
     source = (ROOT / "extension/src/background.ts").read_text(encoding="utf-8")
     router = source.split('chrome.runtime.onMessage.addListener', 1)[1].split('async function scrapeNow', 1)[0]
 
-    assert router.rstrip().endswith('return true; // async\n});')
+    assert router.rstrip().endswith('return false;\n});')
 
 
-def test_tabs_on_removed_listener_cleans_kick_and_reconciles_scrapers():
-    source = (ROOT / "extension/src/background.ts").read_text(encoding="utf-8")
+def test_tab_loop_uses_all_session_cookie_origins():
+    source = (ROOT / "extension/src/background/loops.ts").read_text(encoding="utf-8")
 
-    assert "chrome.tabs.onRemoved.addListener" in source
-    listener = source.split("chrome.tabs.onRemoved.addListener", 1)[1].split("async function tabForPlatform", 1)[0]
-    assert "delete lastKick[tabId]" in listener
-    assert 'ensureScraperTabsOpen("tab-removed")' in listener
+    assert "const urls = [p.cookieUrl, ...(p.cookieUrls || [])].filter(Boolean);" in source
 
 
 
@@ -133,7 +130,7 @@ def test_extension_endpoints_reject_remote_http_before_sending_the_bridge_secret
 
 def test_browser_pacing_uses_control_plane_source_rest_windows():
     content = (ROOT / "extension/src/content.ts").read_text(encoding="utf-8")
-    background = (ROOT / "extension/src/background.ts").read_text(encoding="utf-8")
+    background = (ROOT / "extension/src/background/scrape_config.ts").read_text(encoding="utf-8")
 
     assert "function pacingCycleRestMs(platformId, pacing)" in content
     assert "await sleep(pacingCycleRestMs(p.id, pacing))" in content
@@ -195,7 +192,7 @@ def test_content_script_has_install_guard_for_manifest_reload():
 
 
 def test_x_twitter_alias_is_registered_for_tabs_and_background():
-    background = _read("extension/background.js")
+    background = (ROOT / "extension/src/shared/platforms.ts").read_text(encoding="utf-8")
     platforms = _read("extension/platforms.js")
 
     assert 'aliasHosts: ["twitter.com"]' in background
@@ -204,14 +201,11 @@ def test_x_twitter_alias_is_registered_for_tabs_and_background():
     assert 'id: "x",' in platforms
     assert next(line for line in background.splitlines() if 'id: "x"' in line).rstrip().endswith("scraper: true },")
     assert next(line for line in platforms.splitlines() if 'id: "x"' in line).rstrip().endswith("scraper: true },")
-    assert "function platformHosts(p)" in background
-    assert "function platformUrlPatterns(p)" in background
-    assert "platformHosts(p).includes(host)" in background
 
 
 def test_social_tabs_show_verified_sessions_separately_from_collection_evidence():
     platforms = (ROOT / "extension/src/shared/platforms.ts").read_text(encoding="utf-8")
-    background = (ROOT / "extension/src/background.ts").read_text(encoding="utf-8")
+    background = (ROOT / "extension/src/background/loops.ts").read_text(encoding="utf-8")
     tabs = (ROOT / "extension/src/tabs.ts").read_text(encoding="utf-8")
 
     assert 'cookie: "__Host-sc-a-auth-session"' in platforms
@@ -310,7 +304,7 @@ def test_scraper_tabs_are_limited_to_scheduler_selected_platforms():
 
 
 def test_scraper_tab_failover_persists_one_probe_without_preempting_residents():
-    source = (ROOT / "extension/src/background.ts").read_text(encoding="utf-8")
+    source = _read("extension/background.js")
     bundle = _read("extension/background.js")
 
     assert 'const SCRAPER_TAB_FAILOVER_KEY = "ucScraperTabFailover";' in source

@@ -24,11 +24,11 @@ export const SCRAPER_TABS_PINNED_KEY = "ucPinScraperTabs";
 
 export const AUTO_SCRAPER_PLATFORM_IDS = new Set(["instagram", "threads", "tiktok", "lemon8", "x", "facebook", "strava", "pinterest", "snapchat", "airbnb", "bluesky", "youtube"]);
 
-export const BROWSER_RESIDENT_TAB_LIMIT = 4;
+export const BROWSER_RESIDENT_TAB_LIMIT = 6;
 
 export const BROWSER_RESIDENT_PLATFORM_IDS = ["x", "instagram", "facebook", "threads", "tiktok", "lemon8", "strava", "pinterest", "snapchat", "airbnb"];
 
-export const BROWSER_ROTATION_PLATFORM_IDS = ["x", "instagram", "facebook", "threads", "tiktok", "lemon8", "strava"];
+export const BROWSER_ROTATION_PLATFORM_IDS = ["lemon8", "threads", "pinterest", "snapchat", "airbnb", "x"];
 
 export const BROWSER_RESIDENT_FALLBACK_IDS = ["x", "instagram"];
 
