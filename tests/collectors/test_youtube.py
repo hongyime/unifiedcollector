@@ -560,6 +560,29 @@ async def test_upsert_channel_with_auth_extracts_uploads(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_upsert_channel_does_not_archive_capped_profile(monkeypatch):
+    coll = _new_collector(
+        monkeypatch,
+        YOUTUBE_API_KEY="AIzaK",
+        YOUTUBE_FAMOUS_SUB_CAP="2000",
+    )
+    coll._has_auth = True
+    coll.download_media = AsyncMock()
+    _patch_httpx_async_client(monkeypatch, _make_response(status=200, json_body={
+        "items": [{
+            "snippet": {"thumbnails": {"high": {"url": "https://t/x.jpg"}}},
+            "statistics": {"subscriberCount": "2000"},
+            "contentDetails": {"relatedPlaylists": {"uploads": "UU123"}},
+        }],
+    }))
+
+    out = await coll._upsert_channel("UC123", "Capped Channel")
+
+    assert out == ("UU123", 2000)
+    coll.download_media.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_upsert_channel_with_auth_returns_none_when_not_found(monkeypatch):
     coll = _new_collector(monkeypatch, YOUTUBE_API_KEY="AIzaK")
     coll._has_auth = True

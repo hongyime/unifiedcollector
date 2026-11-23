@@ -2004,6 +2004,12 @@ class YoutubeCollector(BaseCollector):
                 priority=max(self._discovered_target_priority, 2),
             )
 
+        subscriber_count = int(statistics.get("subscriberCount", 0) or 0)
+        # _collect_channel records the subscriber-cap skip; do not archive a
+        # profile thumbnail for a channel that the cap rejects.
+        if self._famous_sub_cap and subscriber_count >= self._famous_sub_cap:
+            return uploads_playlist, subscriber_count
+
         if thumbnail_url and not self.is_known(f"profile_{channel_id}"):
             try:
                 inserted = await self.download_media({
@@ -2055,7 +2061,7 @@ class YoutubeCollector(BaseCollector):
         except Exception as exc:
             logger.debug("user_change_tracker[youtube]: detect_and_log failed: %s", exc)
 
-        return uploads_playlist, int(statistics.get("subscriberCount", 0) or 0)
+        return uploads_playlist, subscriber_count
 
     @staticmethod
     def _parse_count(s):
