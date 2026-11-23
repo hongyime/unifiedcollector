@@ -280,6 +280,7 @@ services:
       # remains bounded by batch size, failed-retry delay, and yt-dlp timeout.
       YOUTUBE_MAX_VIDEO_DURATION_MINUTES: "0"
       YOUTUBE_COOKIE_FILE: /app/credentials/youtube/cookies.txt
+      YOUTUBE_FAMOUS_SUB_CAP: "${YOUTUBE_FAMOUS_SUB_CAP:-2000}"
     extra_hosts:
       - "host.docker.internal:172.20.0.1"
     cap_add:
