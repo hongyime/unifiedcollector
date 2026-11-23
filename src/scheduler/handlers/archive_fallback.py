@@ -25,14 +25,16 @@ class ArchiveFallbackHandler:
     name = "archive_fallback"
 
     def __init__(self) -> None:
-        # 0.0 forces a run on the first should_run so a restart picks up
-        # whatever accumulated in the queue.
-        self._last_run: float = 0.0
+        # None forces a run on the first should_run even on a young host whose
+        # monotonic clock has not reached the normal collection interval yet.
+        self._last_run: float | None = None
         self._interval_seconds: int | None = None
 
     async def should_run(self, ctx: SchedulerContext) -> bool:
         if ctx.get_env_int("ARCHIVE_FALLBACK_ENABLED", 0, min_value=0) != 1:
             return False
+        if self._last_run is None:
+            return True
         if self._interval_seconds is None:
             minutes = ctx.get_env_int(
                 "ARCHIVE_FALLBACK_INTERVAL_MINUTES", 360, min_value=1,

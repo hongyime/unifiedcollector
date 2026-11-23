@@ -25,6 +25,7 @@ from src.core.recon_rollout import (
     AdmissionPolicyError,
     admission_snapshot,
     commit_claim,
+    halt_admission,  # noqa: F401 - retained as a test seam
     load_policy,
     release_claim,
     reserve_claim,

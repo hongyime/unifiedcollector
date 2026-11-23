@@ -77,11 +77,11 @@ class HostMemoryAlertHandler:
     name = "host_memory_alert"
 
     def __init__(self) -> None:
-        # 0.0 means "no alert has fired yet"; combined with a large
-        # ``_time.monotonic()`` this lets the first tick probe immediately.
-        self._last_alert: float = 0.0
+        self._last_alert: float | None = None
 
     async def should_run(self, ctx: SchedulerContext) -> bool:
+        if self._last_alert is None:
+            return True
         interval = ctx.get_env_int(
             "HOST_MEMORY_ALERT_INTERVAL_SECONDS", 3600, min_value=300,
         )
