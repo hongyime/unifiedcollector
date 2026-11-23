@@ -21,6 +21,7 @@ from src.core.target_status import (
     TargetAlreadyKnown,
     add_collection_target,
     list_collection_targets,
+    target_already_known as _target_already_known,  # noqa: F401 - re-exported by dashboard API
 )
 
 logger = logging.getLogger(__name__)
