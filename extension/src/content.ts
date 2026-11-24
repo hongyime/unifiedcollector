@@ -915,7 +915,8 @@ function postEngagementExceedsLimit(root) {
   if (!root) return false;
   try {
     const text = (root.innerText || root.textContent || "").replace(/,/g, "");
-    const match = text.match(/([\d.]+\s*[KMB]?)\s+(?:likes?|reactions?)/i);
+    const match = text.match(/([\d.]+\s*[KMB]?)\s+(?:likes?|reactions?)/i)
+      || text.match(/(?:and|liked by [^\n]+ and)\s+([\d.]+\s*[KMB]?)\s+others/i);
     return !!match && (compactCount(match[1]) || 0) > INTIMATE_MAX_POST_LIKES;
   } catch (e) {
     return false;
@@ -1219,13 +1220,6 @@ const instagram = {
       return j && j.data && j.data.user;
     } catch (e) {
       if (e && (e.status === 400 || e.status === 404)) {
-        await send({
-          type: "targetStatus",
-          platform: "instagram",
-          username,
-          status: "unavailable",
-          reason: "profile_http_" + e.status,
-        }).catch(() => {});
         clog("info", `skip unavailable profile ${username}: HTTP ${e.status}`, "instagram");
         return null;
       }
@@ -1547,19 +1541,79 @@ const instagram = {
     const _dsm = document.cookie.match(/ds_user_id=(\d+)/);
     const _curId = _dsm ? _dsm[1] : null;
     if (_curId && !IG_SEEDED_ACCOUNTS.has(_curId)) { IG_SEEDED_ACCOUNTS.add(_curId); this.seedFromSelf(); }
+    const forcedRecovery = forcedRecoveryMode("instagram");
+    let saved = 0, discovered = 0, visited = 0;
+
+    // PASS -1 — RESIDENT HOME FEED DOM HARVEST: When the resident tab is on the home feed (/ or /home),
+    // scroll and harvest intimate posts & photos directly from the rendered DOM.
+    // Pure DOM reads (zero ban-risk API calls), filtered by intimate network rules
+    // (no verified, no sponsored, no suggested, <= 500 likes).
+    const isFeed = /^\/(?:(?:home|feed)\/?)?$/.test(location.pathname || "");
+    if (isFeed) {
+      clog("info", "Instagram resident home feed cycle — auto-scrolling", "instagram");
+      await reportBrowserRecoveryProbe("instagram", "feed", { mode: "feed" });
+      await autoScroll(forcedRecovery ? 3 : 7, 1400, forcedRecovery ? 900 : 1800, {
+        maxPauseMs: forcedRecovery ? 1500 : 3000,
+      });
+      const sink = harvestDom("feed", {
+        imgRe: /(cdninstagram\.com|fbcdn\.net)/i,
+        junkRe: /profile_pic|rsrc\.php|s150x150|s320x320|emoji|sprite|static/i,
+        platform: "instagram",
+      });
+      const activeMediaRevisit = currentBrowserMediaRevisit("instagram");
+      markBrowserMediaRevisitItems("instagram", sink, activeMediaRevisit);
+      const posts = harvestPermalinkPosts(
+        /\/(?:p|reel)\/([^/?#]+)/,
+        (m) => m[1],
+        "instagram"
+      );
+      const authors = collectPermalinkAuthors(
+        /^\/([A-Za-z0-9._]{1,30})(?:\/(?:p|reel|reels))?(?:[/?#]|$)/,
+        /^(direct|explore|reels|stories|accounts|your_activity|settings|archive)$/i,
+        "instagram"
+      );
+      if (sink.items.length) {
+        await send({
+          type: "ingest",
+          platform: "instagram",
+          username: "feed",
+          items: sink.items,
+          record_empty: true,
+          probe_reason: "instagram_feed_dom_media",
+          probe_meta: { posts: posts.length, authors: authors.length },
+        }, { timeoutMs: 45000 });
+        saved += sink.items.length;
+      }
+      if (posts.length) {
+        sendSideEffect(
+          { type: "posts", platform: "instagram", username: "feed", posts },
+          "instagram",
+          "Instagram feed post write",
+          { timeoutMs: 25000 }
+        );
+      }
+      if (authors.length) {
+        sendSideEffect(
+          { type: "users", platform: "instagram", context: "seen", users: authors },
+          "instagram",
+          "Instagram seen-user write",
+          { timeoutMs: 25000 }
+        );
+      }
+    }
+
     let resp = [];
     try { resp = (await send({ type: "getTargets", platform: "instagram" })) || []; } catch (e) {}
     const pool = (Array.isArray(resp) ? resp : [])
       .map((t) => (typeof t === "string" ? { username: t, hop: 0 } : t))
       .filter((t) => t && t.username)
       .sort((a, b) => Number(b.is_private === true || b.is_private === "true" || (b.metadata && b.metadata.is_private === true) || (b.metadata && b.metadata.is_private === "true")) - Number(a.is_private === true || a.is_private === "true" || (a.metadata && a.metadata.is_private === true) || (a.metadata && a.metadata.is_private === "true")));
-    if (!pool.length) return { targets: 0, saved: 0, discovered: 0 };
+    if (!pool.length) return { targets: isFeed ? 1 : 0, saved, discovered: 0 };
     const cache = new Map();
     const getUser = async (u) => { if (cache.has(u)) return cache.get(u); const p = await this.getProfile(u); cache.set(u, p); return p; };
     const okProfile = (user) => user && user.is_verified !== true &&
       user.is_business_account !== true && user.is_professional_account !== true &&
       ((user.edge_followed_by && user.edge_followed_by.count) || 0) <= igFamousFollowerCap();
-    let saved = 0, discovered = 0, visited = 0;
 
     // PASS 0 — WHOLE STORY TRAY. One reels_tray call captures every followed
     // account's active story this cycle (the bulk of your story feed), so the
@@ -2650,6 +2704,20 @@ function threadsVerifiedBadge(root) {
   }));
 }
 
+function instagramVerifiedBadge(root) {
+  if (!root || !root.querySelectorAll) return false;
+  const elements = [root, ...root.querySelectorAll("svg[aria-label], [title], header, a")];
+  return elements.some((element) => [
+    element.getAttribute && element.getAttribute("aria-label"),
+    element.getAttribute && element.getAttribute("title"),
+    element.textContent,
+  ].some((label) => {
+    const normalized = String(label || "").normalize("NFKC").trim().toLowerCase();
+    if (/\bnot\b.{0,16}\bverified\b|\b(?:un|non)[\s-]*verified\b/.test(normalized)) return false;
+    return /\bverified\b/.test(normalized) || /\bsponsored\b/.test(normalized) || /\bsuggested for you\b/.test(normalized);
+  }));
+}
+
 function xTweetRoots() {
   const roots = [];
   const seen = new Set();
@@ -3317,13 +3385,17 @@ function domPostUrlForElement(el, platform) {
 // ===========================================================================
 function harvestDom(entity, { imgRe, junkRe, platform }) {
   const sink = makeSink();
-  const exceedsPostEngagement = (node) => (platform === "facebook" || platform === "threads") &&
+  const exceedsPostEngagement = (node) => (platform === "facebook" || platform === "threads" || platform === "instagram") &&
     postEngagementExceedsLimit(node && node.closest && node.closest('[data-pressable-container],[role="article"],article'));
   const insideVerifiedThreadPost = (node) => platform === "threads" && threadsVerifiedBadge(
     node && node.closest && node.closest('[data-pressable-container],[role="article"],article')
   );
+  const insideVerifiedOrSuggestedIgPost = (node) => platform === "instagram" && instagramVerifiedBadge(
+    node && node.closest && node.closest('[data-pressable-container],[role="article"],article')
+  );
   document.querySelectorAll("img").forEach((im) => {
     if (insideVerifiedThreadPost(im)) return;
+    if (insideVerifiedOrSuggestedIgPost(im)) return;
     if (exceedsPostEngagement(im)) return;
     if (imageLooksTooSmall(im, 120)) return;
     imageUrlsFromElement(im).forEach((u) => {
@@ -3343,6 +3415,7 @@ function harvestDom(entity, { imgRe, junkRe, platform }) {
   });
   document.querySelectorAll('[style*="url("]').forEach((el) => {
     if (insideVerifiedThreadPost(el)) return;
+    if (insideVerifiedOrSuggestedIgPost(el)) return;
     if (exceedsPostEngagement(el)) return;
     if (elementLooksTooSmall(el, 140)) return;
     const values = [
@@ -3364,6 +3437,7 @@ function harvestDom(entity, { imgRe, junkRe, platform }) {
   });
   document.querySelectorAll("video").forEach((v) => {
     if (insideVerifiedThreadPost(v)) return;
+    if (insideVerifiedOrSuggestedIgPost(v)) return;
     if (exceedsPostEngagement(v)) return;
     if (v.poster && /https?:/.test(v.poster) && !junkRe.test(v.poster))
       sink.add({
@@ -3403,7 +3477,8 @@ function harvestPermalinkPosts(linkRe, idFrom, platform = "") {
     if (!pid || byId.has(pid)) return;
     const box = a.closest('[data-pressable-container],[role="article"],article') || a.parentElement;
     if (platform === "threads" && threadsVerifiedBadge(box)) return;
-    if ((platform === "threads" || platform === "facebook") && postEngagementExceedsLimit(box)) return;
+    if (platform === "instagram" && instagramVerifiedBadge(box)) return;
+    if ((platform === "threads" || platform === "facebook" || platform === "instagram") && postEngagementExceedsLimit(box)) return;
     let caption = "";
     try { caption = (box && box.innerText || "").trim().slice(0, 2200); } catch (e) {}
     if (!caption) return;                       // skip empties / UI chrome
@@ -3425,6 +3500,7 @@ function collectPermalinkAuthors(re, skip, platform = "") {
     const box = a.closest('[data-pressable-container],[role="article"],article');
     if (platform === "x" && xVerifiedBadge(box)) return;
     if (platform === "threads" && threadsVerifiedBadge(box)) return;
+    if (platform === "instagram" && instagramVerifiedBadge(box)) return;
     if (m && m[1] && m[1].length < 40 && !(skip && skip.test(m[1]))) set.add(m[1]);
   });
   return [...set].map((u) => ({ username: u }));

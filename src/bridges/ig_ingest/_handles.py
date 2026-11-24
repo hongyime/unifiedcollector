@@ -332,6 +332,13 @@ async def _ensure_ig_profile(conn, ppid: str, p: dict) -> str | None:
     posts remain genuinely unattributable, same as before."""
     uid = _ig_author_uid(ppid)
     if not uid:
+        username = (p.get("author_username") or p.get("username") or None)
+        if username:
+            row = await conn.fetchrow(
+                "SELECT id FROM instagram_profiles WHERE lower(username) = lower($1)", username
+            )
+            if row:
+                return str(row["id"])
         return None
     row = await conn.fetchrow(
         "SELECT id FROM instagram_profiles WHERE platform_user_id = $1", uid
