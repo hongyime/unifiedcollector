@@ -1,6 +1,7 @@
 # Intimate network filter rollout & audit completion (2026-11-24)
 
 - Post-audit remediation: fixed Facebook resident home feed capture in `extension/src/content.ts` (allowing `entity === "feed"` while filtering non-person profiles), resolving Facebook's stalled capture and returning source health to `running`; updated `src/bridges/ig_ingest/targets.py` to return `priority` and `is_private` so extension target sorting functions; elevated 331 followed private Instagram accounts to `priority = 15` in `collection_targets`; seeded 44 missing TikTok and 1,985 Strava follows into `collection_targets`; purged 50 corporate seeds and over 3,400 corporate posts across X, Threads, and Instagram; reloaded extension v1.23.126 in Chrome CDP and restarted `browser_ingest` and `dashboard`. All 20 sources report `running` and all 10 source controls report `HEALTHY`. Focused tests (266) pass.
+- 30-Minute Live Watch completed: observed continuous live collection across the entire fleet for 30 minutes with zero unhandled exceptions, zero dead letter growth, and zero rate-limit blocks. Verified deterministic 30-minute rotation cycles (`pinterest/snapchat` -> `airbnb/x` -> `lemon8/threads`) alongside the 4 permanent 24/7 resident tabs (`instagram`, `facebook`, `tiktok`, `strava`), maintaining exactly 6 active tabs in Chrome CDP. All 35 UC Docker containers remain Docker-healthy.
 
 # Intimate network filter rollout (2026-11-24)
 
