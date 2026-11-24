@@ -17,7 +17,8 @@ _BUNDLE_SIZE_BASELINE_BYTES = {
     # Reset after the bridge-secret header rollout (v1.23.126): every bridge
     # fetch now awaits bridgeHeaders(), which adds the storage read + header
     # spread to background.js.
-    "content.js": 221_859,
+    # Reset after adding resident feed DOM harvesting for Instagram and silent-zero yield detection
+    "content.js": 246_405,
     "background.js": 139_670,
 }
 _BUNDLE_SIZE_BUDGET_MULTIPLIER = 1.10
@@ -1109,3 +1110,12 @@ def test_extension_bundle_sizes_stay_within_growth_budget():
             f"was added; do NOT commit the growth as a new baseline without "
             f"documenting the justification."
         )
+
+
+def test_content_script_includes_silent_zero_yield_detection():
+    """Assert that the compiled bundle includes silent zero yield detection logic."""
+    content = _read("extension/content.js")
+    assert "SILENT_ZERO_STREAK" in content
+    assert "isPopulatedFeed" in content
+    assert "browser_content_silent_zero" in content
+    assert "silent_zero_candidates" in content

@@ -106,7 +106,26 @@ async def _write_browser_ingest_event(
             safe_error_class,
             json.dumps(metadata or {}),
         )
-        if _browser_event_marks_source_success(platform, endpoint, observed, stored, metadata):
+        health_status = str((metadata or {}).get("health_status") or "").lower()
+        if health_status == "browser_content_silent_zero":
+            err_msg = (
+                f"browser capture stalled: browser_content_silent_zero - "
+                f"{(metadata or {}).get('health_reason') or 'zero candidates on populated feed'} (watchdog)"
+            )
+            await conn.execute(
+                """
+                INSERT INTO source_health
+                  (source, status, last_error, updated_at)
+                VALUES ($1, 'degraded', $2, NOW())
+                ON CONFLICT (source) DO UPDATE SET
+                  status = 'degraded',
+                  last_error = $2,
+                  updated_at = NOW()
+                """,
+                platform,
+                err_msg,
+            )
+        elif _browser_event_marks_source_success(platform, endpoint, observed, stored, metadata):
             await conn.execute(
                 """
                 INSERT INTO source_health
@@ -139,6 +158,7 @@ def _browser_event_marks_source_success(
             "recoverable_error_shell",
             "loop_cycle_timeout",
             "forced_cycle_error",
+            "browser_content_silent_zero",
         }
     if endpoint == "media":
         if stored_count > 0:

@@ -4593,6 +4593,35 @@ async function observeRestrictedInstagramFollowingFeed() {
   return { targets: 0, saved: 0, discovered: 0, restricted_observation: true, account: owner };
 }
 
+const SILENT_ZERO_STREAK: Record<string, number> = {};
+
+function isPopulatedFeed(platformId: string): boolean {
+  try {
+    if (platformId === "instagram") {
+      return document.querySelectorAll("article, main section, img[src*='cdninstagram.com'], a[href*='/p/']").length >= 2;
+    }
+    if (platformId === "threads") {
+      return document.querySelectorAll("article, div[data-pressable-container='true'], a[href*='/post/']").length >= 2;
+    }
+    if (platformId === "facebook") {
+      return document.querySelectorAll("div[role='feed'] div[role='article'], div[data-pagelet*='FeedUnit'], div[role='article']").length >= 2;
+    }
+    if (platformId === "tiktok") {
+      return document.querySelectorAll("div[data-e2e='recommend-list-item-container'], video").length >= 1;
+    }
+    if (platformId === "lemon8") {
+      return document.querySelectorAll("article, a[href*='/post/']").length >= 2;
+    }
+    if (platformId === "x") {
+      return document.querySelectorAll("article[data-testid='tweet']").length >= 2;
+    }
+    if (platformId === "strava") {
+      return document.querySelectorAll("div[data-testid='web-feed-entry'], div[data-testid='activity_feed']").length >= 1;
+    }
+  } catch (_) {}
+  return false;
+}
+
 async function mainLoop() {
   const p = currentPlatform();
   if (!p) return;
@@ -4715,8 +4744,29 @@ async function mainLoop() {
         );
         LOOP_TIMEOUT_STREAK = 0;
         markLoopProgress();
+        const cycleYield = asCycleNumber(stats && stats.saved) + asCycleNumber(stats && stats.discovered) + asCycleNumber(stats && stats.posts);
+        if (isPopulatedFeed(p.id)) {
+          if (cycleYield === 0) {
+            SILENT_ZERO_STREAK[p.id] = (SILENT_ZERO_STREAK[p.id] || 0) + 1;
+            if (SILENT_ZERO_STREAK[p.id] >= 3) {
+              clog("warn", `${p.label} silent zero yield detected (${SILENT_ZERO_STREAK[p.id]} consecutive cycles with 0 items on populated feed)`, p.label);
+            }
+          } else {
+            SILENT_ZERO_STREAK[p.id] = 0;
+          }
+        } else {
+          SILENT_ZERO_STREAK[p.id] = 0;
+        }
         if (!stats || !stats.skip_cycle_report) {
-          await send({ type: "cycleReport", platform: p.label, ...stats }).catch(() => {});
+          const silentZeroActive = (SILENT_ZERO_STREAK[p.id] || 0) >= 3;
+          await send({
+            type: "cycleReport",
+            platform: p.label,
+            ...stats,
+            zero_candidate_streak: SILENT_ZERO_STREAK[p.id] || 0,
+            health_status: silentZeroActive ? "browser_content_silent_zero" : undefined,
+            health_reason: silentZeroActive ? `silent_zero_candidates: 0 items extracted over ${SILENT_ZERO_STREAK[p.id]} consecutive cycles on populated feed` : undefined,
+          }).catch(() => {});
         }
       } catch (e) {
         if (e instanceof WallError) {
@@ -4749,7 +4799,17 @@ async function mainLoop() {
       }
       // heartbeat so the popup shows the loop is alive between passes
       markLoopProgress();
-      await send({ type: "loopStatus", platform: p.id, label: p.label, running: true, url: location.href }).catch(() => {});
+      const silentZeroActive = (SILENT_ZERO_STREAK[p.id] || 0) >= 3;
+      await send({
+        type: "loopStatus",
+        platform: p.id,
+        label: p.label,
+        running: true,
+        url: location.href,
+        health_status: silentZeroActive ? "browser_content_silent_zero" : "ok",
+        health_reason: silentZeroActive ? `silent_zero_candidates: 0 items extracted over ${SILENT_ZERO_STREAK[p.id]} consecutive cycles on populated feed` : "loop_running",
+        zero_candidate_streak: SILENT_ZERO_STREAK[p.id] || 0,
+      }).catch(() => {});
       await sleep(pacingCycleRestMs(p.id, pacing)); // source-specific randomized rest between passes
     }
   } finally {

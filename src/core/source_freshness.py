@@ -704,6 +704,9 @@ async def compute_liveness(conn) -> list[dict]:
         browser_url = browser_heartbeat.get("url") if browser_heartbeat else None
         browser_health_status = browser_heartbeat.get("health_status") if browser_heartbeat else None
         browser_health_reason = browser_heartbeat.get("health_reason") if browser_heartbeat else None
+        if str(browser_health_status or "").lower() == "browser_content_silent_zero":
+            status = "degraded"
+            detail = f"browser capture stalled: {browser_health_reason or 'browser_content_silent_zero'}"
         if name == "x" and _x_external_auth_or_page_shell(
             browser_url,
             browser_health_status,
@@ -720,8 +723,10 @@ async def compute_liveness(conn) -> list[dict]:
                     hs == "degraded"
                     and _watchdog_marker(h_error)
                     and "cooldown" not in str(h_error or "").lower()
+                    and "silent_zero" not in str(h_error or "").lower()
                 )
             )
+            and str(browser_health_status or "").lower() != "browser_content_silent_zero"
         )
         if pause_masks_stale:
             status = "live"

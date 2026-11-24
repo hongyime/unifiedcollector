@@ -637,7 +637,7 @@ services:
       WEBSITE_TARGET_RETRY_BACKOFF_MAX_SECONDS: "0"
       WEBSITE_RESPECT_ROBOTS: "0"
       WEBSITE_ROBOTS_POLICY: "disabled"
-      WEBSITE_URL_ALLOW: "${WEBSITE_URL_ALLOW:-https://*.com.sg,http://*.com.sg,https://*.com,http://*.com}"
+      WEBSITE_URL_ALLOW: "${WEBSITE_URL_ALLOW:-https://*.sg,http://*.sg,https://*.com.sg,http://*.com.sg,https://*.edu.sg,http://*.edu.sg,https://*.gov.sg,http://*.gov.sg,https://*.org.sg,http://*.org.sg,https://*.net.sg,http://*.net.sg,https://*.com,http://*.com}"
       WEBSITE_URL_BLOCK: "${WEBSITE_URL_BLOCK:-}"
       WEBSITE_URL_POLICY_FILE: "${WEBSITE_URL_POLICY_FILE:-/app/config/sources/website.url-policy.txt}"
       WEB_REQUEST_PERSONA_ENABLED: "${WEB_REQUEST_PERSONA_ENABLED:-1}"

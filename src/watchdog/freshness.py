@@ -365,6 +365,7 @@ async def _mark_running_if_browser_watchdog(db: asyncpg.Connection, source: str)
                 lower(coalesce(last_error, '')) LIKE 'browser capture stalled:%watchdog%'
                 OR lower(coalesce(last_error, '')) LIKE 'browser capture stalled:%browser media yield warning:%'
               )
+              AND lower(coalesce(last_error, '')) NOT LIKE '%browser_content_silent_zero%'
             """,
             source,
         )

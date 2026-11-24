@@ -9,11 +9,26 @@
 
 allow https://*.com.sg
 allow http://*.com.sg
+allow https://*.sg
+allow http://*.sg
+allow https://*.edu.sg
+allow http://*.edu.sg
+allow https://*.gov.sg
+allow http://*.gov.sg
+allow https://*.org.sg
+allow http://*.org.sg
+allow https://*.net.sg
+allow http://*.net.sg
 allow https://*.com
 allow http://*.com
 
 # Anchored equivalents for broad all-subdomain/all-path matching. These keep
 # host suffix-bleed blocked while allowing every normal URL path/query slug.
 allow_regex:^https?://[A-Za-z0-9.-]+\.com\.sg(?::[0-9]{1,5})?(?:/.*)?$
+allow_regex:^https?://[A-Za-z0-9.-]+\.edu\.sg(?::[0-9]{1,5})?(?:/.*)?$
+allow_regex:^https?://[A-Za-z0-9.-]+\.gov\.sg(?::[0-9]{1,5})?(?:/.*)?$
+allow_regex:^https?://[A-Za-z0-9.-]+\.org\.sg(?::[0-9]{1,5})?(?:/.*)?$
+allow_regex:^https?://[A-Za-z0-9.-]+\.net\.sg(?::[0-9]{1,5})?(?:/.*)?$
+allow_regex:^https?://[A-Za-z0-9.-]+\.sg(?::[0-9]{1,5})?(?:/.*)?$
 allow_regex:^https?://[A-Za-z0-9.-]+\.com(?::[0-9]{1,5})?(?:/.*)?$
 
