@@ -68,10 +68,10 @@ test('OCI and Docker multi-platform indexes block all cleanup',async()=>{
   for(const mediaType of ['application/vnd.oci.image.index.v1+json','application/vnd.docker.distribution.manifest.list.v2+json'])
     await assert.rejects(run([version(1,['latest'])],{schemaVersion:2,mediaType,manifests:[{}]}),/cleanup stopped/);
 });
-test('SBOM-attested indexes skip retention without deleting images',async()=>{
-  const {outputs}=await run([version(1,['latest'])],attestedIndex());
+test('SBOM-attested indexes prune expired tagged versions but retain untagged references',async()=>{
+  const {outputs}=await run([version(1,['sha-old']),version(2,['sha-a']),version(3,['sha-b']),version(4,['latest','sha-c'])],attestedIndex());
   assert.equal(outputs.safe_single_arch,'false');
-  assert.equal(outputs.tagged_ids,'');
+  assert.equal(outputs.tagged_ids,'1');
 });
 test('valid zero-layer OCI images are retained without treating missing config as valid',async()=>{
   const scratch=ociImage(); scratch.layers=[];

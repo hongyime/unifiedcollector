@@ -1621,3 +1621,4 @@ Telegram remains behind four active FloodWaits through 06:22:07 UTC. At 01:33 UT
 - 2026-11-25: Failure-log throttles use an explicit unset timestamp, not zero, so the first failure is observable regardless of host monotonic-clock age.
 - 2026-11-25: Publish an SBOM attestation for every container image; when GHCR returns an attested index, skip retention rather than deleting an unverified image shape.
 - 2026-11-25: Dependency rollout `4c12ea07` cleared all open Dependabot alerts; the local dashboard was rebuilt and health-checked from the released source.
+- 2026-11-25: SBOM-attested image indexes may prune expired tagged versions, but retention must preserve their untagged referenced manifests.

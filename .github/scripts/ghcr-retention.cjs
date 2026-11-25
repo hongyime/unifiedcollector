@@ -71,12 +71,6 @@ module.exports = async ({github, context, core}) => {
       throw new Error('An index, attestation, or unknown manifest exists; cleanup stopped.');
     }
   }
-  if (hasAttestedIndex) {
-    core.setOutput('tagged_ids', '');
-    core.setOutput('safe_single_arch', 'false');
-    core.warning('SBOM/provenance attestation detected; retention skipped without deleting images.');
-    return;
-  }
   const keep = new Set(tagged.slice(0, 3).map(v => v.id));
   for (const v of tagged) {
     if (v.metadata.container.tags.includes('latest')) keep.add(v.id);
@@ -84,6 +78,10 @@ module.exports = async ({github, context, core}) => {
   // At most 100 deletions per run; subsequent runs drain any backlog.
   const expired = tagged.filter(v => !keep.has(v.id)).reverse().slice(0, 100);
   core.setOutput('tagged_ids', expired.map(v => v.id).join(','));
-  core.setOutput('safe_single_arch', 'true');
-  core.info('Manifest guard passed. Retaining at least three tagged versions and latest.');
+  core.setOutput('safe_single_arch', hasAttestedIndex ? 'false' : 'true');
+  if (hasAttestedIndex) {
+    core.warning('SBOM attestation detected; pruning expired tagged versions only.');
+  } else {
+    core.info('Manifest guard passed. Retaining at least three tagged versions and latest.');
+  }
 };
