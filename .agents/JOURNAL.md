@@ -1618,3 +1618,4 @@ Telegram remains behind four active FloodWaits through 06:22:07 UTC. At 01:33 UT
 - 2026-11-23: Intimate-network rollout uses a fixed 500-like / 50-repost ceiling, a 2,500-follower cap, verified/business/Page exclusions, six resident browser tabs (four permanent plus two rotating), and source-specific normal pacing; do not bypass a missing engagement/profile field with an inferred value.
 - 2026-11-24: Browser rotation seeds every configured source as disabled before enabling the current pair; an absent schedule row must never default to an active extension tab.
 - 2026-11-25: Optional environment overrides referenced by shared runtime helpers belong in `.env.example`, even when their code has a safe fallback, so scoped environment verification stays complete.
+- 2026-11-25: Failure-log throttles use an explicit unset timestamp, not zero, so the first failure is observable regardless of host monotonic-clock age.

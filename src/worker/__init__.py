@@ -333,7 +333,7 @@ class WorkerService:
         self._tg_chat_id = os.getenv("NOTIFY_TELEGRAM_CHAT_ID", "")
         self._tg_thread_id = os.getenv("NOTIFY_TELEGRAM_THREAD_ID", "")
         self._last_net_notify: float = 0  # dedup network-down alerts (5 min cooldown)
-        self._last_health_report_failure_log_at: float = 0
+        self._last_health_report_failure_log_at: float | None = None
         self._health_report_failure_count: int = 0
 
     async def start(self, sources: list[str]):
@@ -1474,7 +1474,10 @@ class WorkerService:
         self._health_report_failure_count += 1
         now = time.monotonic()
         gap = float(os.getenv("COLLECTOR_HEALTH_REPORT_LOG_GAP_SECONDS", "300"))
-        if now - self._last_health_report_failure_log_at < gap:
+        if (
+            self._last_health_report_failure_log_at is not None
+            and now - self._last_health_report_failure_log_at < gap
+        ):
             return
         self._last_health_report_failure_log_at = now
         msg = (
