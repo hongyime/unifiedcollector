@@ -466,10 +466,11 @@ docker pull ghcr.io/hongyime/unifiedcollector/dashboard:latest
 ~~~
 
 CI publishes collector, dashboard, spiderfoot, and whatsapp images with latest and
-short SHA tags. Builds are linux/amd64 with provenance/SBOM attestations disabled.
-Cleanup inspects every tagged manifest first and stops on indexes, attestations,
-unknown formats, or registry errors. It retains three tagged versions plus latest,
-and three untagged versions. Package Actions admin access is required for deletion.
+short SHA tags. Builds are linux/amd64 and attach an SBOM attestation automatically.
+Cleanup inspects every tagged manifest first; an SBOM-attested image safely skips
+destructive retention, while unknown indexes, formats, or registry errors fail the
+job. Non-attested images retain three tagged versions plus latest, and three
+untagged versions. Package Actions admin access is required for deletion.
 
 Image sizes are unknown until CI builds them. Browser/native packages may exceed
 the approximate 200 MB target; compiler/header packages stay in build stages.

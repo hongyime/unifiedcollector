@@ -51,9 +51,10 @@ jobs:
           file: ${{ matrix.file }}
           target: ${{ matrix.target }}
           platforms: linux/amd64
-          # Single architecture without attestations; retention also inspects manifests.
+          # Publish an SBOM attestation for every image. Retention safely skips
+          # destructive cleanup when an attested index is present.
           provenance: false
-          sbom: false
+          sbom: true
           push: true
           tags: ${{ steps.metadata.outputs.tags }}
           labels: ${{ steps.metadata.outputs.labels }}

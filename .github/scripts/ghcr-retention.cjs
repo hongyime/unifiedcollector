@@ -4,6 +4,10 @@ const manifestTypes = new Set([
   'application/vnd.oci.image.manifest.v1+json',
   'application/vnd.docker.distribution.manifest.v2+json',
 ]);
+const indexTypes = new Set([
+  'application/vnd.oci.image.index.v1+json',
+  'application/vnd.docker.distribution.manifest.list.v2+json',
+]);
 const configTypes = new Set([
   'application/vnd.oci.image.config.v1+json',
   'application/vnd.docker.container.image.v1+json',
@@ -33,6 +37,11 @@ function isRunnableManifest(manifest) {
     Array.isArray(manifest.layers) &&
     manifest.layers.every(layer => descriptorIsKnown(layer, layerTypes));
 }
+function isAttestedIndex(manifest) {
+  return manifest && manifest.schemaVersion === 2 && indexTypes.has(manifest.mediaType) &&
+    Array.isArray(manifest.manifests) && manifest.manifests.some(descriptor =>
+      descriptor?.annotations?.['vnd.docker.reference.type'] === 'attestation-manifest');
+}
 module.exports = async ({github, context, core}) => {
   const owner = context.repo.owner;
   const pkg = process.env.PACKAGE_NAME;
@@ -43,6 +52,7 @@ module.exports = async ({github, context, core}) => {
   const versions = await github.paginate(route, {per_page: 100});
   const tagged = versions.filter(v => v.metadata?.container?.tags?.length)
     .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
+  let hasAttestedIndex = false;
   for (const version of tagged) {
     if (!/^sha256:[a-f0-9]{64}$/.test(version.name)) {
       throw new Error('Unexpected package digest; cleanup stopped.');
@@ -53,9 +63,19 @@ module.exports = async ({github, context, core}) => {
       {encoding: 'utf8', timeout: 60000, maxBuffer: 8 * 1024 * 1024}));
     // Legacy attestations have ordinary config/layers fields but in-toto layers.
     // Only known runnable image media types permit any destructive cleanup.
+    if (isAttestedIndex(manifest)) {
+      hasAttestedIndex = true;
+      continue;
+    }
     if (!isRunnableManifest(manifest)) {
       throw new Error('An index, attestation, or unknown manifest exists; cleanup stopped.');
     }
+  }
+  if (hasAttestedIndex) {
+    core.setOutput('tagged_ids', '');
+    core.setOutput('safe_single_arch', 'false');
+    core.warning('SBOM/provenance attestation detected; retention skipped without deleting images.');
+    return;
   }
   const keep = new Set(tagged.slice(0, 3).map(v => v.id));
   for (const v of tagged) {

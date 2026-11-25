@@ -14,6 +14,13 @@ function version(id, tags) {
   return {id, name:'sha256:'+String(id).padStart(64,'0'),
     created_at:new Date(2026,0,id).toISOString(), metadata:{container:{tags}}};
 }
+function attestedIndex() {
+  return {schemaVersion:2, mediaType:'application/vnd.oci.image.index.v1+json', manifests:[
+    {...descriptor('application/vnd.oci.image.manifest.v1+json'), platform:{os:'linux',architecture:'amd64'}},
+    {...descriptor('application/vnd.oci.image.manifest.v1+json'), platform:{os:'unknown',architecture:'unknown'},
+      annotations:{'vnd.docker.reference.type':'attestation-manifest'}},
+  ]};
+}
 async function run(versions, manifest=ociImage(), failure=false, accountType='User') {
   const outputs={}, calls=[], module={exports:{}};
   vm.runInNewContext(source, {module, process:{env:{PACKAGE_NAME:'project/api'}},
@@ -33,7 +40,7 @@ async function run(versions, manifest=ociImage(), failure=false, accountType='Us
     }};
   try {
     await module.exports({github,context:{repo:{owner:'example'}},
-      core:{setOutput:(key,value)=>outputs[key]=value,info(){}}});
+      core:{setOutput:(key,value)=>outputs[key]=value,info(){},warning(){}}});
   } catch (error) {
     assert.deepEqual(outputs,{},'no deletion output may be emitted before all manifests pass');
     throw error;
@@ -60,6 +67,11 @@ test('valid Docker schema-2 and OCI zstd images permit cleanup',async()=>{
 test('OCI and Docker multi-platform indexes block all cleanup',async()=>{
   for(const mediaType of ['application/vnd.oci.image.index.v1+json','application/vnd.docker.distribution.manifest.list.v2+json'])
     await assert.rejects(run([version(1,['latest'])],{schemaVersion:2,mediaType,manifests:[{}]}),/cleanup stopped/);
+});
+test('SBOM-attested indexes skip retention without deleting images',async()=>{
+  const {outputs}=await run([version(1,['latest'])],attestedIndex());
+  assert.equal(outputs.safe_single_arch,'false');
+  assert.equal(outputs.tagged_ids,'');
 });
 test('valid zero-layer OCI images are retained without treating missing config as valid',async()=>{
   const scratch=ociImage(); scratch.layers=[];
